@@ -1,0 +1,14 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+onlyBuiltDependencies:
+  - "@prisma/client"
+  - "@prisma/engines"
+  - "prisma"
+  - "esbuild"
+  - "@parcel/watcher"
+  - "unrs-resolver"
+  - "@swc/core"
+  - "bcrypt"
+  - "sharp"

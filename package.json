@@ -1,0 +1,18 @@
+{
+  "name": "societyos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SocietyOS — Residential Society Management & Intelligent Gate Access Control",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:api": "pnpm --filter @societyos/api start:dev",
+    "dev:web": "pnpm --filter @societyos/web dev",
+    "dev:simulator": "pnpm --filter @societyos/device-simulator dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "db:migrate": "pnpm --filter @societyos/api db:migrate",
+    "db:seed": "pnpm --filter @societyos/api db:seed"
+  }
+}

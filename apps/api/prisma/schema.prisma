@@ -1,0 +1,511 @@
+// SocietyOS — Prisma schema (Implementation Blueprint v1.0, Section 4)
+// UUID PKs, TIMESTAMPTZ (UTC), every society-owned row carries society_id.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum MembershipRole {
+  PLATFORM_ADMIN
+  SOCIETY_ADMIN
+  RESIDENT
+  GUARD
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+enum FlatRelationship {
+  OWNER
+  TENANT
+  FAMILY
+}
+
+enum VisitorCategory {
+  RELATIVE
+  FRIEND
+  DELIVERY
+  CAB
+  MAINTENANCE
+  OTHER
+}
+
+enum PassStatus {
+  DRAFT
+  PENDING_APPROVAL
+  ACTIVE
+  REVOKED
+  EXPIRED
+  EXHAUSTED
+}
+
+enum CredentialType {
+  PIN
+  QR
+}
+
+enum AccessPointType {
+  BOOM_BARRIER
+  SLIDING_GATE
+  DOOR_LOCK
+}
+
+enum DeviceStatus {
+  ACTIVE
+  DISABLED
+  REVOKED
+}
+
+enum CommandStatus {
+  ISSUED
+  ACKNOWLEDGED
+  EXECUTED
+  FAILED
+  EXPIRED
+}
+
+enum GateState {
+  CLOSED
+  OPENING
+  OPEN
+  CLOSING
+  STOPPED
+  FAULT
+  UNKNOWN
+}
+
+enum GateCommandType {
+  OPEN
+  CLOSE
+  STOP
+}
+
+enum AccessDecision {
+  AUTHORIZED
+  DENIED
+}
+
+enum ApprovalDecision {
+  APPROVED
+  REJECTED
+}
+
+enum DeviceEventType {
+  COMMAND_RECEIVED
+  ACK
+  STATE_CHANGED
+  SENSOR
+  HEARTBEAT
+  TAMPER
+  FAULT
+}
+
+enum NotificationChannel {
+  PUSH
+  SMS
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// ---------- Identity ----------
+
+model User {
+  id              String    @id @default(uuid()) @db.Uuid
+  name            String
+  email           String    @unique
+  phone           String?   @unique
+  passwordHash    String
+  isPlatformAdmin Boolean   @default(false)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+
+  memberships    SocietyMembership[]
+  flatMemberships ResidentFlatMembership[]
+  sessions       Session[]
+  notifications  Notification[]
+  hostedPasses   VisitorPass[] @relation("VisitorPassHost")
+}
+
+model Session {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @db.Uuid
+  refreshTokenHash String   @unique
+  userAgent        String?
+  expiresAt        DateTime @db.Timestamptz(6)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  revokedAt        DateTime? @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------- Tenancy ----------
+
+model Society {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  timezone  String   @default("Asia/Kolkata")
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  memberships SocietyMembership[]
+  buildings   Building[]
+  accessPoints AccessPoint[]
+  devices     Device[]
+  passes      VisitorPass[]
+  visitors    Visitor[]
+  accessEvents AccessEvent[]
+}
+
+model SocietyMembership {
+  id        String           @id @default(uuid()) @db.Uuid
+  societyId String           @db.Uuid
+  userId    String           @db.Uuid
+  role      MembershipRole
+  status    MembershipStatus @default(ACTIVE)
+  createdAt DateTime         @default(now()) @db.Timestamptz(6)
+
+  society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([societyId, userId])
+  @@index([userId])
+}
+
+// ---------- Residential ----------
+
+model Building {
+  id        String   @id @default(uuid()) @db.Uuid
+  societyId String   @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  flats   Flat[]
+
+  @@index([societyId])
+}
+
+model Flat {
+  id         String   @id @default(uuid()) @db.Uuid
+  buildingId String   @db.Uuid
+  flatNumber String
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  residents   ResidentFlatMembership[]
+  passes      VisitorPass[]
+
+  @@unique([buildingId, flatNumber])
+}
+
+model ResidentFlatMembership {
+  id           String          @id @default(uuid()) @db.Uuid
+  flatId       String          @db.Uuid
+  userId       String          @db.Uuid
+  relationship FlatRelationship
+  createdAt    DateTime        @default(now()) @db.Timestamptz(6)
+
+  flat Flat @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([flatId, userId])
+  @@index([userId])
+}
+
+// ---------- Visitors ----------
+
+model Visitor {
+  id        String          @id @default(uuid()) @db.Uuid
+  societyId String          @db.Uuid
+  name      String
+  phone     String?
+  category  VisitorCategory
+  createdAt DateTime        @default(now()) @db.Timestamptz(6)
+
+  society Society       @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  passes  VisitorPass[]
+
+  @@index([societyId])
+}
+
+model VisitorPass {
+  id          String          @id @default(uuid()) @db.Uuid
+  societyId   String          @db.Uuid
+  flatId      String          @db.Uuid
+  hostUserId  String          @db.Uuid
+  visitorId   String          @db.Uuid
+  status      PassStatus      @default(DRAFT)
+  category    VisitorCategory
+  validFrom   DateTime        @db.Timestamptz(6)
+  validUntil  DateTime        @db.Timestamptz(6)
+  maxUses     Int             @default(1)
+  usedCount   Int             @default(0)
+  revokedAt   DateTime?       @db.Timestamptz(6)
+  revokedBy   String?         @db.Uuid
+  createdAt   DateTime        @default(now()) @db.Timestamptz(6)
+
+  society     Society                    @relation(fields: [societyId], references: [id])
+  flat        Flat                       @relation(fields: [flatId], references: [id])
+  visitor     Visitor                    @relation(fields: [visitorId], references: [id])
+  host        User                       @relation("VisitorPassHost", fields: [hostUserId], references: [id])
+  credentials VisitorPassCredential[]
+  accessPoints VisitorPassAccessPoint[]
+  uses        VisitorPassUse[]
+  approvals   VisitorApproval[]
+  accessEvents AccessEvent[]
+
+  @@index([societyId, status])
+  @@index([flatId])
+}
+
+model VisitorPassCredential {
+  id             String         @id @default(uuid()) @db.Uuid
+  passId         String         @db.Uuid
+  type           CredentialType
+  credentialHash String         @unique
+  keyId          String
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+
+  pass VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
+
+  @@unique([passId, type])
+}
+
+model VisitorPassAccessPoint {
+  id            String @id @default(uuid()) @db.Uuid
+  passId        String @db.Uuid
+  accessPointId String @db.Uuid
+
+  pass        VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
+  accessPoint AccessPoint @relation(fields: [accessPointId], references: [id])
+
+  @@unique([passId, accessPointId])
+}
+
+model VisitorApproval {
+  id           String           @id @default(uuid()) @db.Uuid
+  passId       String           @db.Uuid
+  decidedById  String?          @db.Uuid
+  decision     ApprovalDecision
+  reason       String?
+  createdAt    DateTime         @default(now()) @db.Timestamptz(6)
+
+  pass VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
+}
+
+model VisitorPassUse {
+  id            String   @id @default(uuid()) @db.Uuid
+  passId        String   @db.Uuid
+  redemptionId  String   @unique
+  deviceId      String?  @db.Uuid
+  accessPointId String   @db.Uuid
+  usedAt        DateTime @default(now()) @db.Timestamptz(6)
+
+  pass VisitorPass @relation(fields: [passId], references: [id])
+
+  @@index([passId])
+}
+
+// ---------- Devices ----------
+
+model AccessPoint {
+  id        String          @id @default(uuid()) @db.Uuid
+  societyId String          @db.Uuid
+  name      String
+  type      AccessPointType
+  location  String?
+  createdAt DateTime        @default(now()) @db.Timestamptz(6)
+
+  society    Society                    @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  devices    DeviceAccessPoint[]
+  passes     VisitorPassAccessPoint[]
+  accessEvents AccessEvent[]
+  gateCommands GateCommand[]
+
+  @@index([societyId])
+}
+
+model Device {
+  id         String       @id @default(uuid()) @db.Uuid
+  societyId  String       @db.Uuid
+  deviceUid  String       @unique
+  name       String
+  status     DeviceStatus @default(ACTIVE)
+  firmware   String?
+  lastSeenAt DateTime?    @db.Timestamptz(6)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(6)
+
+  society    Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  credentials DeviceCredential[]
+  accessPoints DeviceAccessPoint[]
+  commands   GateCommand[]
+  events     DeviceEvent[]
+  healthLogs DeviceHealthLog[]
+
+  @@index([societyId])
+}
+
+model DeviceCredential {
+  id        String    @id @default(uuid()) @db.Uuid
+  deviceId  String    @db.Uuid
+  tokenHash String    @unique
+  keyId     String
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  revokedAt DateTime? @db.Timestamptz(6)
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+}
+
+model DeviceAccessPoint {
+  id            String @id @default(uuid()) @db.Uuid
+  deviceId      String @db.Uuid
+  accessPointId String @db.Uuid
+
+  device      Device      @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  accessPoint AccessPoint @relation(fields: [accessPointId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, accessPointId])
+}
+
+model GateCommand {
+  id            String          @id @default(uuid()) @db.Uuid
+  deviceId      String          @db.Uuid
+  accessPointId String          @db.Uuid
+  type          GateCommandType
+  nonce         String
+  status        CommandStatus   @default(ISSUED)
+  issuedAt      DateTime        @default(now()) @db.Timestamptz(6)
+  expiresAt     DateTime        @db.Timestamptz(6)
+  ackAt         DateTime?       @db.Timestamptz(6)
+  executedAt    DateTime?       @db.Timestamptz(6)
+  gateStateAtExec GateState?
+
+  device      Device      @relation(fields: [deviceId], references: [id])
+  accessPoint AccessPoint @relation(fields: [accessPointId], references: [id])
+
+  @@index([deviceId, issuedAt])
+}
+
+model DeviceEvent {
+  id            String          @id @default(uuid()) @db.Uuid
+  deviceId      String          @db.Uuid
+  accessPointId String?         @db.Uuid
+  type          DeviceEventType
+  sequence      Int?
+  payload       Json
+  occurredAt    DateTime        @default(now()) @db.Timestamptz(6)
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, occurredAt])
+}
+
+// ---------- Security ----------
+
+model AccessEvent {
+  id            String         @id @default(uuid()) @db.Uuid
+  societyId     String         @db.Uuid
+  accessPointId String?        @db.Uuid
+  deviceId      String?        @db.Uuid
+  passId        String?        @db.Uuid
+  decision      AccessDecision
+  reasonCode    String
+  credentialType CredentialType?
+  source        String         @default("DEVICE")
+  requestId     String?
+  meta          Json?
+  requestedAt   DateTime       @default(now()) @db.Timestamptz(6)
+
+  society     Society      @relation(fields: [societyId], references: [id])
+  accessPoint AccessPoint? @relation(fields: [accessPointId], references: [id])
+  pass        VisitorPass? @relation(fields: [passId], references: [id])
+
+  @@index([societyId, requestedAt])
+  @@index([accessPointId, requestedAt])
+}
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  societyId   String?  @db.Uuid
+  actorUserId String?  @db.Uuid
+  actorRole   String?
+  action      String
+  entityType  String
+  entityId    String?
+  meta        Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([societyId, createdAt])
+}
+
+model SecurityAlert {
+  id        String    @id @default(uuid()) @db.Uuid
+  societyId String?   @db.Uuid
+  severity  String
+  type      String
+  detail    Json?
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  resolvedAt DateTime? @db.Timestamptz(6)
+
+  @@index([societyId, createdAt])
+}
+
+model DeviceHealthLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId   String   @db.Uuid
+  online     Boolean
+  uptimeS    Int?
+  rssi       Int?
+  meta       Json?
+  recordedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, recordedAt])
+}
+
+// ---------- Notifications (transactional outbox) ----------
+
+model Notification {
+  id        String             @id @default(uuid()) @db.Uuid
+  societyId String?            @db.Uuid
+  userId    String?            @db.Uuid
+  channel   NotificationChannel
+  template  String
+  payload   Json
+  status    NotificationStatus @default(PENDING)
+  createdAt DateTime           @default(now()) @db.Timestamptz(6)
+  sentAt    DateTime?          @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([status, createdAt])
+}
+
+// ---------- Idempotency ----------
+
+model IdempotencyRecord {
+  id           String   @id @default(uuid()) @db.Uuid
+  key          String   @unique
+  endpoint     String
+  responseBody Json
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+}
