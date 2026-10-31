@@ -158,7 +158,7 @@ test('society operations lifecycle: notice board circulars, maintenance tickets,
 
   // Verify invoice appears in table
   await expect(page.getByText(invoiceTitle)).toBeVisible();
-  await expect(page.getByText('₹5,200')).toBeVisible();
+  await expect(page.getByText('₹5,200').first()).toBeVisible();
 
   await logout(page);
 
