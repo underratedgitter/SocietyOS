@@ -34,4 +34,8 @@ export class AppException extends HttpException {
   static unprocessable(code: string, message: string, details?: unknown) {
     return new AppException(code, message, HttpStatus.UNPROCESSABLE_ENTITY, details);
   }
+
+  static tooMany(message = 'Too many requests. Try again later.', code = 'RATE_LIMIT_EXCEEDED') {
+    return new AppException(code, message, HttpStatus.TOO_MANY_REQUESTS);
+  }
 }

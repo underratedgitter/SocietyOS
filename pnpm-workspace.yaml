@@ -2,13 +2,14 @@ packages:
   - "apps/*"
   - "packages/*"
 
-onlyBuiltDependencies:
-  - "@prisma/client"
-  - "@prisma/engines"
-  - "prisma"
-  - "esbuild"
-  - "@parcel/watcher"
-  - "unrs-resolver"
-  - "@swc/core"
-  - "bcrypt"
-  - "sharp"
+allowBuilds:
+  '@parcel/watcher': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  '@scarf/scarf': true
+  esbuild: true
+  prisma: true
+  unrs-resolver: true
+
+minimumReleaseAgeExclude:
+  - lucide-react@1.65.0

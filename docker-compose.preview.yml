@@ -1,0 +1,13 @@
+# Local container smoke-test overlay. Do not use this for a public deployment.
+#   docker compose -f docker-compose.prod.yml -f docker-compose.preview.yml up -d --build
+services:
+  api:
+    environment:
+      NODE_ENV: development
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      COOKIE_SECURE: "false"
+      CORS_ORIGINS: http://localhost
+    # Only the preview overlay ships TypeScript sources so the demo seed can run.
+    volumes:
+      - ./apps/api/src:/app/apps/api/src:ro

@@ -9,6 +9,6 @@ import { AuthModule } from '../auth/auth.module';
   imports: [AuthModule],
   controllers: [VisitorPassesController],
   providers: [VisitorPassesService, CredentialsService, IdempotencyService],
-  exports: [VisitorPassesService, CredentialsService],
+  exports: [VisitorPassesService, CredentialsService, IdempotencyService],
 })
 export class VisitorsModule {}

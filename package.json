@@ -2,6 +2,7 @@
   "name": "societyos",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@12.15.0",
   "description": "SocietyOS — Residential Society Management & Intelligent Gate Access Control",
   "engines": {
     "node": ">=22"
@@ -12,7 +13,10 @@
     "dev:simulator": "pnpm --filter @societyos/device-simulator dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
     "db:migrate": "pnpm --filter @societyos/api db:migrate",
+    "db:deploy": "pnpm --filter @societyos/api db:deploy",
+    "db:reset": "pnpm --filter @societyos/api db:reset",
     "db:seed": "pnpm --filter @societyos/api db:seed"
   }
 }

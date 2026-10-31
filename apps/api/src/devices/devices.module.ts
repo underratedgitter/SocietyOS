@@ -5,11 +5,14 @@ import { DevicesService } from './devices.service';
 import { MqttService } from './mqtt.service';
 import { DeviceAuthGuard } from './device-auth.guard';
 import { AuthModule } from '../auth/auth.module';
+import { GateAdapterFactory } from './adapters/gate-adapter.factory';
+import { BiometricsService } from './biometrics.service';
 
 @Module({
   imports: [AuthModule],
   controllers: [DevicesController, DeviceApiController],
-  providers: [DevicesService, MqttService, DeviceAuthGuard],
-  exports: [MqttService],
+  providers: [DevicesService, MqttService, DeviceAuthGuard, GateAdapterFactory, BiometricsService],
+  exports: [MqttService, GateAdapterFactory, BiometricsService],
 })
 export class DevicesModule {}
+

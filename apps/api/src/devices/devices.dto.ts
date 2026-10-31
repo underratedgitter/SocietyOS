@@ -1,4 +1,15 @@
-import { IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  ArrayMinSize,
+  ArrayUnique,
+  IsArray,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class CreateAccessPointDto {
   @IsString()
@@ -24,6 +35,7 @@ export class ProvisionDeviceDto {
   @IsString()
   @MinLength(3)
   @MaxLength(80)
+  @Matches(/^[A-Za-z0-9._:-]+$/, { message: 'deviceUid contains unsupported characters' })
   deviceUid!: string;
 
   @IsOptional()
@@ -32,6 +44,47 @@ export class ProvisionDeviceDto {
   firmware?: string;
 
   @IsArray()
-  @IsString({ each: true })
+  @ArrayMinSize(1)
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
   accessPointIds!: string[];
 }
+
+export class EmergencyOverrideDto {
+  @IsString()
+  @MinLength(3)
+  @MaxLength(250)
+  reason!: string;
+}
+
+export class BiometricEnrollRequestDto {
+  @IsUUID()
+  userId!: string;
+
+  @IsIn(['FINGERPRINT', 'FACE'])
+  type!: 'FINGERPRINT' | 'FACE';
+
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  templateHash!: string;
+
+  @IsString()
+  @MinLength(2)
+  @MaxLength(64)
+  algorithm!: string;
+}
+
+export class BiometricVerifyRequestDto {
+  @IsUUID()
+  accessPointId!: string;
+
+  @IsIn(['FINGERPRINT', 'FACE'])
+  type!: 'FINGERPRINT' | 'FACE';
+
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  templateHash!: string;
+}
+

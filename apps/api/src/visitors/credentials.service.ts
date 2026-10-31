@@ -1,37 +1,36 @@
 import { createHmac, randomBytes, randomInt } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { CredentialType } from '@prisma/client';
+import { getEnv } from '../config';
 
 export interface GeneratedCredential {
   type: CredentialType;
-  plaintext: string; // returned to the creator once; only the HMAC is stored
+  plaintext: string;
 }
 
 /**
- * Credentials are verified via keyed HMAC (versioned key id) — plaintext PINs
- * and QR tokens are never stored or logged (blueprint §8).
+ * Credentials are verified through a keyed HMAC and are never stored or logged
+ * in plaintext. The key id is persisted so future rotations can be planned.
  */
 @Injectable()
 export class CredentialsService {
-  private keyId = process.env.CREDENTIAL_HMAC_KEY_ID || 'v1';
-  private key = process.env.CREDENTIAL_HMAC_KEY || 'dev-only-change-me-32-bytes-minimum!!';
-
   hash(credential: string): string {
-    return createHmac('sha256', `${this.keyId}:${this.key}`).update(credential).digest('hex');
+    const env = getEnv();
+    return createHmac('sha256', `${env.credentialHmacKeyId}:${env.credentialHmacKey}`)
+      .update(credential)
+      .digest('hex');
   }
 
-  /** 6-digit numeric PIN with limited lifetime — not strong auth alone (rate limited upstream). */
   generatePin(): GeneratedCredential {
     const pin = String(randomInt(0, 1_000_000)).padStart(6, '0');
     return { type: CredentialType.PIN, plaintext: pin };
   }
 
-  /** High-entropy opaque QR token; no personal data embedded. */
   generateQrToken(): GeneratedCredential {
     return { type: CredentialType.QR, plaintext: randomBytes(24).toString('base64url') };
   }
 
   get keyVersion(): string {
-    return this.keyId;
+    return getEnv().credentialHmacKeyId;
   }
 }

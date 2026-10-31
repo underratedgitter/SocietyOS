@@ -129,8 +129,9 @@ model User {
   name            String
   email           String    @unique
   phone           String?   @unique
-  passwordHash    String
-  isPlatformAdmin Boolean   @default(false)
+  passwordHash       String
+  isPlatformAdmin    Boolean   @default(false)
+  mustChangePassword Boolean   @default(false)
   createdAt       DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
 
@@ -153,6 +154,7 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expiresAt])
 }
 
 // ---------- Tenancy ----------
@@ -162,6 +164,7 @@ model Society {
   name      String
   slug      String   @unique
   timezone  String   @default("Asia/Kolkata")
+  settings  Json     @default("{}")
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
@@ -221,6 +224,7 @@ model ResidentFlatMembership {
   flatId       String          @db.Uuid
   userId       String          @db.Uuid
   relationship FlatRelationship
+  endedAt      DateTime?       @db.Timestamptz(6)
   createdAt    DateTime        @default(now()) @db.Timestamptz(6)
 
   flat Flat @relation(fields: [flatId], references: [id], onDelete: Cascade)
@@ -366,9 +370,10 @@ model Device {
 model DeviceCredential {
   id        String    @id @default(uuid()) @db.Uuid
   deviceId  String    @db.Uuid
-  tokenHash String    @unique
-  keyId     String
-  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  tokenHash        String    @unique
+  commandSecretEnc String?
+  keyId            String
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
   revokedAt DateTime? @db.Timestamptz(6)
 
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
@@ -397,11 +402,13 @@ model GateCommand {
   ackAt         DateTime?       @db.Timestamptz(6)
   executedAt    DateTime?       @db.Timestamptz(6)
   gateStateAtExec GateState?
+  signedPayload   Json?
 
   device      Device      @relation(fields: [deviceId], references: [id])
   accessPoint AccessPoint @relation(fields: [accessPointId], references: [id])
 
   @@index([deviceId, issuedAt])
+  @@index([status, expiresAt])
 }
 
 model DeviceEvent {
@@ -491,13 +498,16 @@ model Notification {
   channel   NotificationChannel
   template  String
   payload   Json
-  status    NotificationStatus @default(PENDING)
-  createdAt DateTime           @default(now()) @db.Timestamptz(6)
-  sentAt    DateTime?          @db.Timestamptz(6)
+  status      NotificationStatus @default(PENDING)
+  attempts    Int                @default(0)
+  lastError   String?
+  nextAttemptAt DateTime?        @db.Timestamptz(6)
+  createdAt   DateTime           @default(now()) @db.Timestamptz(6)
+  sentAt      DateTime?          @db.Timestamptz(6)
 
   user User? @relation(fields: [userId], references: [id])
 
-  @@index([status, createdAt])
+  @@index([status, nextAttemptAt, createdAt])
 }
 
 // ---------- Idempotency ----------
@@ -507,5 +517,9 @@ model IdempotencyRecord {
   key          String   @unique
   endpoint     String
   responseBody Json
+  requestHash  String?
+  expiresAt    DateTime? @db.Timestamptz(6)
   createdAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([expiresAt])
 }

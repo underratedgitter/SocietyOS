@@ -1,9 +1,20 @@
 import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { IsBoolean, IsInt, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 import { DeviceAuthGuard } from './device-auth.guard';
 import { AuthedRequest } from '../auth/jwt-auth.guard';
 import { PrismaService } from '../common/prisma.service';
+import { AppException } from '../common/app.exception';
+
+const DEVICE_EVENT_TYPES = [
+  'COMMAND_RECEIVED',
+  'ACK',
+  'STATE_CHANGED',
+  'SENSOR',
+  'HEARTBEAT',
+  'TAMPER',
+  'FAULT',
+] as const;
 
 export class DeviceHealthDto {
   @IsBoolean()
@@ -11,10 +22,14 @@ export class DeviceHealthDto {
 
   @IsOptional()
   @IsInt()
+  @Min(0)
+  @Max(10_000_000)
   uptimeS?: number;
 
   @IsOptional()
   @IsInt()
+  @Min(-150)
+  @Max(0)
   rssi?: number;
 
   @IsOptional()
@@ -23,26 +38,22 @@ export class DeviceHealthDto {
 }
 
 export class DeviceEventDto {
-  @IsString()
-  @MaxLength(40)
-  type!: string;
+  @IsIn(DEVICE_EVENT_TYPES)
+  type!: (typeof DEVICE_EVENT_TYPES)[number];
 
   @IsOptional()
-  @IsString()
+  @IsUUID()
   accessPointId?: string;
 
   @IsOptional()
   @IsInt()
+  @Min(0)
   sequence?: number;
 
   @IsObject()
   payload!: Record<string, unknown>;
 }
 
-/**
- * Device-authenticated endpoints (per-device bearer token).
- * Identity and tenant scope derive from the token, never from the body.
- */
 @ApiTags('device-api')
 @Controller('device-api')
 @UseGuards(DeviceAuthGuard)
@@ -59,13 +70,19 @@ export class DeviceApiController {
         name: true,
         societyId: true,
         status: true,
-        accessPoints: { include: { accessPoint: { select: { id: true, name: true, type: true } } } },
+        firmware: true,
+        lastSeenAt: true,
+        accessPoints: {
+          include: { accessPoint: { select: { id: true, name: true, type: true, location: true } } },
+        },
       },
     });
   }
 
   @Post('health')
   async health(@Req() req: AuthedRequest, @Body() dto: DeviceHealthDto) {
+    const payloadSize = JSON.stringify(dto.meta ?? {}).length;
+    if (payloadSize > 4096) throw AppException.unprocessable('PAYLOAD_TOO_LARGE', 'Health metadata is too large');
     await this.prisma.$transaction([
       this.prisma.deviceHealthLog.create({
         data: {
@@ -76,29 +93,43 @@ export class DeviceApiController {
           meta: (dto.meta ?? {}) as never,
         },
       }),
-      this.prisma.device.update({ where: { id: req.device!.id }, data: { lastSeenAt: new Date() } }),
+      this.prisma.device.update({
+        where: { id: req.device!.id },
+        data: { lastSeenAt: new Date() },
+      }),
     ]);
-    return { ok: true };
+    return { ok: true, serverTime: new Date().toISOString() };
   }
 
   @Post('events')
   async events(@Req() req: AuthedRequest, @Body() dto: DeviceEventDto) {
-    if (dto.accessPointId) {
-      // Scope check: the access point must belong to this device.
-      const link = await this.prisma.deviceAccessPoint.findUnique({
-        where: { deviceId_accessPointId: { deviceId: req.device!.id, accessPointId: dto.accessPointId } },
-      });
-      if (!link) return { ok: false, error: 'WRONG_ACCESS_POINT' };
+    if (JSON.stringify(dto.payload).length > 8192) {
+      throw AppException.unprocessable('PAYLOAD_TOO_LARGE', 'Event payload is too large');
     }
-    await this.prisma.deviceEvent.create({
+    if (dto.accessPointId) {
+      const link = await this.prisma.deviceAccessPoint.findUnique({
+        where: {
+          deviceId_accessPointId: {
+            deviceId: req.device!.id,
+            accessPointId: dto.accessPointId,
+          },
+        },
+      });
+      if (!link) throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point is not assigned to this device');
+    }
+    const event = await this.prisma.deviceEvent.create({
       data: {
         deviceId: req.device!.id,
         accessPointId: dto.accessPointId,
-        type: dto.type as never,
+        type: dto.type,
         sequence: dto.sequence,
         payload: dto.payload as never,
       },
     });
-    return { ok: true };
+    await this.prisma.device.update({
+      where: { id: req.device!.id },
+      data: { lastSeenAt: new Date() },
+    });
+    return { ok: true, eventId: event.id };
   }
 }

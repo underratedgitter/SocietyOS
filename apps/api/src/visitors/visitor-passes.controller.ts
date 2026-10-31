@@ -1,11 +1,30 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { FlatScopeGuard } from '../auth/flat-scope.guard';
-import { AuthedRequest } from '../auth/jwt-auth.guard';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { JwtUser } from '../auth/jwt-auth.guard';
+import { paramStr } from '../common/params';
+import { AppException } from '../common/app.exception';
 import { VisitorPassesService } from './visitor-passes.service';
 import { IdempotencyService } from './idempotency.service';
-import { CreateVisitorPassDto, DecidePassDto } from './visitor-passes.dto';
+import {
+  CreateVisitorPassDto,
+  DecidePassDto,
+  ListPassesQueryDto,
+  RevokePassDto,
+} from './visitor-passes.dto';
+
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{8,128}$/;
 
 @ApiTags('visitors')
 @ApiBearerAuth()
@@ -19,51 +38,59 @@ export class VisitorPassesController {
 
   @Post('visitor-passes')
   async create(
-    @Req() req: AuthedRequest,
+    @CurrentUser() user: JwtUser,
     @Body() dto: CreateVisitorPassDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    if (idempotencyKey) {
-      const cached = await this.idempotency.get(`visitor-passes:${idempotencyKey}`);
-      if (cached) return cached;
+    if (!idempotencyKey) return this.passes.create(user, dto);
+    if (!IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
+      throw new AppException(
+        'INVALID_IDEMPOTENCY_KEY',
+        'Idempotency-Key must be 8-128 URL-safe characters',
+        400,
+      );
     }
-    const result = await this.passes.create(req, dto);
-    if (idempotencyKey) {
-      await this.idempotency.save(`visitor-passes:${idempotencyKey}`, 'visitor-passes', result);
-    }
+    const key = `visitor-passes:${user.sub}:${idempotencyKey}`;
+    const fingerprint = this.idempotency.fingerprint(dto);
+    const cached = await this.idempotency.get(key, 'visitor-passes.create', fingerprint);
+    if (cached) return cached;
+    const result = await this.passes.create(user, dto);
+    await this.idempotency.save(key, 'visitor-passes.create', fingerprint, result);
     return result;
   }
 
   @Get('visitor-passes')
-  list(
-    @Req() req: AuthedRequest,
-    @Query('societyId') societyId?: string,
-    @Query('status') status?: string,
-    @Query('flatId') flatId?: string,
-  ) {
-    return this.passes.list(req, { societyId, status, flatId });
+  list(@CurrentUser() user: JwtUser, @Query() query: ListPassesQueryDto) {
+    return this.passes.list(user, query);
   }
 
   @Get('visitor-passes/:passId')
-  getOne(@Req() req: AuthedRequest, @Param('passId') passId: string) {
-    return this.passes.getAuthorized(req, passId);
+  getOne(@CurrentUser() user: JwtUser, @Param('passId') passId: string) {
+    return this.passes.getAuthorized(user, paramStr(passId));
   }
 
   @Post('visitor-passes/:passId/approve')
   @HttpCode(200)
-  approve(@Req() req: AuthedRequest, @Param('passId') passId: string, @Body() dto: DecidePassDto) {
-    return this.passes.approve(req, passId, dto);
+  approve(
+    @CurrentUser() user: JwtUser,
+    @Param('passId') passId: string,
+    @Body() dto: DecidePassDto,
+  ) {
+    return this.passes.approve(user, paramStr(passId), dto);
   }
 
   @Post('visitor-passes/:passId/revoke')
   @HttpCode(200)
-  revoke(@Req() req: AuthedRequest, @Param('passId') passId: string) {
-    return this.passes.revoke(req, passId);
+  revoke(
+    @CurrentUser() user: JwtUser,
+    @Param('passId') passId: string,
+    @Body() dto: RevokePassDto,
+  ) {
+    return this.passes.revoke(user, paramStr(passId), dto.reason);
   }
 
   @Get('flats/:flatId/access-points')
-  @UseGuards(FlatScopeGuard)
-  accessPointsForFlat(@Req() req: AuthedRequest, @Param('flatId') flatId: string) {
-    return this.passes.accessPointsForFlat(req, flatId);
+  accessPointsForFlat(@CurrentUser() user: JwtUser, @Param('flatId') flatId: string) {
+    return this.passes.accessPointsForFlat(user, paramStr(flatId));
   }
 }

@@ -1,6 +1,7 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../common/prisma.service';
+import { AppException } from '../common/app.exception';
 import { paramStr } from '../common/params';
 import { AuthedRequest } from './jwt-auth.guard';
 import { ROLES_KEY } from './require-roles.decorator';
@@ -18,22 +19,22 @@ export class FlatScopeGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<AuthedRequest>();
-    if (!req.user) throw new UnauthorizedException('UNAUTHENTICATED');
+    if (!req.user) throw AppException.unauthorized('UNAUTHENTICATED', 'Authentication required');
     const flatId = paramStr(req.params.flatId);
-    if (!flatId) throw new ForbiddenException('MISSING_FLAT_SCOPE');
+    if (!flatId) throw AppException.forbidden('MISSING_FLAT_SCOPE', 'Flat scope is required');
 
     const flat = await this.prisma.flat.findUnique({
       where: { id: flatId },
       include: { building: { select: { societyId: true } } },
     });
-    if (!flat) throw new ForbiddenException('FLAT_NOT_FOUND');
+    if (!flat) throw AppException.forbidden('FLAT_NOT_FOUND', 'Flat not found in your society');
 
     const societyId = flat.building.societyId;
     const membership = await this.prisma.societyMembership.findUnique({
       where: { societyId_userId: { societyId, userId: req.user.sub } },
     });
     if (!membership || membership.status !== 'ACTIVE') {
-      throw new ForbiddenException('NOT_A_MEMBER');
+      throw AppException.forbidden('NOT_A_MEMBER', 'You are not an active member of this society');
     }
     req.membership = { societyId, role: membership.role };
     req.flat = { id: flat.id, societyId };
@@ -44,13 +45,13 @@ export class FlatScopeGuard implements CanActivate {
     ]);
     if (roles) {
       if (!roles.includes(membership.role)) {
-        throw new ForbiddenException('FORBIDDEN_ROLE');
+        throw AppException.forbidden('FORBIDDEN_ROLE', 'Your role cannot perform this action');
       }
     } else if (membership.role === 'RESIDENT') {
-      const link = await this.prisma.residentFlatMembership.findUnique({
-        where: { flatId_userId: { flatId: flat.id, userId: req.user.sub } },
+      const link = await this.prisma.residentFlatMembership.findFirst({
+        where: { flatId: flat.id, userId: req.user.sub, endedAt: null },
       });
-      if (!link) throw new ForbiddenException('NOT_A_FLAT_RESIDENT');
+      if (!link) throw AppException.forbidden('NOT_A_FLAT_RESIDENT', 'You are not a resident of this flat');
     }
     return true;
   }

@@ -1,42 +1,41 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
-import { createHash } from 'crypto';
+import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
+import { AppException } from '../common/app.exception';
 import { AuthedRequest } from '../auth/jwt-auth.guard';
+import { sha256 } from '../common/crypto.util';
 
-/**
- * Devices authenticate with a per-device bearer token issued once at
- * provisioning. Identity, tenant and access-point scope are derived from the
- * stored record — never from the request body (blueprint §5).
- */
 @Injectable()
 export class DeviceAuthGuard implements CanActivate {
   constructor(private readonly prisma: PrismaService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<AuthedRequest>();
-    const header = req.headers['authorization'];
-    if (!header || !header.startsWith('Bearer ')) {
-      throw new UnauthorizedException('DEVICE_UNAUTHENTICATED');
+    const request = context.switchToHttp().getRequest<AuthedRequest>();
+    const header = request.headers.authorization;
+    if (!header?.startsWith('Bearer ')) {
+      throw AppException.unauthorized('DEVICE_UNAUTHENTICATED', 'Device authentication required');
     }
-    const token = header.slice(7);
-    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const token = header.slice(7).trim();
+    if (token.length < 20 || token.length > 256) {
+      throw AppException.unauthorized('DEVICE_UNAUTHENTICATED', 'Device authentication required');
+    }
 
     const credential = await this.prisma.deviceCredential.findUnique({
-      where: { tokenHash },
+      where: { tokenHash: sha256(token) },
       include: { device: true },
     });
     if (!credential || credential.revokedAt) {
-      throw new UnauthorizedException('DEVICE_UNAUTHENTICATED');
+      throw AppException.unauthorized('DEVICE_UNAUTHENTICATED', 'Device authentication required');
     }
     if (credential.device.status !== 'ACTIVE') {
-      throw new UnauthorizedException('DEVICE_DISABLED', 'Device is disabled or revoked');
+      throw AppException.unauthorized('DEVICE_DISABLED', 'This device is disabled');
     }
-    req.device = {
+    request.device = {
       id: credential.device.id,
       deviceUid: credential.device.deviceUid,
       societyId: credential.device.societyId,
       name: credential.device.name,
     };
+    request.authSource = 'bearer';
     return true;
   }
 }
