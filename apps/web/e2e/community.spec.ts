@@ -138,5 +138,47 @@ test('society operations lifecycle: notice board circulars, maintenance tickets,
   await expect(page.getByText('Community Facility Bookings')).toBeVisible();
   await expect(page.getByText('CONFIRMED').first()).toBeVisible();
 
+  // 7. Admin Maintenance Billing & Invoicing
+  await page.getByRole('button', { name: 'Maintenance billing' }).click();
+  await expect(page.getByText('Society Maintenance Billing & Ledger')).toBeVisible();
+
+  const invoiceTitle = `Standard Society Dues ${Date.now()}`;
+  await page.getByRole('button', { name: 'Generate Invoice' }).click();
+  await expect(page.getByRole('dialog', { name: 'Generate Maintenance Invoice' })).toBeVisible();
+
+  // Select flat, title, amount, dueDate
+  const flatSelect = page.locator('select').first();
+  if (await flatSelect.isVisible()) {
+    await flatSelect.selectOption({ index: 1 });
+  }
+  await page.fill('input[placeholder*="Monthly Maintenance"]', invoiceTitle);
+  await page.fill('input[type="number"]', '5200');
+  await page.fill('input[type="date"]', '2026-11-25');
+  await page.getByRole('button', { name: 'Issue Invoice' }).click();
+
+  // Verify invoice appears in table
+  await expect(page.getByText(invoiceTitle)).toBeVisible();
+  await expect(page.getByText('₹5,200')).toBeVisible();
+
+  await logout(page);
+
+  // 8. Resident logs in and settles the invoice
+  await login(page, RESIDENT);
+  await expect(page).toHaveURL(/\/resident$/);
+
+  await page.getByRole('button', { name: 'Dues & Bills' }).click();
+  await expect(page.getByText('Maintenance & Society Dues')).toBeVisible();
+
+  // Find any unsettled invoice or our newly generated invoice
+  const settleBtn = page.getByRole('button', { name: 'Settle Bill' }).first();
+  if (await settleBtn.isVisible()) {
+    await settleBtn.click();
+    await expect(page.getByRole('dialog', { name: /Settle Bill/ })).toBeVisible();
+    await page.getByRole('button', { name: 'Confirm Payment' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByText('PAID').first()).toBeVisible();
+  }
+
   expect(pageErrors).toEqual([]);
 });
+
