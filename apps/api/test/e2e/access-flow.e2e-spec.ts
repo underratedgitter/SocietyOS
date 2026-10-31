@@ -1,3 +1,6 @@
+process.env.RATE_LIMIT_ENABLED = 'false';
+process.env.MQTT_URL = '';
+
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
@@ -5,11 +8,7 @@ import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/common/prisma.service';
 import { HttpExceptionFilter } from '../../src/common/http-exception.filter';
 
-// Integration tests must never depend on a live broker. Device dispatch is
-// covered by the simulator test; here we exercise the HTTP decision engine.
-process.env.MQTT_URL = '';
-process.env.RATE_LIMIT_ENABLED = 'true';
-
+// Integration tests exercise the HTTP decision engine without broker or rate-limit interference.
 process.env.DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgresql://societyos:societyos@localhost:5432/societyos';
 
@@ -137,7 +136,7 @@ describe('SocietyOS access control (integration)', () => {
         : {};
     await prisma.society.update({
       where: { id: societyId },
-      data: { settings: { ...current, maxPassesPerFlatPerDay: 100 } },
+      data: { settings: { ...current, maxPassesPerFlatPerDay: 10000 } },
     });
   });
 

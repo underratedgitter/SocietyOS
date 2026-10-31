@@ -17,11 +17,20 @@ POSTGRES_USER="${POSTGRES_USER:-societyos}"
 POSTGRES_DB="${POSTGRES_DB:-societyos}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+OUTPUT="$BACKUP_DIR/societyos-$STAMP.dump"
+
+if [ "${DRY_RUN:-}" = "true" ] || [ "${DRY_RUN:-}" = "1" ]; then
+  echo "[DRY-RUN] Target backup directory: $BACKUP_DIR"
+  echo "[DRY-RUN] Target compose file: $COMPOSE_FILE"
+  echo "[DRY-RUN] Target database: $POSTGRES_DB as user $POSTGRES_USER"
+  echo "[DRY-RUN] Output file: $OUTPUT"
+  echo "[DRY-RUN] Retention cleanup: older than $RETENTION_DAYS days"
+  exit 0
+fi
 
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
-OUTPUT="$BACKUP_DIR/societyos-$STAMP.dump"
 docker compose -f "$COMPOSE_FILE" exec -T postgres \
   pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner > "$OUTPUT"
 chmod 600 "$OUTPUT"

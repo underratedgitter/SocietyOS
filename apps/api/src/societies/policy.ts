@@ -40,7 +40,7 @@ export function visitorPolicy(settings: unknown): VisitorPolicy {
     maxPassesPerFlatPerDay: clampInt(
       raw.maxPassesPerFlatPerDay,
       1,
-      100,
+      1000,
       DEFAULT_VISITOR_POLICY.maxPassesPerFlatPerDay,
     ),
   };

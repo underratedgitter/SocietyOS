@@ -253,9 +253,42 @@ describe('Device lifecycle and controller-outage handling (integration)', () => 
     await deviceCall('get', '/api/v1/device-api/me').expect(200);
   });
 
+  it('synchronizes offline buffered events and records them in the cloud ledger', async () => {
+    const res = await deviceCall('post', '/api/v1/device-api/sync-offline')
+      .send({
+        events: [
+          {
+            sequence: 101,
+            accessPointId,
+            credentialType: 'PIN',
+            decision: 'AUTHORIZED',
+            reasonCode: 'VALID_OFFLINE_CACHE',
+            timestamp: new Date().toISOString(),
+          },
+          {
+            sequence: 102,
+            accessPointId,
+            credentialType: 'BIOMETRIC',
+            decision: 'DENIED',
+            reasonCode: 'PASS_EXPIRED',
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      })
+      .expect(201);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.syncedCount).toBe(2);
+
+    const accessEvents = await prisma.accessEvent.findMany({
+      where: { deviceId, source: 'OFFLINE_EDGE_CONTROLLER' },
+    });
+    expect(accessEvents.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('does not expose device control or health to residents', async () => {
     await resident.get(`/api/v1/devices/${deviceId}/health`).expect(403);
     await resident.post(`/api/v1/devices/${deviceId}/disable`).expect(403);
     await resident.post(`/api/v1/devices/${deviceId}/rotate-credential`).expect(403);
   });
 });
+

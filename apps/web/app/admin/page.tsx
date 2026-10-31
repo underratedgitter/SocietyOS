@@ -3,20 +3,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Ban,
+  Bell,
   Building2,
   Check,
   Cpu,
+  CreditCard,
   LayoutDashboard,
   Plus,
   RefreshCw,
   RotateCw,
   ScrollText,
+  Calendar,
   Settings2,
   Shield,
   Ticket,
   Users,
+  Wrench,
   X,
 } from 'lucide-react';
+import {
+  AdminAnnouncementsManager,
+  AdminHelpdeskManager,
+  AdminAmenitiesManager,
+  AdminInvoicesManager,
+} from '@/components/community-tabs';
 import { apiRequest } from '@/lib/api';
 import type {
   AccessEvent,
@@ -71,6 +81,10 @@ import { SocietySettings } from '@/components/admin/settings';
 const NAV: NavItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'passes', label: 'Visitor passes', icon: Ticket },
+  { id: 'announcements', label: 'Circulars', icon: Bell },
+  { id: 'helpdesk', label: 'Helpdesk', icon: Wrench },
+  { id: 'amenities', label: 'Amenities', icon: Calendar },
+  { id: 'billing', label: 'Maintenance billing', icon: CreditCard },
   { id: 'residents', label: 'Residents', icon: Users },
   { id: 'staff', label: 'Security team', icon: Shield },
   { id: 'buildings', label: 'Buildings & flats', icon: Building2 },
@@ -367,6 +381,14 @@ function AdminWorkspace() {
                 ? 'Live gate state, visitor throughput and the work waiting on your desk.'
                 : tab === 'passes'
                   ? 'Issue, approve and revoke visitor credentials. Credentials are shown once and stored only as keyed hashes.'
+                  : tab === 'announcements'
+                    ? 'Publish community circulars, maintenance outages and emergency alerts.'
+                    : tab === 'helpdesk'
+                      ? 'Review and assign resident service tickets and facility repairs.'
+                      : tab === 'amenities'
+                        ? 'Reserve and manage community clubhouses, courts, and shared halls.'
+                        : tab === 'billing'
+                          ? 'Generate society dues, monitor collections, and track unit invoices.'
                   : tab === 'residents'
                     ? 'The people who call this society home, and the flats they are linked to.'
                     : tab === 'staff'
@@ -456,6 +478,14 @@ function AdminWorkspace() {
             timezone={timezone}
             onNewPass={() => setCreateModal('pass')}
           />
+        ) : tab === 'announcements' ? (
+          <AdminAnnouncementsManager societyId={societyId} />
+        ) : tab === 'helpdesk' ? (
+          <AdminHelpdeskManager societyId={societyId} />
+        ) : tab === 'amenities' ? (
+          <AdminAmenitiesManager societyId={societyId} />
+        ) : tab === 'billing' ? (
+          <AdminInvoicesManager societyId={societyId} flats={flatOptions} />
         ) : tab === 'residents' ? (
           <ResidentsTab
             residents={data.residents}

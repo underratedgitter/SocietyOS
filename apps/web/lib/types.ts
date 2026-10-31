@@ -245,3 +245,58 @@ export interface DeviceProvisionResult {
   device: Device;
   credentials: DeviceCredentials;
 }
+
+
+export interface Announcement {
+  id: string;
+  societyId: string;
+  title: string;
+  content: string;
+  category: 'GENERAL' | 'EMERGENCY' | 'MAINTENANCE' | 'EVENT';
+  pinned: boolean;
+  createdAt: string;
+  author: { name: string } | string;
+}
+
+export interface MaintenanceTicket {
+  id: string;
+  societyId: string;
+  flat: { id: string; flatNumber: string; building: string | { name: string } };
+  category: 'PLUMBING' | 'ELECTRICAL' | 'LIFT' | 'COMMON_AREA' | 'CARPENTRY';
+  priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED';
+  title: string;
+  description: string;
+  assignedStaff?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AmenityBooking {
+  id: string;
+  societyId: string;
+  amenityName: string;
+  flat: { id: string; flatNumber: string; building: string | { name: string } };
+  bookedBy: string | { name: string };
+  slotStart: string;
+  slotEnd: string;
+  guestCount: number;
+  status: 'CONFIRMED' | 'CANCELLED';
+  createdAt: string;
+}
+
+export interface MaintenanceInvoice {
+  id: string;
+  societyId: string;
+  flat: { id: string; flatNumber: string; building: string | { name: string } };
+  title: string;
+  description?: string | null;
+  amount: number;
+  dueDate: string;
+  status: 'PENDING' | 'PAID' | 'OVERDUE' | 'CANCELLED';
+  paidAt?: string | null;
+  paidBy?: { id: string; name: string; email: string } | null;
+  paymentReference?: string | null;
+  createdAt: string;
+}
+

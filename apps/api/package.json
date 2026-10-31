@@ -13,8 +13,8 @@
     "db:generate": "prisma generate",
     "db:seed": "prisma db seed",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "jest --config test/jest.config.json --runInBand",
-    "test:e2e": "jest --config test/jest-e2e.config.json --runInBand"
+    "test": "jest --config test/jest.config.json --runInBand --forceExit",
+    "test:e2e": "jest --config test/jest-e2e.config.json --runInBand --forceExit"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

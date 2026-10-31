@@ -15,6 +15,10 @@ export class AppException extends HttpException {
     super({ code, message, details }, status);
   }
 
+  static badRequest(code: string, message: string, details?: unknown) {
+    return new AppException(code, message, HttpStatus.BAD_REQUEST, details);
+  }
+
   static unauthorized(code = 'UNAUTHENTICATED', message = 'Authentication required') {
     return new AppException(code, message, HttpStatus.UNAUTHORIZED);
   }

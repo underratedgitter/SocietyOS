@@ -84,7 +84,8 @@ export function loadEnv(): AppEnv {
   }
   const isProduction = nodeEnv === 'production';
   const webUrl = httpUrl('WEB_URL', 'http://localhost:3000');
-  if (isProduction && !webUrl.startsWith('https://')) {
+  const isLocal = webUrl.includes('localhost') || webUrl.includes('127.0.0.1');
+  if (isProduction && !webUrl.startsWith('https://') && !isLocal) {
     fail('WEB_URL must use HTTPS in production');
   }
 

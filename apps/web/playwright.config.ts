@@ -10,8 +10,8 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['github'], ['list']] : [['list']],
   use: {
-    baseURL: process.env.WEB_URL || 'http://localhost:3000',
-    trace: 'retain-on-failure',
+    baseURL: process.env.WEB_URL || 'http://localhost',
+    trace: 'off',
     screenshot: 'only-on-failure',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],

@@ -5,10 +5,19 @@ set -eu
 #   MQTT_API_PASSWORD='...' MQTT_DEVICE_PASSWORD='...' \
 #     sh infrastructure/scripts/generate-mqtt-credentials.sh
 
+if [ "${DRY_RUN:-}" = "true" ] || [ "${DRY_RUN:-}" = "1" ]; then
+  DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../docker/mosquitto" && pwd)"
+  echo "[DRY-RUN] Target mosquitto directory: $DIR"
+  echo "[DRY-RUN] Would generate ACL configuration at $DIR/acl"
+  echo "[DRY-RUN] Would run eclipse-mosquitto:2 container to generate hashed password file $DIR/passwd"
+  exit 0
+fi
+
 : "${MQTT_API_PASSWORD:?Set MQTT_API_PASSWORD}"
 : "${MQTT_DEVICE_PASSWORD:?Set MQTT_DEVICE_PASSWORD}"
 
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../docker/mosquitto" && pwd)"
+
 mkdir -p "$DIR"
 
 cat > "$DIR/acl" <<'ACL'

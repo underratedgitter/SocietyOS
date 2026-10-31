@@ -140,6 +140,10 @@ model User {
   sessions       Session[]
   notifications  Notification[]
   hostedPasses   VisitorPass[] @relation("VisitorPassHost")
+  announcements   Announcement[]
+  createdTickets MaintenanceTicket[] @relation("TicketAuthor")
+  amenityBookings AmenityBooking[]   @relation("AmenityBooker")
+  paidInvoices    MaintenanceInvoice[] @relation("InvoicePayer")
 }
 
 model Session {
@@ -175,6 +179,10 @@ model Society {
   passes      VisitorPass[]
   visitors    Visitor[]
   accessEvents AccessEvent[]
+  announcements Announcement[]
+  maintenanceTickets MaintenanceTicket[]
+  amenityBookings AmenityBooking[]
+  maintenanceInvoices MaintenanceInvoice[]
 }
 
 model SocietyMembership {
@@ -215,6 +223,9 @@ model Flat {
   building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   residents   ResidentFlatMembership[]
   passes      VisitorPass[]
+  maintenanceTickets MaintenanceTicket[]
+  amenityBookings AmenityBooking[]
+  maintenanceInvoices MaintenanceInvoice[]
 
   @@unique([buildingId, flatNumber])
 }
@@ -523,3 +534,130 @@ model IdempotencyRecord {
 
   @@index([expiresAt])
 }
+
+// ---------- Stage 6 Community Life ----------
+
+enum AnnouncementCategory {
+  GENERAL
+  EMERGENCY
+  MAINTENANCE
+  EVENT
+}
+
+enum TicketCategory {
+  PLUMBING
+  ELECTRICAL
+  LIFT
+  COMMON_AREA
+  CARPENTRY
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Announcement {
+  id        String               @id @default(uuid()) @db.Uuid
+  societyId String               @map("society_id") @db.Uuid
+  society   Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  title     String
+  content   String
+  category  AnnouncementCategory @default(GENERAL)
+  pinned    Boolean              @default(false)
+  authorId  String               @map("author_id") @db.Uuid
+  author    User                 @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([societyId, pinned, createdAt])
+  @@map("announcements")
+}
+
+model MaintenanceTicket {
+  id            String         @id @default(uuid()) @db.Uuid
+  societyId     String         @map("society_id") @db.Uuid
+  society       Society        @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  flatId        String         @map("flat_id") @db.Uuid
+  flat          Flat           @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  createdById   String         @map("created_by_id") @db.Uuid
+  createdBy     User           @relation("TicketAuthor", fields: [createdById], references: [id], onDelete: Cascade)
+  category      TicketCategory
+  priority      TicketPriority @default(MEDIUM)
+  status        TicketStatus   @default(OPEN)
+  title         String
+  description   String
+  assignedStaff String?        @map("assigned_staff")
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([societyId, status, createdAt])
+  @@index([flatId])
+  @@map("maintenance_tickets")
+}
+
+model AmenityBooking {
+  id          String        @id @default(uuid()) @db.Uuid
+  societyId   String        @map("society_id") @db.Uuid
+  society     Society       @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  amenityName String        @map("amenity_name")
+  flatId      String        @map("flat_id") @db.Uuid
+  flat        Flat          @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  bookedById  String        @map("booked_by_id") @db.Uuid
+  bookedBy    User          @relation("AmenityBooker", fields: [bookedById], references: [id], onDelete: Cascade)
+  slotStart   DateTime      @map("slot_start") @db.Timestamptz(6)
+  slotEnd     DateTime      @map("slot_end") @db.Timestamptz(6)
+  guestCount  Int           @default(1) @map("guest_count")
+  status      BookingStatus @default(CONFIRMED)
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([societyId, amenityName, slotStart])
+  @@index([flatId])
+  @@map("amenity_bookings")
+}
+
+model MaintenanceInvoice {
+  id               String        @id @default(uuid()) @db.Uuid
+  societyId        String        @map("society_id") @db.Uuid
+  society          Society       @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  flatId           String        @map("flat_id") @db.Uuid
+  flat             Flat          @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  title            String
+  description      String?
+  amount           Float
+  dueDate          DateTime      @map("due_date") @db.Timestamptz(6)
+  status           InvoiceStatus @default(PENDING)
+  paidAt           DateTime?     @map("paid_at") @db.Timestamptz(6)
+  paidById         String?       @map("paid_by_id") @db.Uuid
+  paidBy           User?         @relation("InvoicePayer", fields: [paidById], references: [id], onDelete: SetNull)
+  paymentReference String?       @map("payment_reference")
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([societyId, status, dueDate])
+  @@index([flatId])
+  @@map("maintenance_invoices")
+}
+

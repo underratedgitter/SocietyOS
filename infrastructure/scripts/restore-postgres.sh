@@ -24,6 +24,16 @@ POSTGRES_DB="${POSTGRES_DB:-societyos}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 DUMP="$1"
 
+if [ "${DRY_RUN:-}" = "true" ] || [ "${DRY_RUN:-}" = "1" ]; then
+  echo "[DRY-RUN] Target dump file: $DUMP"
+  echo "[DRY-RUN] Target database: $POSTGRES_DB as user $POSTGRES_USER"
+  echo "[DRY-RUN] Target compose file: $COMPOSE_FILE"
+  echo "[DRY-RUN] Would execute: docker compose -f $COMPOSE_FILE stop api web"
+  echo "[DRY-RUN] Would execute: pg_restore -U $POSTGRES_USER -d $POSTGRES_DB --clean --if-exists --no-owner < $DUMP"
+  echo "[DRY-RUN] Would execute: docker compose -f $COMPOSE_FILE up -d api web"
+  exit 0
+fi
+
 docker compose -f "$COMPOSE_FILE" stop api web >/dev/null 2>&1 || true
 docker compose -f "$COMPOSE_FILE" exec -T postgres \
   pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner < "$DUMP"

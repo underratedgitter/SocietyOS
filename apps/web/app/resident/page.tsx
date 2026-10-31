@@ -4,15 +4,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Ban,
+  Bell,
+  Calendar,
   CalendarPlus,
   Check,
   Clock,
+  CreditCard,
   Home,
   KeyRound,
   RefreshCw,
   ShieldCheck,
   Ticket,
   Users,
+  Wrench,
 } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
 import type {
@@ -35,9 +39,19 @@ import { Protected } from '@/components/protected';
 import { AppShell, type NavItem } from '@/components/app-shell';
 import { Badge, CredentialReveal, EmptyState, Modal, PassBadge, Toast, errorMessage } from '@/components/ui';
 import { PassForm } from '@/components/pass-form';
+import {
+  ResidentNoticeBoard,
+  ResidentMaintenance,
+  ResidentAmenities,
+  ResidentInvoicesView,
+} from '@/components/community-tabs';
 
 const NAV: NavItem[] = [
   { id: 'visitors', label: 'Visitors', icon: Ticket },
+  { id: 'announcements', label: 'Notice board', icon: Bell },
+  { id: 'tickets', label: 'Maintenance', icon: Wrench },
+  { id: 'amenities', label: 'Amenities', icon: Calendar },
+  { id: 'billing', label: 'Dues & Bills', icon: CreditCard },
   { id: 'home', label: 'My home', icon: Home },
 ];
 
@@ -199,12 +213,30 @@ function ResidentWorkspace() {
               {flat ? `${flat.building.name} · Flat ${flat.flatNumber}` : society?.name}
             </div>
             <h1 className="page-title">
-              {tab === 'visitors' ? 'Visitors' : 'My home'}
+              {tab === 'visitors'
+                ? 'Visitors'
+                : tab === 'announcements'
+                  ? 'Notice board'
+                  : tab === 'tickets'
+                    ? 'Maintenance'
+                    : tab === 'amenities'
+                      ? 'Amenities'
+                      : tab === 'billing'
+                        ? 'Dues & Invoices'
+                        : 'My home'}
             </h1>
             <p className="page-sub">
               {tab === 'visitors'
                 ? 'Invite guests with a time-limited PIN or QR pass. Every entry is checked against the pass at the gate.'
-                : 'Your household, hosted flats and the gates a visitor pass can open.'}
+                : tab === 'announcements'
+                  ? 'Official notices, emergency circulars, and community updates from administration.'
+                  : tab === 'tickets'
+                    ? 'Raise service requests for plumbing, electrical, carpentry, or common areas.'
+                    : tab === 'amenities'
+                      ? 'Reserve clubhouses, tennis courts, and recreational amenities.'
+                      : tab === 'billing'
+                        ? 'View society maintenance charges, past receipts, and settle outstanding balances.'
+                        : 'Your household, hosted flats and the gates a visitor pass can open.'}
             </p>
           </div>
           <div className="head-actions">
@@ -266,6 +298,14 @@ function ResidentWorkspace() {
             household={household}
             accessPoints={accessPoints}
           />
+        ) : tab === 'announcements' ? (
+          <ResidentNoticeBoard societyId={societyId} />
+        ) : tab === 'tickets' ? (
+          <ResidentMaintenance societyId={societyId} flatId={flatId} />
+        ) : tab === 'amenities' ? (
+          <ResidentAmenities societyId={societyId} flatId={flatId} />
+        ) : tab === 'billing' ? (
+          <ResidentInvoicesView societyId={societyId} />
         ) : (
           <>
             <div className="stat-rail">

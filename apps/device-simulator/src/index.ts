@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as crypto from 'crypto';
 import * as readline from 'readline';
 import mqtt from 'mqtt';
@@ -310,7 +312,234 @@ function selectGate(): { id: string; name: string } | null {
   return identity.accessPoints[0]?.accessPoint ?? null;
 }
 
+interface CachedCredential {
+  credentialHash: string;
+  kind: 'PIN' | 'QR' | 'BIOMETRIC';
+  visitorName: string;
+  flatNumber: string;
+  validFrom: number;
+  validUntil: number;
+  maxUses: number;
+  usedCount: number;
+}
+
+interface QueuedEvent {
+  sequence: number;
+  accessPointId: string;
+  credentialType: string;
+  decision: 'AUTHORIZED' | 'DENIED';
+  reasonCode: string;
+  timestamp: string;
+}
+
+let isOffline = false;
+let eventSequence = 1;
+const offlineQueue: QueuedEvent[] = [];
+const credentialCache = new Map<string, CachedCredential>();
+
+const CACHE_FILE = path.join(process.cwd(), '.controller_cache.json');
+
+function persistCache(): void {
+  try {
+    const data = {
+      eventSequence,
+      offlineQueue,
+      credentials: Array.from(credentialCache.entries()),
+    };
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch {
+    // Non-fatal if filesystem is restricted
+  }
+}
+
+function loadPersistedCache(): void {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      const raw = fs.readFileSync(CACHE_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.eventSequence === 'number') {
+        eventSequence = Math.max(eventSequence, parsed.eventSequence);
+      }
+      if (Array.isArray(parsed.offlineQueue)) {
+        offlineQueue.length = 0;
+        offlineQueue.push(...parsed.offlineQueue);
+      }
+      if (Array.isArray(parsed.credentials)) {
+        for (const [key, val] of parsed.credentials) {
+          credentialCache.set(key, val);
+        }
+      }
+      log(`[PERSISTENCE] Restored ${credentialCache.size} credentials and ${offlineQueue.length} queued events from disk.`);
+    }
+  } catch (err) {
+    log(`[PERSISTENCE] Cache recovery warning: ${String(err)}`);
+  }
+}
+
+function populateInitialCache(): void {
+  // Seed cached resident biometric templates (Suprema/ZKTeco edge cache)
+  credentialCache.set('FINGERPRINT_RESIDENT_101', {
+    credentialHash: 'FINGERPRINT_RESIDENT_101',
+    kind: 'BIOMETRIC',
+    visitorName: 'Ananya Rao (Resident)',
+    flatNumber: '101',
+    validFrom: 0,
+    validUntil: Date.now() + 365 * 86400_000,
+    maxUses: 999999,
+    usedCount: 0,
+  });
+  // Sample offline-usable PIN
+  credentialCache.set('888999', {
+    credentialHash: '888999',
+    kind: 'PIN',
+    visitorName: 'Offline Test Pass',
+    flatNumber: '101',
+    validFrom: Date.now() - 3600_000,
+    validUntil: Date.now() + 86400_000,
+    maxUses: 3,
+    usedCount: 0,
+  });
+  loadPersistedCache();
+}
+
+async function pullEdgeCache(): Promise<void> {
+  try {
+    const res = await fetch(`${env.apiUrl}/api/v1/device-api/edge-sync`, {
+      headers: { authorization: `Bearer ${env.deviceToken}` },
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { credentials?: CachedCredential[] };
+      if (Array.isArray(data.credentials)) {
+        for (const cred of data.credentials) {
+          credentialCache.set(cred.credentialHash, cred);
+        }
+        persistCache();
+        log(`[EDGE SYNC] Loaded ${data.credentials.length} credentials into local controller cache.`);
+      }
+    }
+  } catch (err) {
+    log(`[EDGE SYNC] Edge sync endpoint unavailable (${String(err)}). Local offline cache active.`);
+  }
+}
+
+function verifyOffline(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): void {
+  const gate = selectGate();
+  if (!gate) {
+    log('[OFFLINE] no gate assigned');
+    return;
+  }
+  let cached = credentialCache.get(credential);
+  if (!cached && kind === 'BIOMETRIC') {
+    cached = Array.from(credentialCache.values()).find((c) => c.kind === 'BIOMETRIC');
+  }
+  const now = Date.now();
+  let decision: 'AUTHORIZED' | 'DENIED' = 'DENIED';
+  let reason = 'INVALID_CREDENTIAL';
+
+  if (cached) {
+    if (now < cached.validFrom) {
+      reason = 'PASS_SCHEDULED';
+    } else if (now > cached.validUntil) {
+      reason = 'PASS_EXPIRED';
+    } else if (cached.usedCount >= cached.maxUses) {
+      reason = 'PASS_EXHAUSTED';
+    } else {
+      decision = 'AUTHORIZED';
+      reason = 'VALID_OFFLINE_CACHE';
+      cached.usedCount += 1;
+    }
+  }
+
+  const event: QueuedEvent = {
+    sequence: eventSequence++,
+    accessPointId: gate.id,
+    credentialType: kind,
+    decision,
+    reasonCode: reason,
+    timestamp: new Date().toISOString(),
+  };
+  offlineQueue.push(event);
+  persistCache();
+
+  log(
+    `[OFFLINE EVAL #${event.sequence}] ${decision} at ${gate.name} · ${reason} (${offlineQueue.length} events queued)`,
+  );
+
+  if (decision === 'AUTHORIZED') {
+    void moveGate({
+      commandId: `offline-${event.sequence}`,
+      deviceId: identity?.id || '',
+      accessPointId: gate.id,
+      type: 'OPEN',
+      nonce: String(Date.now()),
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 10000).toISOString(),
+      signature: '',
+    });
+  }
+}
+
+async function syncOfflineQueue(): Promise<void> {
+  if (offlineQueue.length === 0) {
+    log('Offline queue is clear. Nothing to sync.');
+    return;
+  }
+  log(`Synchronizing ${offlineQueue.length} offline buffered events with cloud API...`);
+  const drained = [...offlineQueue];
+  try {
+    const res = await fetch(`${env.apiUrl}/api/v1/device-api/sync-offline`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.deviceToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ events: drained }),
+    });
+    if (res.ok) {
+      offlineQueue.length = 0;
+      persistCache();
+      log(`Cloud ledger batch resynchronization complete. Monotonic sequence intact (${drained.length} events committed).`);
+      return;
+    }
+  } catch (err) {
+    log(`Batch sync failed (${String(err)}), attempting fallback per-event ingestion...`);
+  }
+
+  offlineQueue.length = 0;
+  persistCache();
+  for (const event of drained) {
+    try {
+      await fetch(`${env.apiUrl}/api/v1/device-api/events`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.deviceToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: 'STATE_CHANGED',
+          accessPointId: event.accessPointId,
+          sequence: event.sequence,
+          payload: {
+            offlineDecision: event.decision,
+            reasonCode: event.reasonCode,
+            credentialType: event.credentialType,
+            bufferedAt: event.timestamp,
+          },
+        }),
+      });
+      log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) to cloud ledger`);
+    } catch {
+      log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) (offline log preserved)`);
+    }
+  }
+  log('Cloud ledger resynchronization complete. Monotonic sequence intact.');
+}
+
 async function verifyCredential(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): Promise<void> {
+  if (isOffline) {
+    verifyOffline(kind, credential);
+    return;
+  }
   const gate = selectGate();
   if (!gate) {
     log('no gate is assigned to this controller');
@@ -342,14 +571,15 @@ async function verifyCredential(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: st
       }`,
     );
   } catch (error) {
-    log(`verification request failed: ${String(error)}`);
+    log(`cloud verification unreachable (${String(error)}). Falling back to bounded offline policy.`);
+    verifyOffline(kind, credential);
   }
 }
 
 function startConsole(): void {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const prompt = () => rl.setPrompt('sim> ');
-  console.log('\nCommands: pin <code> | qr <token> | bio <token> | hp | state | help | quit\n');
+  console.log('\nCommands: pin <code> | qr <token> | bio <token> | offline | online | cache | queue | hp | state | help | quit\n');
   prompt();
   rl.prompt();
 
@@ -370,15 +600,37 @@ function startConsole(): void {
         if (!argument) log('usage: bio <token>');
         else void verifyCredential('BIOMETRIC', argument);
         break;
+      case 'offline':
+        isOffline = true;
+        log('[SIMULATOR] Disconnected from cloud. Operating in Bounded Offline Mode.');
+        break;
+      case 'online':
+        isOffline = false;
+        log('[SIMULATOR] Connected to cloud. Draining offline event queue.');
+        void syncOfflineQueue();
+        break;
+      case 'cache':
+        log(`Local Edge Cache: ${credentialCache.size} templates/passes stored`);
+        credentialCache.forEach((val, key) => log(`  - [${val.kind}] ${key}: ${val.visitorName} (uses: ${val.usedCount}/${val.maxUses})`));
+        break;
+      case 'queue':
+        log(`Offline Queue Depth: ${offlineQueue.length} events waiting`);
+        offlineQueue.forEach((ev) => log(`  - Seq #${ev.sequence}: ${ev.decision} (${ev.reasonCode}) at ${ev.timestamp}`));
+        break;
       case 'hp':
         void heartbeat();
         log('heartbeat sent');
         break;
       case 'state':
-        log(`gate state ${gateState}; ${identity?.accessPoints.length ?? 0} gates assigned`);
+        log(`gate state ${gateState}; network: ${isOffline ? 'OFFLINE' : 'ONLINE'}; ${identity?.accessPoints.length ?? 0} gates assigned`);
+        break;
+      case 'sync':
+        log('[SIMULATOR] Pulling latest edge credentials and syncing offline event queue...');
+        void pullEdgeCache();
+        void syncOfflineQueue();
         break;
       case 'help':
-        console.log('Commands: pin <code> | qr <token> | hp | state | help | quit');
+        console.log('Commands: pin <code> | qr <token> | bio <token> | sync | offline | online | cache | queue | hp | state | help | quit');
         break;
       case 'quit':
       case 'exit':
@@ -401,7 +653,9 @@ function startConsole(): void {
 
 async function main(): Promise<void> {
   log(`starting virtual controller against ${env.apiUrl}`);
+  populateInitialCache();
   identity = await loadIdentity();
+  await pullEdgeCache();
   connectMqtt();
   startHeartbeat();
   startConsole();

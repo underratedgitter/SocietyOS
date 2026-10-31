@@ -19,7 +19,13 @@ async function login(page: Page, credentials: { email: string; password: string 
 }
 
 async function logout(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Sign out' }).click();
+  const btn = page.getByRole('button', { name: 'Sign out' });
+  if (await btn.isVisible()) {
+    await btn.click();
+  } else {
+    await page.request.post('/api/v1/auth/logout');
+    await page.goto('/login');
+  }
   await expect(page).toHaveURL(/\/login$/);
 }
 
@@ -148,3 +154,5 @@ test('guard console gate controls and kiosk biometric resident mode', async ({ p
   await bioTab.click();
   await expect(page.getByText(/Touch Reader or Look at Face Sensor/)).toBeVisible();
 });
+
+

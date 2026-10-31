@@ -436,6 +436,126 @@ async function main() {
     accessPointIds: [mainGateB.id],
   });
 
+  // Stage 6 — Demo Announcements, Tickets, and Amenity Bookings
+  await prisma.announcement.deleteMany({ where: { societyId: societyA.id } });
+  await prisma.announcement.createMany({
+    data: [
+      {
+        societyId: societyA.id,
+        authorId: adminA.id,
+        title: 'Annual General Body Meeting (AGM) 2026',
+        content: 'The Annual General Body Meeting is scheduled for Sunday at 10:00 AM in the Clubhouse. All residents and owners are requested to attend.',
+        category: 'EVENT',
+        pinned: true,
+      },
+      {
+        societyId: societyA.id,
+        authorId: adminA.id,
+        title: 'Scheduled Water Tank Cleaning & Maintenance',
+        content: 'Water supply to Wing A and Wing B will be restricted from 1:00 PM to 4:00 PM this Tuesday due to overhead tank disinfection.',
+        category: 'MAINTENANCE',
+        pinned: false,
+      },
+      {
+        societyId: societyA.id,
+        authorId: adminA.id,
+        title: 'Emergency Gate Intercom Upgrade Complete',
+        content: 'The new biometric gate readers and barrier controllers are active at Main Gate and North Gate. Residents can share passes via WhatsApp.',
+        category: 'GENERAL',
+        pinned: false,
+      },
+    ],
+  });
+
+  await prisma.maintenanceTicket.deleteMany({ where: { societyId: societyA.id } });
+  await prisma.maintenanceTicket.createMany({
+    data: [
+      {
+        societyId: societyA.id,
+        flatId: residentsA[0].flat.id,
+        createdById: residentsA[0].user.id,
+        category: 'PLUMBING',
+        priority: 'HIGH',
+        status: 'OPEN',
+        title: 'Master bathroom pressure issue',
+        description: 'Low water pressure in shower mixer since yesterday evening.',
+      },
+      {
+        societyId: societyA.id,
+        flatId: residentsA[1].flat.id,
+        createdById: residentsA[1].user.id,
+        category: 'ELECTRICAL',
+        priority: 'MEDIUM',
+        status: 'IN_PROGRESS',
+        assignedStaff: 'Ravi Sharma (Electrician)',
+        title: 'Corridor balcony lamp blinking',
+        description: 'The entrance fixture seems to have a loose connection.',
+      },
+    ],
+  });
+
+  await prisma.amenityBooking.deleteMany({ where: { societyId: societyA.id } });
+  await prisma.amenityBooking.createMany({
+    data: [
+      {
+        societyId: societyA.id,
+        flatId: residentsA[0].flat.id,
+        bookedById: residentsA[0].user.id,
+        amenityName: 'Clubhouse Hall',
+        slotStart: new Date(now.getTime() + 24 * 3600 * 1000),
+        slotEnd: new Date(now.getTime() + 28 * 3600 * 1000),
+        guestCount: 20,
+        status: 'CONFIRMED',
+      },
+      {
+        societyId: societyA.id,
+        flatId: residentsA[1].flat.id,
+        bookedById: residentsA[1].user.id,
+        amenityName: 'Tennis Court',
+        slotStart: new Date(now.getTime() + 48 * 3600 * 1000),
+        slotEnd: new Date(now.getTime() + 50 * 3600 * 1000),
+        guestCount: 4,
+        status: 'CONFIRMED',
+      },
+    ],
+  });
+
+  await prisma.maintenanceInvoice.deleteMany({ where: { societyId: societyA.id } });
+  await prisma.maintenanceInvoice.createMany({
+    data: [
+      {
+        societyId: societyA.id,
+        flatId: residentsA[0].flat.id,
+        title: 'Monthly Society Maintenance - November 2026',
+        description: 'Standard maintenance charge including water, lift, security and clubhouse upkeep.',
+        amount: 4500,
+        dueDate: new Date(now.getTime() + 15 * 86400000),
+        status: 'PENDING',
+      },
+      {
+        societyId: societyA.id,
+        flatId: residentsA[1].flat.id,
+        title: 'Monthly Society Maintenance - October 2026',
+        description: 'Standard maintenance charge including water, lift, security and clubhouse upkeep.',
+        amount: 4500,
+        dueDate: new Date(now.getTime() - 10 * 86400000),
+        status: 'PAID',
+        paidAt: new Date(now.getTime() - 12 * 86400000),
+        paidById: residentsA[1].user.id,
+        paymentReference: 'UPI-774921-HDFC',
+      },
+      {
+        societyId: societyA.id,
+        flatId: residentsA[2].flat.id,
+        title: 'Sinking Fund Annual Contribution 2026',
+        description: 'Annual reserve fund contribution for major infrastructure repairs and repainting.',
+        amount: 12000,
+        dueDate: new Date(now.getTime() - 5 * 86400000),
+        status: 'PENDING',
+      },
+    ],
+  });
+
   await prisma.auditLog.create({
     data: {
       societyId: societyA.id,
