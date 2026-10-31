@@ -176,6 +176,114 @@ describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
     }
   });
 
+  it('prevents double-settlement under concurrent invoice payment race conditions', async () => {
+    let invoiceState: any = {
+      id: 'inv-race-1',
+      societyId: 'soc-alpha',
+      flatId: 'flat-101',
+      status: 'PENDING',
+      amount: 4500,
+      dueDate: new Date(Date.now() + 86400_000),
+      title: 'Monthly Maintenance',
+      paidAt: null,
+      paidById: null,
+      paymentReference: null,
+      flat: {
+        id: 'flat-101',
+        flatNumber: '101',
+        building: { name: 'Tower A', societyId: 'soc-alpha' },
+      },
+    };
+
+    let lock = Promise.resolve();
+    const acquireLock = async () => {
+      let release: () => void = () => {};
+      const nextLock = new Promise<void>((res) => {
+        release = res;
+      });
+      const current = lock;
+      lock = current.then(() => nextLock);
+      await current;
+      return release;
+    };
+
+    const mockPrisma = {
+      $transaction: jest.fn().mockImplementation(async (cb) => {
+        const release = await acquireLock();
+        try {
+          return await cb(mockPrisma);
+        } finally {
+          release();
+        }
+      }),
+      $executeRawUnsafe: jest.fn().mockResolvedValue(1),
+      maintenanceInvoice: {
+        findUnique: jest.fn().mockImplementation(async ({ where }) => {
+          await new Promise((r) => setTimeout(r, Math.random() * 3 + 1));
+          return invoiceState.id === where.id ? { ...invoiceState } : null;
+        }),
+        update: jest.fn().mockImplementation(async ({ where, data }) => {
+          invoiceState = {
+            ...invoiceState,
+            ...data,
+          };
+          return {
+            ...invoiceState,
+            paidBy: { id: data.paidById, name: 'Res User', email: 'res@alpha.com' },
+          };
+        }),
+      },
+      auditLog: {
+        create: jest.fn().mockResolvedValue({}),
+      },
+      residentFlatMembership: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'rfm-101' }),
+      },
+    };
+
+    const authz = new AuthzService(mockPrisma as any);
+    const audit = new AuditService(mockPrisma as any);
+    const communityService = new CommunityService(mockPrisma as any, authz, audit);
+
+    const residentUser: JwtUser = {
+      sub: 'user-res-1',
+      email: 'res@alpha.com',
+      name: 'Res User',
+      isPlatformAdmin: false,
+      mustChangePassword: false,
+    };
+
+    const CONCURRENCY = 25;
+    const promises: Promise<any>[] = [];
+
+    for (let i = 0; i < CONCURRENCY; i++) {
+      promises.push(
+        communityService.recordPayment(residentUser, 'RESIDENT', 'soc-alpha', 'inv-race-1', {
+          paidAt: new Date().toISOString(),
+          paymentReference: `REF-${i + 1}`,
+        }),
+      );
+    }
+
+    const settled = await Promise.allSettled(promises);
+    const fulfilled = settled.filter((s) => s.status === 'fulfilled');
+    const rejected = settled.filter((s) => s.status === 'rejected');
+
+    // Exactly 1 payment succeeds, 24 rejected with INVOICE_ALREADY_PAID
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(CONCURRENCY - 1);
+    expect(invoiceState.status).toBe('PAID');
+
+    for (const rej of rejected) {
+      if (rej.status === 'rejected') {
+        expect(rej.reason).toBeInstanceOf(AppException);
+        expect((rej.reason as AppException).getResponse()).toMatchObject({
+          code: 'INVOICE_ALREADY_PAID',
+        });
+      }
+    }
+  });
+
   it('validates bounded offline policy and monotonic sequence integrity', () => {
     interface OfflineEvent {
       sequence: number;

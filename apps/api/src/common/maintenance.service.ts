@@ -61,6 +61,18 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
           data: { status: 'EXHAUSTED' },
         });
       }
+      // India DPDP Act 2023: Anonymize visitor records past 90-day storage retention window
+      const retentionCutoff = new Date(now.getTime() - 90 * 24 * 3600 * 1000);
+      await this.prisma.visitor.updateMany({
+        where: {
+          createdAt: { lt: retentionCutoff },
+          name: { not: 'ANONYMIZED_VISITOR' },
+        },
+        data: {
+          name: 'ANONYMIZED_VISITOR',
+          phone: null,
+        },
+      });
 
       await this.prisma.idempotencyRecord.deleteMany({ where: { expiresAt: { lt: now } } });
       await this.prisma.session.deleteMany({

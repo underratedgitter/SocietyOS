@@ -458,6 +458,13 @@ function verifyOffline(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): vo
     reasonCode: reason,
     timestamp: new Date().toISOString(),
   };
+  const MAX_OFFLINE_BUFFER = 1000;
+  if (offlineQueue.length >= MAX_OFFLINE_BUFFER) {
+    const dropped = offlineQueue.shift();
+    log(
+      `[BOUNDED QUEUE POLICY] Dropped oldest offline event #${dropped?.sequence} (buffer capacity ${MAX_OFFLINE_BUFFER} reached).`,
+    );
+  }
   offlineQueue.push(event);
   persistCache();
 
@@ -486,54 +493,63 @@ async function syncOfflineQueue(): Promise<void> {
   }
   log(`Synchronizing ${offlineQueue.length} offline buffered events with cloud API...`);
   const drained = [...offlineQueue];
-  try {
-    const res = await fetch(`${env.apiUrl}/api/v1/device-api/sync-offline`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.deviceToken}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ events: drained }),
-    });
-    if (res.ok) {
-      offlineQueue.length = 0;
-      persistCache();
-      log(`Cloud ledger batch resynchronization complete. Monotonic sequence intact (${drained.length} events committed).`);
-      return;
-    }
-  } catch (err) {
-    log(`Batch sync failed (${String(err)}), attempting fallback per-event ingestion...`);
-  }
-
+  const BATCH_SIZE = 500;
   const successfullySynced = new Set<number>();
-  for (const event of drained) {
+
+  for (let i = 0; i < drained.length; i += BATCH_SIZE) {
+    const chunk = drained.slice(i, i + BATCH_SIZE);
+    let batchOk = false;
     try {
-      const res = await fetch(`${env.apiUrl}/api/v1/device-api/events`, {
+      const res = await fetch(`${env.apiUrl}/api/v1/device-api/sync-offline`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${env.deviceToken}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({
-          type: 'STATE_CHANGED',
-          accessPointId: event.accessPointId,
-          sequence: event.sequence,
-          payload: {
-            offlineDecision: event.decision,
-            reasonCode: event.reasonCode,
-            credentialType: event.credentialType,
-            bufferedAt: event.timestamp,
-          },
-        }),
+        body: JSON.stringify({ events: chunk }),
       });
       if (res.ok) {
-        successfullySynced.add(event.sequence);
-        log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) to cloud ledger`);
+        chunk.forEach((ev) => successfullySynced.add(ev.sequence));
+        log(`Cloud ledger batch resynchronization complete for batch of ${chunk.length} events.`);
+        batchOk = true;
       } else {
-        log(`  -> Failed sequence #${event.sequence} (HTTP ${res.status}); preserving in offline queue`);
+        log(`Batch sync returned HTTP ${res.status}, attempting fallback per-event ingestion for chunk...`);
       }
-    } catch {
-      log(`  -> Synced sequence #${event.sequence}: network failure (offline queue preserved)`);
+    } catch (err) {
+      log(`Batch sync failed (${String(err)}), attempting fallback per-event ingestion...`);
+    }
+
+    if (!batchOk) {
+      for (const event of chunk) {
+        try {
+          const res = await fetch(`${env.apiUrl}/api/v1/device-api/events`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${env.deviceToken}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              type: 'STATE_CHANGED',
+              accessPointId: event.accessPointId,
+              sequence: event.sequence,
+              payload: {
+                offlineDecision: event.decision,
+                reasonCode: event.reasonCode,
+                credentialType: event.credentialType,
+                bufferedAt: event.timestamp,
+              },
+            }),
+          });
+          if (res.ok) {
+            successfullySynced.add(event.sequence);
+            log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) to cloud ledger`);
+          } else {
+            log(`  -> Failed sequence #${event.sequence} (HTTP ${res.status}); preserving in offline queue`);
+          }
+        } catch {
+          log(`  -> Synced sequence #${event.sequence}: network failure (offline queue preserved)`);
+        }
+      }
     }
   }
 

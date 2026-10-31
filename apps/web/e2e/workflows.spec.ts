@@ -153,6 +153,13 @@ test('guard console gate controls and kiosk biometric resident mode', async ({ p
   await expect(bioTab).toBeVisible();
   await bioTab.click();
   await expect(page.getByText(/Touch Reader or Look at Face Sensor/)).toBeVisible();
+
+  // Exercise the simulated resident touch ID biometric scan
+  const scanButton = page.getByRole('button', { name: /Simulate Resident Touch ID Scan/ });
+  await expect(scanButton).toBeVisible();
+  await scanButton.click();
+  await expect(page.getByText('Entry Allowed')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(/Valid Resident Biometric/i)).toBeVisible();
 });
 
 

@@ -196,7 +196,6 @@ export class DeviceApiController {
             where: {
               deviceId,
               sequence: ev.sequence,
-              type: 'ACK',
             },
             select: { id: true },
           });

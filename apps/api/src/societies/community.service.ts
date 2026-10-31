@@ -478,74 +478,99 @@ export class CommunityService {
       throw AppException.unprocessable('INVALID_PAYMENT_DATE', 'Payment timestamp is invalid');
     }
 
-    const invoice = await this.prisma.maintenanceInvoice.update({
-      where: { id: invoiceId },
-      data: {
-        status: 'PAID',
-        paidAt,
-        paidById: user.sub,
-        paymentReference: dto.paymentReference?.trim() || `TXN-${Date.now()}`,
-      },
-      include: {
-        flat: {
-          select: {
-            id: true,
-            flatNumber: true,
-            building: { select: { name: true } },
-          },
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, `invoice:${invoiceId}`).catch(() => undefined);
+
+      const fresh = await tx.maintenanceInvoice.findUnique({
+        where: { id: invoiceId },
+      });
+      if (!fresh || fresh.societyId !== societyId) {
+        throw AppException.notFound('INVOICE_NOT_FOUND', 'Invoice not found in this society');
+      }
+      if (fresh.status === 'PAID') {
+        throw AppException.conflict('INVOICE_ALREADY_PAID', 'Invoice has already been settled');
+      }
+      if (fresh.status === 'CANCELLED') {
+        throw AppException.unprocessable('INVOICE_CANCELLED', 'Cannot pay a cancelled invoice');
+      }
+
+      const invoice = await tx.maintenanceInvoice.update({
+        where: { id: invoiceId },
+        data: {
+          status: 'PAID',
+          paidAt,
+          paidById: user.sub,
+          paymentReference: dto.paymentReference?.trim() || `TXN-${Date.now()}`,
         },
-        paidBy: { select: { id: true, name: true, email: true } },
-      },
-    });
+        include: {
+          flat: {
+            select: {
+              id: true,
+              flatNumber: true,
+              building: { select: { name: true } },
+            },
+          },
+          paidBy: { select: { id: true, name: true, email: true } },
+        },
+      });
 
-    await this.audit.record({
-      societyId,
-      actorUserId: user.sub,
-      action: 'INVOICE_PAID',
-      entityType: 'MaintenanceInvoice',
-      entityId: invoice.id,
-      meta: { amount: invoice.amount, paymentReference: invoice.paymentReference },
-    });
+      await tx.auditLog.create({
+        data: {
+          societyId,
+          actorUserId: user.sub,
+          action: 'INVOICE_PAID',
+          entityType: 'MaintenanceInvoice',
+          entityId: invoice.id,
+          meta: { amount: invoice.amount, paymentReference: invoice.paymentReference },
+        },
+      });
 
-    return invoice;
+      return invoice;
+    });
   }
 
   async cancelInvoice(user: JwtUser, societyId: string, invoiceId: string) {
-    const existing = await this.prisma.maintenanceInvoice.findUnique({
-      where: { id: invoiceId },
-    });
-    if (!existing || existing.societyId !== societyId) {
-      throw AppException.notFound('INVOICE_NOT_FOUND', 'Invoice not found in this society');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, `invoice:${invoiceId}`).catch(() => undefined);
 
-    if (existing.status === 'PAID') {
-      throw AppException.conflict('INVOICE_ALREADY_PAID', 'Cannot cancel an invoice that has already been paid');
-    }
+      const existing = await tx.maintenanceInvoice.findUnique({
+        where: { id: invoiceId },
+      });
+      if (!existing || existing.societyId !== societyId) {
+        throw AppException.notFound('INVOICE_NOT_FOUND', 'Invoice not found in this society');
+      }
 
-    const invoice = await this.prisma.maintenanceInvoice.update({
-      where: { id: invoiceId },
-      data: { status: 'CANCELLED' },
-      include: {
-        flat: {
-          select: {
-            id: true,
-            flatNumber: true,
-            building: { select: { name: true } },
+      if (existing.status === 'PAID') {
+        throw AppException.conflict('INVOICE_ALREADY_PAID', 'Cannot cancel an invoice that has already been paid');
+      }
+
+      const invoice = await tx.maintenanceInvoice.update({
+        where: { id: invoiceId },
+        data: { status: 'CANCELLED' },
+        include: {
+          flat: {
+            select: {
+              id: true,
+              flatNumber: true,
+              building: { select: { name: true } },
+            },
           },
         },
-      },
-    });
+      });
 
-    await this.audit.record({
-      societyId,
-      actorUserId: user.sub,
-      action: 'INVOICE_CANCELLED',
-      entityType: 'MaintenanceInvoice',
-      entityId: invoice.id,
-      meta: { title: existing.title },
-    });
+      await tx.auditLog.create({
+        data: {
+          societyId,
+          actorUserId: user.sub,
+          action: 'INVOICE_CANCELLED',
+          entityType: 'MaintenanceInvoice',
+          entityId: invoice.id,
+          meta: { title: existing.title },
+        },
+      });
 
-    return invoice;
+      return invoice;
+    });
   }
 }
 
