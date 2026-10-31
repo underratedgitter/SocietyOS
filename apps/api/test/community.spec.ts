@@ -75,11 +75,18 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
         findMany: jest.fn(),
       },
       societyMembership: {
-        findUnique: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({ role: 'RESIDENT', status: 'ACTIVE' }),
       },
       auditLog: {
         create: jest.fn().mockResolvedValue({}),
       },
+      $transaction: jest.fn().mockImplementation((cb) => {
+        if (typeof cb === 'function') {
+          return cb(mockPrisma);
+        }
+        return Promise.all(cb);
+      }),
+      $executeRawUnsafe: jest.fn().mockResolvedValue(1),
     };
 
     authzService = new AuthzService(mockPrisma as any);
@@ -686,6 +693,122 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       ).rejects.toThrow(
         expect.objectContaining({
           response: expect.objectContaining({ code: 'INVOICE_ALREADY_PAID' }),
+        }),
+      );
+    });
+
+    it('rejects guards from listing confidential financial invoices', async () => {
+      const guardUser: JwtUser = {
+        sub: 'user-guard',
+        email: 'guard@a.com',
+        name: 'Guard 1',
+        isPlatformAdmin: false,
+        mustChangePassword: false,
+      };
+
+      await expect(
+        communityService.listInvoices(guardUser, 'GUARD', SOCIETY_A),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          response: expect.objectContaining({ code: 'FORBIDDEN_ROLE' }),
+        }),
+      );
+    });
+
+    it('rejects guards from settling resident maintenance invoices', async () => {
+      const guardUser: JwtUser = {
+        sub: 'user-guard',
+        email: 'guard@a.com',
+        name: 'Guard 1',
+        isPlatformAdmin: false,
+        mustChangePassword: false,
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        id: 'inv-1',
+        societyId: SOCIETY_A,
+        flatId: FLAT_101,
+        amount: 4500,
+        status: 'PENDING',
+        flat: { id: FLAT_101, building: { societyId: SOCIETY_A } },
+      });
+
+      await expect(
+        communityService.recordPayment(guardUser, 'GUARD', SOCIETY_A, 'inv-1', {}),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          response: expect.objectContaining({ code: 'FORBIDDEN_ROLE' }),
+        }),
+      );
+    });
+  });
+
+  describe('RBAC & Multi-Tenant Boundary Strictness', () => {
+    it('rejects non-members attempting to create a maintenance ticket', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_101,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.societyMembership.findUnique.mockResolvedValue(null); // Not a member
+
+      await expect(
+        communityService.createTicket(residentUser1, SOCIETY_A, {
+          flatId: FLAT_101,
+          category: 'PLUMBING',
+          title: 'Unauthorized leak ticket',
+          description: 'Hacker attempting ticket creation',
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          response: expect.objectContaining({ code: 'NOT_A_MEMBER' }),
+        }),
+      );
+    });
+
+    it('rejects guards attempting to create maintenance tickets for resident flats', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_101,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.societyMembership.findUnique.mockResolvedValue({
+        role: 'GUARD',
+        status: 'ACTIVE',
+      });
+
+      await expect(
+        communityService.createTicket(residentUser1, SOCIETY_A, {
+          flatId: FLAT_101,
+          category: 'PLUMBING',
+          title: 'Guard leak ticket',
+          description: 'Guard attempting ticket creation',
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          response: expect.objectContaining({ code: 'FORBIDDEN_ROLE' }),
+        }),
+      );
+    });
+
+    it('rejects non-members attempting to book an amenity', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_101,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.societyMembership.findUnique.mockResolvedValue(null); // Not a member
+
+      const start = new Date(Date.now() + 3600_000).toISOString();
+      const end = new Date(Date.now() + 7200_000).toISOString();
+
+      await expect(
+        communityService.createBooking(residentUser1, SOCIETY_A, {
+          amenityName: 'Clubhouse',
+          flatId: FLAT_101,
+          slotStart: start,
+          slotEnd: end,
+        }),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          response: expect.objectContaining({ code: 'NOT_A_MEMBER' }),
         }),
       );
     });

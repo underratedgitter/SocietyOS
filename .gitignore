@@ -20,3 +20,4 @@ apps/api/prisma/migrations/dev.db*
 .turbo/
 generated/
 prisma/*.db
+.controller_cache.json

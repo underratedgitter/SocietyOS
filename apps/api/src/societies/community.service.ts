@@ -129,13 +129,7 @@ export class CommunityService {
       throw AppException.notFound('FLAT_NOT_FOUND', 'Flat not found in this society');
     }
 
-    // Residents must be authorized members of that flat
-    const membership = await this.prisma.societyMembership.findUnique({
-      where: { societyId_userId: { societyId, userId: user.sub } },
-    });
-    if (membership?.role === 'RESIDENT') {
-      await this.authz.assertResidentOfFlat(user.sub, dto.flatId);
-    }
+    await this.authz.flat(user.sub, dto.flatId, ['SOCIETY_ADMIN', 'RESIDENT']);
 
     const ticket = await this.prisma.maintenanceTicket.create({
       data: {
@@ -243,7 +237,7 @@ export class CommunityService {
       throw AppException.notFound('FLAT_NOT_FOUND', 'Flat not found in this society');
     }
 
-    await this.authz.assertResidentOfFlat(user.sub, dto.flatId);
+    await this.authz.flat(user.sub, dto.flatId, ['SOCIETY_ADMIN', 'RESIDENT']);
 
     const start = new Date(dto.slotStart);
     const end = new Date(dto.slotEnd);
@@ -260,57 +254,66 @@ export class CommunityService {
       throw AppException.unprocessable('SLOT_IN_PAST', 'Cannot book an amenity slot in the past');
     }
 
-    // Double-booking conflict check
     const normalizedAmenity = dto.amenityName.trim();
-    const conflict = await this.prisma.amenityBooking.findFirst({
-      where: {
-        societyId,
-        status: 'CONFIRMED',
-        amenityName: { equals: normalizedAmenity, mode: 'insensitive' },
-        AND: [
-          { slotStart: { lt: end } },
-          { slotEnd: { gt: start } },
-        ],
-      },
-    });
 
-    if (conflict) {
-      throw AppException.conflict('AMENITY_SLOT_UNAVAILABLE', 'This amenity is already booked for that time window');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      // In PostgreSQL, serialize bookings per amenity in this society using an advisory transaction lock.
+      // This eliminates TOCTOU double-booking race conditions under high concurrency.
+      const lockKey = `amenity:${societyId}:${normalizedAmenity.toLowerCase()}`;
+      await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey).catch(() => undefined);
 
-    const booking = await this.prisma.amenityBooking.create({
-      data: {
-        societyId,
-        flatId: dto.flatId,
-        bookedById: user.sub,
-        amenityName: normalizedAmenity,
-        slotStart: start,
-        slotEnd: end,
-        guestCount: dto.guestCount ?? 1,
-        status: 'CONFIRMED',
-      },
-      include: {
-        flat: {
-          select: {
-            id: true,
-            flatNumber: true,
-            building: { select: { name: true } },
-          },
+      const conflict = await tx.amenityBooking.findFirst({
+        where: {
+          societyId,
+          status: 'CONFIRMED',
+          amenityName: { equals: normalizedAmenity, mode: 'insensitive' },
+          AND: [
+            { slotStart: { lt: end } },
+            { slotEnd: { gt: start } },
+          ],
         },
-        bookedBy: { select: { name: true } },
-      },
-    });
+      });
 
-    await this.audit.record({
-      societyId,
-      actorUserId: user.sub,
-      action: 'AMENITY_BOOKED',
-      entityType: 'AmenityBooking',
-      entityId: booking.id,
-      meta: { amenity: booking.amenityName, slotStart: start.toISOString(), slotEnd: end.toISOString() },
-    });
+      if (conflict) {
+        throw AppException.conflict('AMENITY_SLOT_UNAVAILABLE', 'This amenity is already booked for that time window');
+      }
 
-    return booking;
+      const booking = await tx.amenityBooking.create({
+        data: {
+          societyId,
+          flatId: dto.flatId,
+          bookedById: user.sub,
+          amenityName: normalizedAmenity,
+          slotStart: start,
+          slotEnd: end,
+          guestCount: dto.guestCount ?? 1,
+          status: 'CONFIRMED',
+        },
+        include: {
+          flat: {
+            select: {
+              id: true,
+              flatNumber: true,
+              building: { select: { name: true } },
+            },
+          },
+          bookedBy: { select: { name: true } },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          societyId,
+          actorUserId: user.sub,
+          action: 'AMENITY_BOOKED',
+          entityType: 'AmenityBooking',
+          entityId: booking.id,
+          meta: { amenity: booking.amenityName, slotStart: start.toISOString(), slotEnd: end.toISOString() },
+        },
+      });
+
+      return booking;
+    });
   }
 
   async cancelBooking(user: JwtUser, role: string, societyId: string, bookingId: string) {
@@ -347,6 +350,10 @@ export class CommunityService {
   // =========================================================================
 
   async listInvoices(user: JwtUser, role: string, societyId: string, flatId?: string) {
+    if (role !== 'SOCIETY_ADMIN' && role !== 'RESIDENT') {
+      throw AppException.forbidden('FORBIDDEN_ROLE', 'Only residents and administrators can view invoices');
+    }
+
     const where: any = { societyId };
 
     if (role === 'RESIDENT') {
@@ -456,6 +463,10 @@ export class CommunityService {
 
     if (existing.status === 'CANCELLED') {
       throw AppException.unprocessable('INVOICE_CANCELLED', 'Cannot pay a cancelled invoice');
+    }
+
+    if (role !== 'SOCIETY_ADMIN' && role !== 'RESIDENT') {
+      throw AppException.forbidden('FORBIDDEN_ROLE', 'Only residents and administrators can settle invoices');
     }
 
     if (role === 'RESIDENT') {

@@ -1,11 +1,13 @@
-import { VisitorPassesService } from '../src/visitors/visitor-passes.service';
-import { AccessEngineService } from '../src/access/access-engine.service';
+import { CommunityService } from '../src/societies/community.service';
+import { AuthzService } from '../src/common/authz.service';
+import { AuditService } from '../src/common/audit.service';
+import { JwtUser } from '../src/auth/jwt-auth.guard';
+import { AppException } from '../src/common/app.exception';
 
 describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
   it('guarantees atomic single-use redemption under high concurrency without race conditions', async () => {
     let usedCount = 0;
     const maxUses = 1;
-    const redemptionLock = { locked: false };
 
     // Atomic simulation of PostgreSQL row-level lock (SELECT FOR UPDATE / UPDATE ... WHERE usedCount < maxUses)
     const atomicRedeem = async (requestId: string): Promise<{ decision: 'AUTHORIZED' | 'DENIED'; reason: string }> => {
@@ -53,6 +55,125 @@ describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
     expect(p50).toBeLessThan(50);
     expect(p95).toBeLessThan(100);
     expect(p99).toBeLessThan(150);
+  });
+
+  it('guarantees serializable isolation and prevents double-booking when 50 concurrent requests target the same amenity slot', async () => {
+    const bookings: any[] = [];
+    let lockHolder: string | null = null;
+    const lockQueue: (() => void)[] = [];
+
+    // Simulate PostgreSQL pg_advisory_xact_lock serialization inside prisma.$transaction
+    const acquireLock = () =>
+      new Promise<void>((resolve) => {
+        if (!lockHolder) {
+          lockHolder = 'locked';
+          resolve();
+        } else {
+          lockQueue.push(() => {
+            lockHolder = 'locked';
+            resolve();
+          });
+        }
+      });
+
+    const releaseLock = () => {
+      lockHolder = null;
+      const next = lockQueue.shift();
+      if (next) next();
+    };
+
+    const mockPrisma: any = {
+      $transaction: jest.fn(async (cb) => {
+        await acquireLock();
+        try {
+          return await cb(mockPrisma);
+        } finally {
+          releaseLock();
+        }
+      }),
+      $executeRawUnsafe: jest.fn().mockResolvedValue(1),
+      flat: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'flat-101',
+          building: { societyId: 'soc-alpha' },
+        }),
+      },
+      societyMembership: {
+        findUnique: jest.fn().mockResolvedValue({ role: 'RESIDENT', status: 'ACTIVE' }),
+      },
+      residentFlatMembership: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'rfm-101' }),
+      },
+      amenityBooking: {
+        findFirst: jest.fn().mockImplementation(async ({ where }) => {
+          // Simulate query latency
+          await new Promise((r) => setTimeout(r, Math.random() * 3 + 1));
+          const conflict = bookings.find(
+            (b) =>
+              b.societyId === where.societyId &&
+              b.amenityName.toLowerCase() === where.amenityName.equals.toLowerCase() &&
+              b.status === 'CONFIRMED',
+          );
+          return conflict || null;
+        }),
+        create: jest.fn().mockImplementation(async ({ data }) => {
+          const booking = { id: `book-${bookings.length + 1}`, ...data };
+          bookings.push(booking);
+          return booking;
+        }),
+      },
+      auditLog: {
+        create: jest.fn().mockResolvedValue({}),
+      },
+    };
+
+    const authz = new AuthzService(mockPrisma);
+    const audit = new AuditService(mockPrisma);
+    const communityService = new CommunityService(mockPrisma, authz, audit);
+
+    const residentUser: JwtUser = {
+      sub: 'user-res-1',
+      email: 'res@alpha.com',
+      name: 'Res User',
+      isPlatformAdmin: false,
+      mustChangePassword: false,
+    };
+
+    const slotStart = new Date(Date.now() + 86400_000).toISOString();
+    const slotEnd = new Date(Date.now() + 86400_000 + 3600_000).toISOString();
+
+    const CONCURRENCY = 50;
+    const promises: Promise<any>[] = [];
+
+    for (let i = 0; i < CONCURRENCY; i++) {
+      promises.push(
+        communityService.createBooking(residentUser, 'soc-alpha', {
+          amenityName: 'Clubhouse',
+          flatId: 'flat-101',
+          slotStart,
+          slotEnd,
+          guestCount: 5,
+        }),
+      );
+    }
+
+    const settled = await Promise.allSettled(promises);
+    const fulfilled = settled.filter((s) => s.status === 'fulfilled');
+    const rejected = settled.filter((s) => s.status === 'rejected');
+
+    // Exactly 1 booking was created; 49 were rejected with AMENITY_SLOT_UNAVAILABLE
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(CONCURRENCY - 1);
+    expect(bookings.length).toBe(1);
+
+    for (const rej of rejected) {
+      if (rej.status === 'rejected') {
+        expect(rej.reason).toBeInstanceOf(AppException);
+        expect((rej.reason as AppException).getResponse()).toMatchObject({
+          code: 'AMENITY_SLOT_UNAVAILABLE',
+        });
+      }
+    }
   });
 
   it('validates bounded offline policy and monotonic sequence integrity', () => {

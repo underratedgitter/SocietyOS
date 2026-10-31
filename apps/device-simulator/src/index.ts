@@ -505,11 +505,10 @@ async function syncOfflineQueue(): Promise<void> {
     log(`Batch sync failed (${String(err)}), attempting fallback per-event ingestion...`);
   }
 
-  offlineQueue.length = 0;
-  persistCache();
+  const successfullySynced = new Set<number>();
   for (const event of drained) {
     try {
-      await fetch(`${env.apiUrl}/api/v1/device-api/events`, {
+      const res = await fetch(`${env.apiUrl}/api/v1/device-api/events`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${env.deviceToken}`,
@@ -527,12 +526,23 @@ async function syncOfflineQueue(): Promise<void> {
           },
         }),
       });
-      log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) to cloud ledger`);
+      if (res.ok) {
+        successfullySynced.add(event.sequence);
+        log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) to cloud ledger`);
+      } else {
+        log(`  -> Failed sequence #${event.sequence} (HTTP ${res.status}); preserving in offline queue`);
+      }
     } catch {
-      log(`  -> Synced sequence #${event.sequence}: ${event.decision} (${event.reasonCode}) (offline log preserved)`);
+      log(`  -> Synced sequence #${event.sequence}: network failure (offline queue preserved)`);
     }
   }
-  log('Cloud ledger resynchronization complete. Monotonic sequence intact.');
+
+  // Remove only events that were confirmed synced
+  const remaining = offlineQueue.filter((ev) => !successfullySynced.has(ev.sequence));
+  offlineQueue.length = 0;
+  offlineQueue.push(...remaining);
+  persistCache();
+  log(`Cloud ledger resynchronization attempt complete. ${successfullySynced.size} synced, ${offlineQueue.length} remaining in local queue.`);
 }
 
 async function verifyCredential(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): Promise<void> {

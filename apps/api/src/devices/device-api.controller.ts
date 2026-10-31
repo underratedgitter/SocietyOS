@@ -183,12 +183,46 @@ export class DeviceApiController {
     const validApSet = new Set(validAps.map((ap) => ap.id));
 
     let syncedCount = 0;
+    let duplicateCount = 0;
+    const now = new Date();
+
     await this.prisma.$transaction(async (tx) => {
       for (const ev of dto.events) {
         if (!validApSet.has(ev.accessPointId)) continue;
+
+        // Replay / duplicate prevention by sequence
+        if (typeof tx.deviceEvent.findFirst === 'function') {
+          const existing = await tx.deviceEvent.findFirst({
+            where: {
+              deviceId,
+              sequence: ev.sequence,
+              type: 'ACK',
+            },
+            select: { id: true },
+          });
+          if (existing) {
+            duplicateCount++;
+            continue;
+          }
+        }
+
         const credType = (['PIN', 'QR'].includes(ev.credentialType) ? ev.credentialType : null) as any;
         const requestedAt = new Date(ev.timestamp);
-        const validTime = !isNaN(requestedAt.getTime()) ? requestedAt : new Date();
+        let validTime = !isNaN(requestedAt.getTime()) ? requestedAt : now;
+        let clockDriftDetected = false;
+        let driftMs = 0;
+
+        if (!isNaN(requestedAt.getTime())) {
+          driftMs = requestedAt.getTime() - now.getTime();
+          // Future clock drift (> 60s ahead) is clamped to server time to prevent audit log corruption
+          if (driftMs > 60_000) {
+            clockDriftDetected = true;
+            validTime = now;
+          } else if (driftMs < -30 * 86400_000) {
+            // Extreme past drift (> 30 days) is flagged
+            clockDriftDetected = true;
+          }
+        }
 
         await tx.accessEvent.create({
           data: {
@@ -203,7 +237,10 @@ export class DeviceApiController {
             meta: {
               offlineSequence: ev.sequence,
               rawCredentialType: ev.credentialType,
-              resyncedAt: new Date().toISOString(),
+              resyncedAt: now.toISOString(),
+              reportedTimestamp: ev.timestamp,
+              clockDriftDetected,
+              driftMs,
             } as never,
           },
         });
@@ -219,6 +256,7 @@ export class DeviceApiController {
               decision: ev.decision,
               reasonCode: ev.reasonCode,
               source: 'OFFLINE_CONTROLLER_SYNC',
+              clockDriftDetected,
             } as never,
           },
         });
@@ -227,11 +265,11 @@ export class DeviceApiController {
 
       await tx.device.update({
         where: { id: deviceId },
-        data: { lastSeenAt: new Date() },
+        data: { lastSeenAt: now },
       });
     });
 
-    return { ok: true, syncedCount, serverTime: new Date().toISOString() };
+    return { ok: true, syncedCount, duplicateCount, serverTime: now.toISOString() };
   }
 
   @Get('edge-sync')

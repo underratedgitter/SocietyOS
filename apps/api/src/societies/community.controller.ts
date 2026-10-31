@@ -81,6 +81,7 @@ export class CommunityController {
   }
 
   @Post('maintenance-tickets')
+  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
   createTicket(
     @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,
@@ -113,6 +114,7 @@ export class CommunityController {
   }
 
   @Post('amenity-bookings')
+  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
   createBooking(
     @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,
@@ -122,6 +124,7 @@ export class CommunityController {
   }
 
   @Delete('amenity-bookings/:bookingId')
+  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
   cancelBooking(
     @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,
@@ -140,6 +143,7 @@ export class CommunityController {
   // =========================================================================
 
   @Get('invoices')
+  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
   listInvoices(
     @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,
@@ -164,6 +168,7 @@ export class CommunityController {
   }
 
   @Post('invoices/:invoiceId/pay')
+  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
   payInvoice(
     @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,

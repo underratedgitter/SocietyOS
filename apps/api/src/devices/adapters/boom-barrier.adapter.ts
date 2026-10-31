@@ -32,8 +32,8 @@ export class BoomBarrierAdapter implements GateController {
     if (this.antiTailgateTimeout) clearTimeout(this.antiTailgateTimeout);
     if (this.autoCloseDelayMs > 0) {
       this.antiTailgateTimeout = setTimeout(() => {
-        if (this.state === 'OPEN' && !this.vehicleDetected && !this.obstruction) {
-          void this.close();
+        if (this.state === 'OPEN' && !this.vehicleDetected && !this.obstruction && !this.emergency) {
+          void this.close().catch(() => {});
         }
       }, this.autoCloseDelayMs);
     }

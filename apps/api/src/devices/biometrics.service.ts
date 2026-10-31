@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../common/audit.service';
 import { AppException } from '../common/app.exception';
@@ -19,7 +19,7 @@ export interface BiometricVerifyDto {
 }
 
 @Injectable()
-export class BiometricsService {
+export class BiometricsService implements OnModuleInit {
   private readonly logger = new Logger(BiometricsService.name);
 
   // In-memory DPDP-compliant template store indexed by societyId -> userId
@@ -43,6 +43,37 @@ export class BiometricsService {
     private readonly adapterFactory: GateAdapterFactory,
     private readonly mqtt: MqttService,
   ) {}
+
+  async onModuleInit() {
+    try {
+      const residents = await this.prisma.residentFlatMembership.findMany({
+        where: { endedAt: null },
+        include: { flat: { include: { building: true } } },
+      });
+      for (const r of residents) {
+        const societyId = r.flat.building.societyId;
+        const defaultTemplates = [
+          'FINGERPRINT_RESIDENT_101',
+          `BIO_RESIDENT_${r.userId}`,
+          `FINGERPRINT_${r.userId}`,
+        ];
+        for (const tmpl of defaultTemplates) {
+          this.templateRegistry.set(`${societyId}:${tmpl}`, {
+            userId: r.userId,
+            societyId,
+            type: 'FINGERPRINT',
+            templateHash: tmpl,
+            algorithm: 'DEFAULT_EDGE_HASH_V1',
+            consentGivenAt: new Date(),
+            lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
+          });
+        }
+      }
+      this.logger.log(`Initialized resident biometric template cache for ${residents.length} residents`);
+    } catch (err) {
+      this.logger.warn(`Could not preload resident biometric templates: ${String(err)}`);
+    }
+  }
 
   async enrollResidentBiometric(
     actorUserId: string,

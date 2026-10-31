@@ -31,6 +31,7 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'evt-1', ...data })),
       },
       deviceEvent: {
+        findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'dev-evt-1', ...data })),
       },
       deviceAccessPoint: {
@@ -211,6 +212,69 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
 
       expect(res.ok).toBe(true);
       expect(res.syncedCount).toBe(1); // Only the valid AP was ingested
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('detects and bounds future clock drift to preserve audit log chronology', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+
+      const futureTime = new Date(Date.now() + 7200_000).toISOString(); // 2 hours ahead
+      const events: any[] = [
+        {
+          sequence: 10,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: futureTime,
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(res.syncedCount).toBe(1);
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            meta: expect.objectContaining({
+              clockDriftDetected: true,
+              reportedTimestamp: futureTime,
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('deduplicates replayed events by sequence to prevent duplicate ledger records', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      // Simulate that sequence 1 was already processed
+      mockPrisma.deviceEvent.findFirst
+        .mockResolvedValueOnce({ id: 'existing-event' }) // seq 1 exists
+        .mockResolvedValueOnce(null); // seq 2 is new
+
+      const events: any[] = [
+        {
+          sequence: 1,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+        {
+          sequence: 2,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(res.syncedCount).toBe(1);
+      expect(res.duplicateCount).toBe(1);
       expect(mockPrisma.accessEvent.create).toHaveBeenCalledTimes(1);
     });
   });
