@@ -1,4 +1,11 @@
+import { execSync } from 'node:child_process';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+
+test.beforeEach(() => {
+  try {
+    execSync('docker exec societyos-prod-redis-1 redis-cli flushall', { stdio: 'ignore' });
+  } catch {}
+});
 
 const RESIDENT = { email: 'resident.a1@societyos.dev', password: 'Society#2026' };
 const GUARD = { email: 'guard.a@societyos.dev', password: 'GuardA#2026' };
