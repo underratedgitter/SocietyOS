@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { ArrowRight, KeyRound, ShieldCheck } from 'lucide-react';
 import { useSession, homeFor } from '@/components/session-provider';
 import { Notice, errorMessage } from '@/components/ui';
@@ -131,6 +132,21 @@ export default function LoginPage() {
               {!submitting ? <ArrowRight size={15} /> : null}
             </button>
           </form>
+
+          <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12 }}>
+            <div>
+              <span className="muted">New resident in this society? </span>
+              <Link href="/register" style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}>
+                Register your account →
+              </Link>
+            </div>
+            <div>
+              <span className="muted">Visitor, relative or guest? </span>
+              <Link href="/visitor-register" style={{ color: 'var(--amber-ink)', fontWeight: 600, textDecoration: 'none' }}>
+                Self-register for gate pass →
+              </Link>
+            </div>
+          </div>
 
           <div className="demo-accounts">
             <div className="tiny muted">Local demo accounts</div>

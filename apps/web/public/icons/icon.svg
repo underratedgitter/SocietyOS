@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#081b17"/>
+      <stop offset="100%" stop-color="#0d2a24"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fdf3d8"/>
+      <stop offset="50%" stop-color="#e5a33c"/>
+      <stop offset="100%" stop-color="#c8831f"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3cd09a"/>
+      <stop offset="100%" stop-color="#228965"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+  <rect x="24" y="24" width="464" height="464" rx="92" fill="none" stroke="url(#gold)" stroke-width="3" stroke-opacity="0.3"/>
+  <path d="M 256 96 C 340 96 384 128 384 192 C 384 290 296 376 256 408 C 216 376 128 290 128 192 C 128 128 172 96 256 96 Z" fill="none" stroke="url(#gold)" stroke-width="12" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M 180 340 L 180 230 C 180 188 214 154 256 154 C 298 154 332 188 332 230 L 332 340" fill="none" stroke="url(#gold)" stroke-width="10" stroke-linecap="round"/>
+  <line x1="220" y1="205" x2="220" y2="340" stroke="url(#gold)" stroke-width="6" stroke-linecap="round" stroke-opacity="0.8"/>
+  <line x1="292" y1="205" x2="292" y2="340" stroke="url(#gold)" stroke-width="6" stroke-linecap="round" stroke-opacity="0.8"/>
+  <circle cx="256" cy="246" r="28" fill="#081b17" stroke="url(#gold)" stroke-width="8"/>
+  <circle cx="256" cy="246" r="10" fill="url(#gold)"/>
+  <line x1="256" y1="274" x2="256" y2="330" stroke="url(#gold)" stroke-width="8" stroke-linecap="round"/>
+  <line x1="256" y1="300" x2="272" y2="300" stroke="url(#gold)" stroke-width="7" stroke-linecap="round"/>
+  <line x1="256" y1="318" x2="268" y2="318" stroke="url(#gold)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M 226 136 C 235 128 245 124 256 124 C 267 124 277 128 286 136" fill="none" stroke="url(#accent)" stroke-width="6" stroke-linecap="round"/>
+</svg>

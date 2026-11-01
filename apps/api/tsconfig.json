@@ -5,6 +5,9 @@
     "moduleResolution": "Node10",
     "outDir": "./dist",
     "baseUrl": "./",
+    "paths": {
+      "@societyos/shared-types": ["../../packages/shared-types/src/index.ts"]
+    },
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "target": "ES2022",

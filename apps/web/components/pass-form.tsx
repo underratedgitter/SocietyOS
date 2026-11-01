@@ -29,13 +29,15 @@ export function PassForm({
   flats: FlatOption[];
   accessPoints: AccessPoint[];
   defaultFlatId?: string;
-  onCreated: (result: PassWithCredentials) => void;
+  onCreated: (result: PassWithCredentials, meta?: { vehicle?: string; purpose?: string }) => void;
 }) {
   const initialFrom = useMemo(() => localInput(new Date()), []);
   const initialUntil = useMemo(() => localInput(new Date(Date.now() + 4 * 3600_000)), []);
   const [flatId, setFlatId] = useState(defaultFlatId || flats[0]?.id || '');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  const [vehicle, setVehicle] = useState('');
+  const [purpose, setPurpose] = useState('');
   const [category, setCategory] = useState<VisitorCategory>('RELATIVE');
   const [from, setFrom] = useState(initialFrom);
   const [until, setUntil] = useState(initialUntil);
@@ -45,7 +47,13 @@ export function PassForm({
   const [submitting, setSubmitting] = useState(false);
   const [idempotencyKey] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `pass-${Date.now()}`));
 
-  function applyPreset(cat: VisitorCategory, durationMinutes: number, uses = 1, defaultName = '') {
+  function applyPreset(
+    cat: VisitorCategory,
+    durationMinutes: number,
+    uses = 1,
+    defaultName = '',
+    defaultPurpose = '',
+  ) {
     const now = new Date();
     const end = new Date(now.getTime() + durationMinutes * 60_000);
     setCategory(cat);
@@ -54,6 +62,9 @@ export function PassForm({
     setMaxUses(uses);
     if (defaultName && !name) {
       setName(defaultName);
+    }
+    if (defaultPurpose && !purpose) {
+      setPurpose(defaultPurpose);
     }
   }
 
@@ -74,6 +85,19 @@ export function PassForm({
       return setError('Enter a valid arrival window.');
     }
     if (validUntil <= validFrom) return setError('The window must end after it begins.');
+    const trimmedName = name.trim();
+    if (trimmedName.length < 2) {
+      return setError('Enter a visitor name (at least 2 characters).');
+    }
+    const trimmedVehicle = vehicle.trim().toUpperCase();
+    const trimmedPurpose = purpose.trim();
+    let visitorName = trimmedName;
+    if (trimmedVehicle) {
+      const vehicleTag = ` [${trimmedVehicle}]`;
+      const maxNameLen = Math.max(2, 120 - vehicleTag.length);
+      visitorName = `${trimmedName.slice(0, maxNameLen)}${vehicleTag}`;
+    }
+
     setSubmitting(true);
     try {
       const result = await apiRequest<PassWithCredentials>('/api/v1/visitor-passes', {
@@ -81,7 +105,7 @@ export function PassForm({
         idempotencyKey,
         body: JSON.stringify({
           flatId,
-          visitor: { name: name.trim(), ...(phone.trim() ? { phone: phone.trim() } : {}) },
+          visitor: { name: visitorName, ...(phone.trim() ? { phone: phone.trim() } : {}) },
           category,
           validFrom: validFrom.toISOString(),
           validUntil: validUntil.toISOString(),
@@ -89,7 +113,7 @@ export function PassForm({
           accessPointIds: gateIds,
         }),
       });
-      onCreated(result);
+      onCreated(result, { vehicle: trimmedVehicle, purpose: trimmedPurpose });
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -108,28 +132,28 @@ export function PassForm({
         <button
           type="button"
           className="preset-pill"
-          onClick={() => applyPreset('DELIVERY', 20, 1, 'Delivery Partner')}
+          onClick={() => applyPreset('DELIVERY', 20, 1, 'Delivery Partner', 'Parcel Delivery')}
         >
           <Zap size={12} color="var(--amber)" /> Delivery (20m)
         </button>
         <button
           type="button"
           className="preset-pill"
-          onClick={() => applyPreset('CAB', 30, 1, 'Cab Driver')}
+          onClick={() => applyPreset('CAB', 30, 1, 'Cab Driver', 'Cab Pickup / Drop')}
         >
           🚕 Cab (30m)
         </button>
         <button
           type="button"
           className="preset-pill"
-          onClick={() => applyPreset('FRIEND', 240, 1)}
+          onClick={() => applyPreset('FRIEND', 240, 1, '', 'Guest Visit')}
         >
           🍷 Guest (4h)
         </button>
         <button
           type="button"
           className="preset-pill"
-          onClick={() => applyPreset('MAINTENANCE', 480, 2, 'Service Technician')}
+          onClick={() => applyPreset('MAINTENANCE', 480, 2, 'Service Technician', 'Maintenance / Repair')}
         >
           🔧 Service (8h)
         </button>
@@ -189,6 +213,28 @@ export function PassForm({
             maxLength={20}
             onChange={(event) => setPhone(event.target.value)}
             placeholder="+91 98765 43210"
+          />
+        </div>
+        <div className="field">
+          <label className="label" htmlFor="pass-vehicle">Vehicle (optional)</label>
+          <input
+            className="input"
+            id="pass-vehicle"
+            value={vehicle}
+            maxLength={20}
+            onChange={(event) => setVehicle(event.target.value)}
+            placeholder="e.g. MH 02 AB 1234 or Uber/Ola"
+          />
+        </div>
+        <div className="field">
+          <label className="label" htmlFor="pass-purpose">Purpose (optional)</label>
+          <input
+            className="input"
+            id="pass-purpose"
+            value={purpose}
+            maxLength={60}
+            onChange={(event) => setPurpose(event.target.value)}
+            placeholder="e.g. Parcel delivery, social visit"
           />
         </div>
         <div className="field">

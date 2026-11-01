@@ -8,6 +8,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY apps/device-simulator/package.json apps/device-simulator/package.json
+COPY apps/mobile/package.json apps/mobile/package.json
+COPY packages/shared-types/package.json packages/shared-types/package.json
 RUN pnpm install --frozen-lockfile
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -23,6 +25,7 @@ ENV NODE_ENV=production \
 
 COPY --from=builder --chown=nextjs:nextjs /app/apps/web/.next/standalone ./
 COPY --from=builder --chown=nextjs:nextjs /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=nextjs:nextjs /app/apps/web/public ./apps/web/public
 
 USER nextjs
 EXPOSE 3000

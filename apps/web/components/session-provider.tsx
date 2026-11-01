@@ -56,7 +56,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const onUnauthorized = () => {
       setSession(null);
       const path = window.location.pathname;
-      if (!path.startsWith('/login') && !path.startsWith('/kiosk')) {
+      if (
+        !path.startsWith('/login') &&
+        !path.startsWith('/kiosk') &&
+        !path.startsWith('/register') &&
+        !path.startsWith('/visitor-register')
+      ) {
         window.location.assign('/login');
       }
     };

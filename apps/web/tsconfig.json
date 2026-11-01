@@ -25,6 +25,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@societyos/shared-types": [
+        "../../packages/shared-types/src/index.ts"
       ]
     }
   },

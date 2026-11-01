@@ -13,6 +13,7 @@ import {
   Home,
   KeyRound,
   RefreshCw,
+  Share2,
   ShieldCheck,
   Ticket,
   Users,
@@ -39,15 +40,18 @@ import { Protected } from '@/components/protected';
 import { AppShell, type NavItem } from '@/components/app-shell';
 import { Badge, CredentialReveal, EmptyState, Modal, PassBadge, Toast, errorMessage } from '@/components/ui';
 import { PassForm } from '@/components/pass-form';
+import { PwaInstallPrompt } from '@/components/pwa-install-prompt';
 import {
   ResidentNoticeBoard,
   ResidentMaintenance,
   ResidentAmenities,
   ResidentInvoicesView,
 } from '@/components/community-tabs';
+import { RelativesManagementView } from '@/features/relatives-management';
 
 const NAV: NavItem[] = [
   { id: 'visitors', label: 'Visitors', icon: Ticket },
+  { id: 'relatives', label: 'Relatives & Family', icon: Users },
   { id: 'announcements', label: 'Notice board', icon: Bell },
   { id: 'tickets', label: 'Maintenance', icon: Wrench },
   { id: 'amenities', label: 'Amenities', icon: Calendar },
@@ -80,6 +84,7 @@ function ResidentWorkspace() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [formOpen, setFormOpen] = useState(false);
   const [issued, setIssued] = useState<PassWithCredentials | null>(null);
+  const [issuedMeta, setIssuedMeta] = useState<{ vehicle?: string; purpose?: string } | null>(null);
   const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null);
   const toastTimer = useRef<number | null>(null);
 
@@ -207,6 +212,7 @@ function ResidentWorkspace() {
       onSelect={setTab}
     >
       <main className="content">
+        <PwaInstallPrompt onInstalled={() => notify('SocietyOS added to your home screen!')} />
         <div className="page-head">
           <div>
             <div className="context-label">
@@ -215,28 +221,32 @@ function ResidentWorkspace() {
             <h1 className="page-title">
               {tab === 'visitors'
                 ? 'Visitors'
-                : tab === 'announcements'
-                  ? 'Notice board'
-                  : tab === 'tickets'
-                    ? 'Maintenance'
-                    : tab === 'amenities'
-                      ? 'Amenities'
-                      : tab === 'billing'
-                        ? 'Dues & Invoices'
-                        : 'My home'}
+                : tab === 'relatives'
+                  ? 'Relatives & Family'
+                  : tab === 'announcements'
+                    ? 'Notice board'
+                    : tab === 'tickets'
+                      ? 'Maintenance'
+                      : tab === 'amenities'
+                        ? 'Amenities'
+                        : tab === 'billing'
+                          ? 'Dues & Invoices'
+                          : 'My home'}
             </h1>
             <p className="page-sub">
               {tab === 'visitors'
                 ? 'Invite guests with a time-limited PIN or QR pass. Every entry is checked against the pass at the gate.'
-                : tab === 'announcements'
-                  ? 'Official notices, emergency circulars, and community updates from administration.'
-                  : tab === 'tickets'
-                    ? 'Raise service requests for plumbing, electrical, carpentry, or common areas.'
-                    : tab === 'amenities'
-                      ? 'Reserve clubhouses, tennis courts, and recreational amenities.'
-                      : tab === 'billing'
-                        ? 'View society maintenance charges, past receipts, and settle outstanding balances.'
-                        : 'Your household, hosted flats and the gates a visitor pass can open.'}
+                : tab === 'relatives'
+                  ? 'Pre-registered directory of family and relatives. Generate 1-click entry passes without re-entering details.'
+                  : tab === 'announcements'
+                    ? 'Official notices, emergency circulars, and community updates from administration.'
+                    : tab === 'tickets'
+                      ? 'Raise service requests for plumbing, electrical, carpentry, or common areas.'
+                      : tab === 'amenities'
+                        ? 'Reserve clubhouses, tennis courts, and recreational amenities.'
+                        : tab === 'billing'
+                          ? 'View society maintenance charges, past receipts, and settle outstanding balances.'
+                          : 'Your household, hosted flats and the gates a visitor pass can open.'}
             </p>
           </div>
           <div className="head-actions">
@@ -298,6 +308,8 @@ function ResidentWorkspace() {
             household={household}
             accessPoints={accessPoints}
           />
+        ) : tab === 'relatives' ? (
+          <RelativesManagementView flatId={flatId} societyId={societyId} />
         ) : tab === 'announcements' ? (
           <ResidentNoticeBoard societyId={societyId} />
         ) : tab === 'tickets' ? (
@@ -468,9 +480,10 @@ function ResidentWorkspace() {
             ]}
             accessPoints={accessPoints}
             defaultFlatId={flat.id}
-            onCreated={(result) => {
+            onCreated={(result, meta) => {
               setFormOpen(false);
               setIssued(result);
+              setIssuedMeta(meta ?? null);
               reload();
             }}
           />
@@ -480,12 +493,27 @@ function ResidentWorkspace() {
       {issued ? (
         <IssuedPassModal
           result={issued}
+          meta={issuedMeta}
           timezone={society?.timezone}
           onClose={() => {
             setIssued(null);
+            setIssuedMeta(null);
             notify('Visitor pass issued');
           }}
         />
+      ) : null}
+
+      {tab === 'visitors' ? (
+        <button
+          className="mobile-fab"
+          type="button"
+          onClick={() => setFormOpen(true)}
+          disabled={accessPoints.length === 0}
+          aria-label="Create new visitor pass"
+        >
+          <CalendarPlus size={18} />
+          <span>+ New Pass</span>
+        </button>
       ) : null}
 
       {toast ? <Toast message={toast.message} error={toast.error} onClose={() => setToast(null)} /> : null}
@@ -495,22 +523,86 @@ function ResidentWorkspace() {
 
 function IssuedPassModal({
   result,
+  meta,
   timezone,
   onClose,
 }: {
   result: PassWithCredentials;
+  meta?: { vehicle?: string; purpose?: string } | null;
   timezone?: string;
   onClose: () => void;
 }) {
   const [copiedAll, setCopiedAll] = useState(false);
+  const [shared, setShared] = useState(false);
 
-  const shareText = `*SocietyOS Visitor Pass*\nGuest: ${result.pass.visitor.name}\nFlat: ${result.pass.flat.building} ${result.pass.flat.flatNumber}\nCategory: ${categoryLabel(result.pass.category)}\nPIN: ${result.credentials.pin}\nWindow: ${formatWindow(result.pass.validFrom, result.pass.validUntil, timezone)}\n\nEnter this 6-digit PIN on the gate touchscreen keypad for entry.`;
-  const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+  // Extract clean guest name and vehicle
+  const rawName = result.pass.visitor.name;
+  const vehicleMatch = rawName.match(/\[(.*?)\]/);
+  const vehicle = meta?.vehicle || (vehicleMatch ? vehicleMatch[1] : undefined);
+  const guestName = rawName.replace(/\s*\[.*?\]/, '').trim();
+  const purpose = meta?.purpose;
 
-  function copyAll() {
-    void navigator.clipboard?.writeText(shareText);
-    setCopiedAll(true);
-    setTimeout(() => setCopiedAll(false), 2500);
+  const shareText = [
+    '🏛️ *SocietyOS Visitor Pass*',
+    `👤 *Guest:* ${guestName}`,
+    result.pass.visitor.phone ? `📱 *Phone:* ${result.pass.visitor.phone}` : null,
+    vehicle ? `🚗 *Vehicle:* ${vehicle}` : null,
+    `🏷️ *Category:* ${categoryLabel(result.pass.category)}${purpose ? ` · ${purpose}` : ''}`,
+    `📍 *Destination:* ${result.pass.flat.building} · Flat ${result.pass.flat.flatNumber}`,
+    `⏱️ *Window:* ${formatWindow(result.pass.validFrom, result.pass.validUntil, timezone)}`,
+    '',
+    `🔑 *Gate Access PIN:* ${result.credentials.pin}`,
+    '👉 Enter this 6-digit PIN on the gate touchscreen keypad, or scan the QR token under the camera for direct entry.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const cleanPhone = result.pass.visitor.phone?.replace(/\D/g, '') || '';
+  const whatsappUrl =
+    cleanPhone.length >= 10
+      ? `https://wa.me/${cleanPhone}?text=${encodeURIComponent(shareText)}`
+      : `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+  async function handleShare() {
+    if (canNativeShare) {
+      try {
+        await navigator.share({
+          title: `SocietyOS Pass: ${guestName}`,
+          text: shareText,
+        });
+        setShared(true);
+        setTimeout(() => setShared(false), 2500);
+        return;
+      } catch (error) {
+        if ((error as Error).name === 'AbortError') return;
+      }
+    }
+    // Fallback to WhatsApp if share is unavailable or fails
+    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  async function copyAll() {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareText);
+        setCopiedAll(true);
+        setTimeout(() => setCopiedAll(false), 2500);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = shareText;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        setCopiedAll(true);
+        setTimeout(() => setCopiedAll(false), 2500);
+      }
+    } catch {
+      // Gracefully handle clipboard write restrictions
+    }
   }
 
   return (
@@ -519,17 +611,31 @@ function IssuedPassModal({
       onClose={onClose}
       wide
       footer={
-        <div style={{ display: 'flex', gap: 10, width: '100%', justifyContent: 'space-between' }}>
-          <a
-            className="btn"
-            href={whatsappUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderColor: '#25D366', color: '#128C7E' }}
-          >
-            <span>💬 Share via WhatsApp</span>
-          </a>
-          <button className="btn btn-primary" type="button" onClick={onClose}>
+        <div style={{ display: 'flex', gap: 10, width: '100%', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={() => void handleShare()}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Share2 size={14} />
+              <span>{shared ? '✓ Shared!' : canNativeShare ? 'Share Pass' : 'Share via WhatsApp'}</span>
+            </button>
+            <a
+              className="btn"
+              href={whatsappUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderColor: '#25D366', color: '#128C7E' }}
+            >
+              <span>💬 WhatsApp</span>
+            </a>
+            <button className="btn" type="button" onClick={copyAll}>
+              {copiedAll ? '✓ Copied' : 'Copy'}
+            </button>
+          </div>
+          <button className="btn" type="button" onClick={onClose}>
             I have shared it
           </button>
         </div>
@@ -542,10 +648,18 @@ function IssuedPassModal({
             <div>
               <span className="small muted">VISITOR CREDENTIAL</span>
               <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 600 }}>
-                {result.pass.visitor.name}
+                {guestName}
               </div>
+              {vehicle ? (
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginTop: 2 }}>
+                  🚗 {vehicle}
+                </div>
+              ) : null}
             </div>
-            <Badge tone="active">{categoryLabel(result.pass.category)}</Badge>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Badge tone="active">{categoryLabel(result.pass.category)}</Badge>
+              {purpose ? <Badge tone="neutral">{purpose}</Badge> : null}
+            </div>
           </div>
 
           <div className="pass-card-code-hero">

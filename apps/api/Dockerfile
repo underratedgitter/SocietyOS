@@ -8,6 +8,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY apps/device-simulator/package.json apps/device-simulator/package.json
+COPY apps/mobile/package.json apps/mobile/package.json
+COPY packages/shared-types/package.json packages/shared-types/package.json
 COPY apps/api/prisma apps/api/prisma
 RUN pnpm install --frozen-lockfile
 

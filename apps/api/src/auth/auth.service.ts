@@ -243,7 +243,15 @@ export class AuthService {
     return { accessToken, refreshToken, expiresIn: ACCESS_TTL_SECONDS };
   }
 
-  private toSafeUser(user: UserRecord): SafeUser {
+  async issueSessionTokens(
+    user: UserRecord,
+    userAgent?: string,
+    db: Prisma.TransactionClient | PrismaService = this.prisma,
+  ): Promise<TokenPair> {
+    return this.issueTokens(user, userAgent, db);
+  }
+
+  toSafeUser(user: UserRecord): SafeUser {
     return {
       id: user.id,
       name: user.name,
