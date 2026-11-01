@@ -127,6 +127,57 @@ export function QuickRegisterModal({
 
     setLoading(true);
     try {
+      if (category === 'RELATIVE') {
+        try {
+          const registered = await api.registerRelative(flatId, {
+            name: trimmedName,
+            relation: trimmedPurpose || 'Family / Relative',
+            phone: phone.trim() || undefined,
+            defaultVehicle: trimmedVehicle || undefined,
+          });
+          if (registered.initialPass) {
+            onPassCreated(
+              {
+                pass: {
+                  id: registered.initialPass.id,
+                  societyId: registered.relative.societyId,
+                  status: registered.initialPass.status as any,
+                  effectiveStatus: registered.initialPass.status as any,
+                  category: 'RELATIVE',
+                  visitor: {
+                    id: registered.relative.visitorId,
+                    name: registered.relative.name,
+                    phone: registered.relative.phone ?? null,
+                  },
+                  flat: {
+                    id: flatId,
+                    flatNumber: selectedFlat?.flatNumber ?? '',
+                    building: selectedFlat?.building.name ?? '',
+                  },
+                  host: {
+                    id: '',
+                    name: 'Resident',
+                  },
+                  validFrom: registered.initialPass.validFrom,
+                  validUntil: registered.initialPass.validUntil,
+                  maxUses: registered.initialPass.maxUses,
+                  usedCount: 0,
+                  accessPoints: accessPoints,
+                  requiresApproval: false,
+                  createdAt: new Date().toISOString(),
+                },
+                credentials: registered.initialPass.credentials,
+              },
+              { vehicle: trimmedVehicle, purpose: trimmedPurpose || 'Family / Relative' },
+            );
+            onClose();
+            return;
+          }
+        } catch {
+          // If already in directory, proceed to standard createPass
+        }
+      }
+
       const created = await api.createPass({
         flatId,
         visitor: {

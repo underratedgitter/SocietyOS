@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { api, ApiError, setAuthTokens } from '../api/client';
-import type { FlatLink, Membership, Session, SocietyRef } from '../api/types';
+import { api, ApiError, initStorage, setAuthTokens } from '../api/client';
+import { mobileStorage } from '../api/storage';
+import type { FlatLink, Session, SocietyRef } from '../api/types';
 
 export const DEMO_RESIDENTS = [
   { label: 'Resident 101 (Palm Grove)', email: 'resident.a1@societyos.dev', password: 'Society#2026' },
@@ -13,6 +14,7 @@ interface AuthContextType {
   selectedSociety: SocietyRef | null;
   loading: boolean;
   error: string | null;
+  isOffline: boolean;
   setSelectedFlat: (flat: FlatLink) => void;
   login: (email: string, password: string) => Promise<Session>;
   demoLogin: (email: string, password: string) => Promise<Session>;
@@ -27,6 +29,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [selectedFlat, setSelectedFlat] = useState<FlatLink | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [isOffline, setIsOffline] = useState<boolean>(false);
 
   const selectedSociety: SocietyRef | null = selectedFlat
     ? {
@@ -41,12 +44,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me = await api.getMe();
       setSession(me);
+      setIsOffline(false);
+      void mobileStorage.saveCachedSession(me);
       if (me.flats.length > 0) {
         setSelectedFlat((prev) => (prev && me.flats.some((f) => f.id === prev.id) ? prev : me.flats[0]));
       }
-    } catch {
-      setSession(null);
-      setSelectedFlat(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+        setIsOffline(true);
+      } else {
+        setSession(null);
+        setSelectedFlat(null);
+        void mobileStorage.clearCachedSession();
+      }
     }
   };
 
@@ -54,17 +64,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let isMounted = true;
     (async () => {
       try {
+        await initStorage();
+
+        // Check for offline cached session first
+        const cached = await mobileStorage.loadCachedSession<Session>();
+        if (cached && isMounted) {
+          setSession(cached);
+          if (cached.flats?.length > 0) {
+            setSelectedFlat(cached.flats[0]);
+          }
+        }
+
+        // Verify with live backend
         const me = await api.getMe();
         if (isMounted) {
           setSession(me);
+          setIsOffline(false);
+          void mobileStorage.saveCachedSession(me);
           if (me.flats.length > 0) {
-            setSelectedFlat(me.flats[0]);
+            setSelectedFlat((prev) => (prev && me.flats.some((f) => f.id === prev.id) ? prev : me.flats[0]));
           }
         }
-      } catch {
-        // Not logged in or expired session
+      } catch (err) {
         if (isMounted) {
-          setSession(null);
+          if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+            setIsOffline(true);
+            // Keep cached session if available during network interruption
+          } else {
+            setSession(null);
+            setSelectedFlat(null);
+            void mobileStorage.clearCachedSession();
+          }
         }
       } finally {
         if (isMounted) {
@@ -84,6 +114,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await api.login(email, password);
       const me = await api.getMe();
       setSession(me);
+      setIsOffline(false);
+      void mobileStorage.saveCachedSession(me);
       if (me.flats.length > 0) {
         setSelectedFlat(me.flats[0]);
       }
@@ -108,6 +140,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setSession(null);
       setSelectedFlat(null);
+      void mobileStorage.clearCachedSession();
+      void mobileStorage.clearTokens();
     }
   };
 
@@ -119,6 +153,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         selectedSociety,
         loading,
         error,
+        isOffline,
         setSelectedFlat,
         login,
         demoLogin,

@@ -127,3 +127,70 @@ export interface CreatePassInput {
   maxUses?: number;
   accessPointIds: string[];
 }
+
+export type RelativeRelationType =
+  | 'PARENT'
+  | 'SIBLING'
+  | 'SPOUSE'
+  | 'CHILD'
+  | 'GRANDPARENT'
+  | 'IN_LAWS'
+  | 'COUSIN'
+  | 'EXTENDED_FAMILY'
+  | 'OTHER';
+
+export interface RelativeMember {
+  id: string;
+  visitorId: string;
+  societyId: string;
+  flatId: string;
+  name: string;
+  rawName?: string;
+  phone?: string | null;
+  relation: RelativeRelationType | string;
+  defaultVehicle?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  lastVisitAt?: string | null;
+  activePassCount: number;
+  activePassId?: string;
+}
+
+export interface RegisterRelativeRequest {
+  flatId?: string;
+  name: string;
+  phone?: string;
+  relation: RelativeRelationType | string;
+  defaultVehicle?: string;
+  notes?: string;
+}
+
+export interface QuickPassRequest {
+  validHours?: number;
+  maxUses?: number;
+  vehicle?: string;
+}
+
+export interface QuickPassResult {
+  pass: PassView;
+  credentials: {
+    pin: string;
+    qrToken: string;
+  };
+}
+
+export interface PublicSociety {
+  id: string;
+  name: string;
+  slug: string;
+  timezone: string;
+}
+
+export interface PublicFlat {
+  id: string;
+  buildingId: string;
+  buildingName: string;
+  flatNumber: string;
+  label: string;
+}
+

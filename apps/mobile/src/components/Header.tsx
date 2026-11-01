@@ -11,8 +11,8 @@ import { colors } from '../styles/theme';
 
 interface HeaderProps {
   onRegisterPress: () => void;
-  activeTab: 'passes' | 'notices';
-  onTabChange: (tab: 'passes' | 'notices') => void;
+  activeTab: 'passes' | 'relatives' | 'notices';
+  onTabChange: (tab: 'passes' | 'relatives' | 'notices') => void;
 }
 
 export function Header({ onRegisterPress, activeTab, onTabChange }: HeaderProps) {
@@ -65,7 +65,7 @@ export function Header({ onRegisterPress, activeTab, onTabChange }: HeaderProps)
           onPress={onRegisterPress}
           activeOpacity={0.85}
         >
-          <Text style={styles.quickRegisterButtonText}>+ Register Relative / Family</Text>
+          <Text style={styles.quickRegisterButtonText}>+ Register Relative</Text>
         </TouchableOpacity>
       </View>
 
@@ -76,7 +76,16 @@ export function Header({ onRegisterPress, activeTab, onTabChange }: HeaderProps)
           onPress={() => onTabChange('passes')}
         >
           <Text style={[styles.tabButtonText, activeTab === 'passes' && styles.tabButtonTextActive]}>
-            🎟️ Passes & Visitors
+            🎟️ Passes
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.tabButton, activeTab === 'relatives' && styles.tabButtonActive]}
+          onPress={() => onTabChange('relatives')}
+        >
+          <Text style={[styles.tabButtonText, activeTab === 'relatives' && styles.tabButtonTextActive]}>
+            👨‍👩‍👧 Relatives
           </Text>
         </TouchableOpacity>
 
@@ -85,7 +94,7 @@ export function Header({ onRegisterPress, activeTab, onTabChange }: HeaderProps)
           onPress={() => onTabChange('notices')}
         >
           <Text style={[styles.tabButtonText, activeTab === 'notices' && styles.tabButtonTextActive]}>
-            📢 Notice Board
+            📢 Notices
           </Text>
         </TouchableOpacity>
       </View>

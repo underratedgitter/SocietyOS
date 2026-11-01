@@ -76,8 +76,14 @@ export class AuthController {
     }
     const result = await this.auth.login(email, dto.password, req.headers['user-agent']);
     this.setAuthCookies(res, result);
-    // Tokens live only in HTTP-only cookies; returning them here would defeat that boundary.
-    return { user: result.user, expiresIn: result.expiresIn };
+    const isMobileClient =
+      req.headers['x-client-type'] === 'mobile' ||
+      req.headers['x-auth-mode'] === 'bearer';
+    return {
+      user: result.user,
+      expiresIn: result.expiresIn,
+      ...(isMobileClient ? { accessToken: result.accessToken, refreshToken: result.refreshToken } : {}),
+    };
   }
 
   @Post('refresh')
@@ -94,7 +100,14 @@ export class AuthController {
     if (!token) throw AppException.unauthorized('INVALID_SESSION', 'Session is invalid or expired');
     const result = await this.auth.refresh(token, req.headers['user-agent']);
     this.setAuthCookies(res, result);
-    return { user: result.user, expiresIn: result.expiresIn };
+    const isMobileClient =
+      req.headers['x-client-type'] === 'mobile' ||
+      req.headers['x-auth-mode'] === 'bearer';
+    return {
+      user: result.user,
+      expiresIn: result.expiresIn,
+      ...(isMobileClient ? { accessToken: result.accessToken, refreshToken: result.refreshToken } : {}),
+    };
   }
 
   @Post('logout')

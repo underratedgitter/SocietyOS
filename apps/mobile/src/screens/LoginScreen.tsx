@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { getApiUrl, setApiUrl } from '../api/client';
+import { mobileStorage } from '../api/storage';
 import { DEMO_RESIDENTS, useAuth } from '../context/AuthContext';
 import { colors } from '../styles/theme';
 
@@ -22,6 +23,16 @@ export function LoginScreen() {
   const [apiUrl, setLocalApiUrl] = useState(getApiUrl());
   const [showConfig, setShowConfig] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    void (async () => {
+      const saved = await mobileStorage.loadApiUrl();
+      if (saved) {
+        setLocalApiUrl(saved);
+        setApiUrl(saved);
+      }
+    })();
+  }, []);
 
   const handleLogin = async (loginEmail = email, loginPass = password) => {
     setLocalError(null);

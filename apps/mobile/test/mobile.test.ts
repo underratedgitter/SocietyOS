@@ -9,7 +9,9 @@ import {
   parseSetCookie,
   ApiError,
   api,
+  initStorage,
 } from '../src/api/client';
+import { mobileStorage } from '../src/api/storage';
 import {
   categoryLabel,
   formatDate,
@@ -233,3 +235,99 @@ describe('Pass Sharing & Relative Registration Logic', () => {
     assert.equal(cleanGuestName, 'Sunita Rao');
   });
 });
+
+describe('Mobile Local Secure Storage & Persistence', () => {
+  test('persists tokens and recovers them cleanly', async () => {
+    mobileStorage._clearMemory();
+
+    await mobileStorage.saveTokens({
+      accessToken: 'test-jwt-access-token',
+      refreshToken: 'test-jwt-refresh-token',
+      cookies: { so_access: 'token123' },
+    });
+
+    const loaded = await mobileStorage.loadTokens();
+    assert.equal(loaded.accessToken, 'test-jwt-access-token');
+    assert.equal(loaded.refreshToken, 'test-jwt-refresh-token');
+    assert.equal(loaded.cookies.so_access, 'token123');
+
+    await mobileStorage.clearTokens();
+    const cleared = await mobileStorage.loadTokens();
+    assert.equal(cleared.accessToken, null);
+    assert.equal(cleared.refreshToken, null);
+    assert.deepEqual(cleared.cookies, {});
+  });
+
+  test('caches user session for offline resilience', async () => {
+    mobileStorage._clearMemory();
+
+    const mockSession = {
+      user: {
+        id: 'u-1',
+        name: 'Sunil Patel',
+        email: 'sunil@societyos.dev',
+        phone: '+919999911111',
+        isPlatformAdmin: false,
+        mustChangePassword: false,
+      },
+      memberships: [],
+      flats: [
+        {
+          id: 'flat-101',
+          flatNumber: '101',
+          building: { id: 'b-1', name: 'Tower A', societyId: 's-1' },
+          relationship: 'OWNER' as const,
+        },
+      ],
+    };
+
+    await mobileStorage.saveCachedSession(mockSession);
+    const cached = await mobileStorage.loadCachedSession<typeof mockSession>();
+    assert.ok(cached);
+    assert.equal(cached.user.email, 'sunil@societyos.dev');
+    assert.equal(cached.flats[0].flatNumber, '101');
+
+    await mobileStorage.clearCachedSession();
+    const empty = await mobileStorage.loadCachedSession();
+    assert.equal(empty, null);
+  });
+
+  test('persists configured API URL', async () => {
+    mobileStorage._clearMemory();
+
+    await mobileStorage.saveApiUrl('http://192.168.1.50:80/api/v1');
+    const url = await mobileStorage.loadApiUrl();
+    assert.equal(url, 'http://192.168.1.50:80/api/v1');
+  });
+
+  test('initStorage synchronizes persistent storage with client tokens and API URL', async () => {
+    mobileStorage._clearMemory();
+    await mobileStorage.saveTokens({
+      accessToken: 'restored-access',
+      refreshToken: 'restored-refresh',
+    });
+    await mobileStorage.saveApiUrl('http://10.0.0.2:80/api/v1');
+
+    await initStorage();
+
+    assert.equal(getAccessToken(), 'restored-access');
+    assert.equal(getRefreshToken(), 'restored-refresh');
+    assert.equal(getApiUrl(), 'http://10.0.0.2:80/api/v1');
+
+    // Clean up
+    setAuthTokens(null, null);
+    setApiUrl('http://localhost:80/api/v1');
+  });
+});
+
+describe('Mobile Relatives API Client Methods', () => {
+  test('client defines listRelatives, registerRelative, issueQuickPass, deleteRelative', () => {
+    assert.equal(typeof api.listRelatives, 'function');
+    assert.equal(typeof api.registerRelative, 'function');
+    assert.equal(typeof api.issueQuickPass, 'function');
+    assert.equal(typeof api.deleteRelative, 'function');
+    assert.equal(typeof api.listPublicSocieties, 'function');
+    assert.equal(typeof api.listPublicFlats, 'function');
+  });
+});
+

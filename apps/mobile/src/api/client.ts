@@ -5,14 +5,33 @@ import type {
   PassPage,
   PassView,
   PassWithCredentials,
+  PublicFlat,
+  PublicSociety,
+  QuickPassRequest,
+  QuickPassResult,
+  RegisterRelativeRequest,
+  RelativeMember,
   Session,
   User,
 } from './types';
+import { mobileStorage } from './storage';
 
 let currentApiUrl = 'http://localhost:80/api/v1';
 
 export function setApiUrl(url: string) {
   currentApiUrl = url.replace(/\/+$/, '');
+  void mobileStorage.saveApiUrl(currentApiUrl);
+}
+
+export async function initStorage(): Promise<void> {
+  const savedUrl = await mobileStorage.loadApiUrl();
+  if (savedUrl) {
+    currentApiUrl = savedUrl.replace(/\/+$/, '');
+  }
+  const loaded = await mobileStorage.loadTokens();
+  storedAccessToken = loaded.accessToken;
+  storedRefreshToken = loaded.refreshToken;
+  storedCookies = loaded.cookies;
 }
 
 export function getApiUrl(): string {
@@ -36,14 +55,28 @@ let storedAccessToken: string | null = null;
 let storedRefreshToken: string | null = null;
 let storedCookies: Record<string, string> = {};
 
-export function setAuthTokens(accessToken: string | null, refreshToken: string | null = null) {
+export function setAuthTokens(
+  accessToken: string | null,
+  refreshToken: string | null = null,
+  cookies?: Record<string, string>,
+) {
   storedAccessToken = accessToken;
-  if (refreshToken) {
+  if (refreshToken !== null && refreshToken !== undefined) {
     storedRefreshToken = refreshToken;
+  }
+  if (cookies) {
+    storedCookies = { ...storedCookies, ...cookies };
   }
   if (!accessToken) {
     storedRefreshToken = null;
     storedCookies = {};
+    void mobileStorage.clearTokens();
+  } else {
+    void mobileStorage.saveTokens({
+      accessToken,
+      refreshToken: storedRefreshToken,
+      cookies: storedCookies,
+    });
   }
 }
 
@@ -110,6 +143,8 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     requestHeaders.set('content-type', 'application/json');
   }
 
+  requestHeaders.set('x-client-type', 'mobile');
+
   if (storedAccessToken) {
     requestHeaders.set('authorization', `Bearer ${storedAccessToken}`);
   }
@@ -155,6 +190,11 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
       if (parsed.so_refresh) {
         storedRefreshToken = parsed.so_refresh;
       }
+      void mobileStorage.saveTokens({
+        accessToken: storedAccessToken,
+        refreshToken: storedRefreshToken,
+        cookies: storedCookies,
+      });
     }
   } catch {
     // Ignore header inspection errors in restricted environments
@@ -199,12 +239,23 @@ export async function refreshSession(): Promise<boolean> {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
+        'x-client-type': 'mobile',
         ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
       },
       body: JSON.stringify({ refreshToken: storedRefreshToken }),
     });
 
     if (!res.ok) return false;
+
+    try {
+      const data = (await res.json()) as { accessToken?: string; refreshToken?: string };
+      if (data?.accessToken) {
+        setAuthTokens(data.accessToken, data.refreshToken ?? storedRefreshToken);
+        return true;
+      }
+    } catch {
+      // Fall through to cookie parsing
+    }
 
     let rawSetCookie: string[] | string | null = null;
     if (typeof (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === 'function') {
@@ -217,6 +268,11 @@ export async function refreshSession(): Promise<boolean> {
       storedCookies = { ...storedCookies, ...parsed };
       if (parsed.so_access) storedAccessToken = parsed.so_access;
       if (parsed.so_refresh) storedRefreshToken = parsed.so_refresh;
+      void mobileStorage.saveTokens({
+        accessToken: storedAccessToken,
+        refreshToken: storedRefreshToken,
+        cookies: storedCookies,
+      });
     }
     return true;
   } catch {
@@ -226,12 +282,23 @@ export async function refreshSession(): Promise<boolean> {
 
 // Concrete API calls
 export const api = {
-  async login(email: string, password: string): Promise<{ user: User; expiresIn: number }> {
-    const res = await request<{ user: User; expiresIn: number }>('/auth/login', {
+  async login(
+    email: string,
+    password: string,
+  ): Promise<{ user: User; expiresIn: number; accessToken?: string; refreshToken?: string }> {
+    const res = await request<{
+      user: User;
+      expiresIn: number;
+      accessToken?: string;
+      refreshToken?: string;
+    }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
       skipRefresh: true,
     });
+    if (res.accessToken) {
+      setAuthTokens(res.accessToken, res.refreshToken ?? null);
+    }
     return res;
   },
 
@@ -305,4 +372,59 @@ export const api = {
   async listAnnouncements(societyId: string): Promise<Announcement[]> {
     return request<Announcement[]>(`/societies/${societyId}/announcements`);
   },
+
+  // Relatives Directory Management
+  async listRelatives(flatId: string): Promise<RelativeMember[]> {
+    return request<RelativeMember[]>(`/flats/${flatId}/relatives`);
+  },
+
+  async registerRelative(
+    flatId: string,
+    payload: RegisterRelativeRequest,
+  ): Promise<{
+    relative: RelativeMember;
+    initialPass?: {
+      id: string;
+      status: string;
+      validFrom: string;
+      validUntil: string;
+      maxUses: number;
+      credentials: {
+        pin: string;
+        qrToken: string;
+      };
+    };
+  }> {
+    return request(`/flats/${flatId}/relatives`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async issueQuickPass(
+    flatId: string,
+    visitorId: string,
+    payload: QuickPassRequest = {},
+  ): Promise<QuickPassResult> {
+    return request<QuickPassResult>(`/flats/${flatId}/relatives/${visitorId}/quick-pass`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async deleteRelative(flatId: string, visitorId: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/flats/${flatId}/relatives/${visitorId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  // Public Directory & Self Check-in
+  async listPublicSocieties(): Promise<PublicSociety[]> {
+    return request<PublicSociety[]>('/public/societies');
+  },
+
+  async listPublicFlats(societyId: string): Promise<PublicFlat[]> {
+    return request<PublicFlat[]>(`/public/societies/${societyId}/flats`);
+  },
 };
+

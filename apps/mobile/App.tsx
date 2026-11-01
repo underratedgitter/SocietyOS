@@ -12,11 +12,12 @@ import { AuthProvider, useAuth } from './src/context/AuthContext';
 import { HomeScreen } from './src/screens/HomeScreen';
 import { LoginScreen } from './src/screens/LoginScreen';
 import { NoticesScreen } from './src/screens/NoticesScreen';
+import { RelativesScreen } from './src/screens/RelativesScreen';
 import { colors } from './src/styles/theme';
 
 function MainNavigator() {
   const { session, loading } = useAuth();
-  const [activeTab, setActiveTab] = useState<'passes' | 'notices'>('passes');
+  const [activeTab, setActiveTab] = useState<'passes' | 'relatives' | 'notices'>('passes');
   const [registerModalOpen, setRegisterModalOpen] = useState(false);
 
   if (loading) {
@@ -53,6 +54,8 @@ function MainNavigator() {
           registerModalOpen={registerModalOpen}
           setRegisterModalOpen={setRegisterModalOpen}
         />
+      ) : activeTab === 'relatives' ? (
+        <RelativesScreen />
       ) : (
         <NoticesScreen />
       )}

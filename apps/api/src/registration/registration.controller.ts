@@ -41,12 +41,21 @@ export class RegistrationController {
 
     const result = await this.registrationService.registerUser(dto, req.headers['user-agent']);
     setAuthCookies(res, result.tokens);
+    const isMobileClient =
+      req.headers['x-client-type'] === 'mobile' ||
+      req.headers['x-auth-mode'] === 'bearer';
 
     return {
       user: result.user,
       expiresIn: result.tokens.expiresIn,
       society: result.society,
       flat: result.flat,
+      ...(isMobileClient
+        ? {
+            accessToken: result.tokens.accessToken,
+            refreshToken: result.tokens.refreshToken,
+          }
+        : {}),
     };
   }
 

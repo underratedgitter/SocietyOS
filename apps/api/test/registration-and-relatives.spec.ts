@@ -139,6 +139,8 @@ describe('Registration & Relatives Service Modules', () => {
     };
 
     mockAuthService = {
+      login: jest.fn(),
+      refresh: jest.fn(),
       issueSessionTokens: jest.fn().mockResolvedValue({
         accessToken: 'mock_at',
         refreshToken: 'mock_rt',
@@ -497,4 +499,95 @@ describe('Registration & Relatives Service Modules', () => {
       ).rejects.toThrow(AppException);
     });
   });
+
+  describe('Mobile Client Bearer Token Delivery (AuthController & RegistrationController)', () => {
+    let authController: any;
+    let regController: any;
+    let mockResponse: any;
+
+    beforeEach(async () => {
+      const { AuthController } = await import('../src/auth/auth.controller');
+      const { RegistrationController } = await import('../src/registration/registration.controller');
+
+      authController = new AuthController(mockAuthService, mockRateLimit);
+      regController = new RegistrationController(registrationService, mockRateLimit);
+      mockResponse = {
+        cookie: jest.fn(),
+        clearCookie: jest.fn(),
+      };
+    });
+
+    it('returns accessToken and refreshToken in body when X-Client-Type is mobile', async () => {
+      mockAuthService.login.mockResolvedValueOnce({
+        user: { id: USER_ID, email: 'resident@societyos.dev', name: 'Resident' },
+        expiresIn: 900,
+        accessToken: 'mobile-access-jwt',
+        refreshToken: 'mobile-refresh-jwt',
+      });
+
+      const req = {
+        ip: '127.0.0.1',
+        headers: { 'x-client-type': 'mobile', 'user-agent': 'SocietyOS-Mobile/1.0' },
+      };
+
+      const result = await authController.login(
+        { email: 'resident@societyos.dev', password: 'Password#123' },
+        req as any,
+        mockResponse,
+      );
+
+      expect(result.accessToken).toBe('mobile-access-jwt');
+      expect(result.refreshToken).toBe('mobile-refresh-jwt');
+      expect(result.user.email).toBe('resident@societyos.dev');
+    });
+
+    it('omits accessToken and refreshToken from body for standard web clients (cookie only)', async () => {
+      mockAuthService.login.mockResolvedValueOnce({
+        user: { id: USER_ID, email: 'resident@societyos.dev', name: 'Resident' },
+        expiresIn: 900,
+        accessToken: 'web-access-jwt',
+        refreshToken: 'web-refresh-jwt',
+      });
+
+      const req = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      };
+
+      const result = await authController.login(
+        { email: 'resident@societyos.dev', password: 'Password#123' },
+        req as any,
+        mockResponse,
+      );
+
+      expect(result.accessToken).toBeUndefined();
+      expect(result.refreshToken).toBeUndefined();
+      expect(result.user.email).toBe('resident@societyos.dev');
+      expect(mockResponse.cookie).toHaveBeenCalled();
+    });
+
+    it('returns tokens on session refresh when X-Client-Type is mobile', async () => {
+      mockAuthService.refresh.mockResolvedValueOnce({
+        user: { id: USER_ID, email: 'resident@societyos.dev', name: 'Resident' },
+        expiresIn: 900,
+        accessToken: 'refreshed-mobile-access',
+        refreshToken: 'refreshed-mobile-refresh',
+      });
+
+      const req = {
+        ip: '127.0.0.1',
+        headers: { 'x-client-type': 'mobile', 'user-agent': 'SocietyOS-Mobile/1.0' },
+      };
+
+      const result = await authController.refresh(
+        { refreshToken: 'existing-mobile-refresh' },
+        req as any,
+        mockResponse,
+      );
+
+      expect(result.accessToken).toBe('refreshed-mobile-access');
+      expect(result.refreshToken).toBe('refreshed-mobile-refresh');
+    });
+  });
 });
+
