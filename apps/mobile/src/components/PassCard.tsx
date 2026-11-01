@@ -9,13 +9,21 @@ import {
   View,
 } from 'react-native';
 import { colors } from '../styles/theme';
-import type { PassWithCredentials } from '../api/types';
-import { categoryLabel, formatWindow } from '../utils/format';
+import type { PassView, PassWithCredentials } from '../api/types';
+import {
+  buildPassShareText,
+  buildWhatsAppShareUrl,
+  categoryLabel,
+  formatWindow,
+} from '../utils/format';
+import { getApiUrl } from '../api/client';
 import { QRCodeView } from './QRCodeView';
 import { PassBadge } from './PassBadge';
 
-interface PassCardProps {
-  passData: PassWithCredentials;
+export interface PassCardProps {
+  passData:
+    | PassWithCredentials
+    | { pass: PassView; credentials?: { pin?: string; qrToken?: string } | null };
   timezone?: string;
   onClose?: () => void;
   meta?: { vehicle?: string; purpose?: string } | null;
@@ -32,29 +40,32 @@ export function PassCard({ passData, timezone, onClose, meta }: PassCardProps) {
   const guestName = rawName.replace(/\s*\[.*?\]/, '').trim();
   const purpose = meta?.purpose;
 
-  const shareText = [
-    '🏛️ *SocietyOS Visitor Pass*',
-    `👤 *Guest:* ${guestName}`,
-    pass.visitor.phone ? `📱 *Phone:* ${pass.visitor.phone}` : null,
-    vehicle ? `🚗 *Vehicle:* ${vehicle}` : null,
-    `🏷️ *Category:* ${categoryLabel(pass.category)}${purpose ? ` · ${purpose}` : ''}`,
-    `📍 *Destination:* ${pass.flat.building} · Flat ${pass.flat.flatNumber}`,
-    `⏱️ *Window:* ${formatWindow(pass.validFrom, pass.validUntil, timezone)}`,
-    '',
-    `🔑 *Gate Access PIN:* ${credentials.pin}`,
-    '👉 Enter this 6-digit PIN on the gate kiosk keypad, or scan the QR token under the camera for direct contactless entry.',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const hasPin = Boolean(credentials?.pin);
+  const hasQr = Boolean(credentials?.qrToken);
+
+  const shareText = buildPassShareText({
+    guestName,
+    phone: pass.visitor.phone,
+    vehicle,
+    category: pass.category,
+    purpose,
+    building: pass.flat.building,
+    flatNumber: pass.flat.flatNumber,
+    validFrom: pass.validFrom,
+    validUntil: pass.validUntil,
+    pin: credentials?.pin,
+    passId: pass.id,
+    apiUrl: getApiUrl(),
+    timezone,
+  });
 
   const handleWhatsAppShare = async () => {
-    const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+    const whatsappUrl = buildWhatsAppShareUrl(shareText, pass.visitor.phone);
     try {
       const supported = await Linking.canOpenURL(whatsappUrl);
       if (supported) {
         await Linking.openURL(whatsappUrl);
       } else {
-        // Fallback to native share if WhatsApp app URL is not directly supported
         await handleNativeShare();
       }
     } catch {
@@ -68,20 +79,31 @@ export function PassCard({ passData, timezone, onClose, meta }: PassCardProps) {
         title: `SocietyOS Pass: ${guestName}`,
         message: shareText,
       });
-    } catch (err) {
+    } catch {
       Alert.alert('Share Error', 'Could not open share sheet');
     }
   };
 
   const handleCopyPin = () => {
-    // Show user confirmation
-    setCopiedPin(true);
-    setTimeout(() => setCopiedPin(false), 2500);
-    Alert.alert('PIN Copied', `PIN: ${credentials.pin}\nShare this with your guest for gate entry.`);
+    if (credentials?.pin) {
+      setCopiedPin(true);
+      setTimeout(() => setCopiedPin(false), 2500);
+      Alert.alert('PIN Copied', `PIN: ${credentials.pin}\nShare this with your guest for gate entry.`);
+    } else {
+      Alert.alert(
+        'PIN Protected',
+        'For security, the access PIN is displayed only at creation time. Create a new pass if a new PIN is required.',
+      );
+    }
   };
+
+  const qrValue = credentials?.qrToken || `SOCIETYOS:PASS:${pass.id}:${pass.societyId}`;
 
   return (
     <View style={styles.cardContainer}>
+      {/* Decorative top amber ticket border */}
+      <View style={styles.ticketTopBar} />
+
       {/* Top Header */}
       <View style={styles.cardHeader}>
         <View style={styles.headerLeft}>
@@ -109,16 +131,26 @@ export function PassCard({ passData, timezone, onClose, meta }: PassCardProps) {
       </View>
 
       {/* Hero PIN Box */}
-      <View style={styles.pinHero}>
+      <View style={[styles.pinHero, !hasPin && styles.pinHeroInactive]}>
         <Text style={styles.pinLabel}>GATE ACCESS PIN</Text>
-        <Text style={styles.pinNumber}>{credentials.pin}</Text>
-        <Text style={styles.pinInstruction}>Touch 6-digit PIN on gate kiosk keypad</Text>
+        <Text style={[styles.pinNumber, !hasPin && styles.pinNumberHidden]}>
+          {hasPin ? credentials!.pin : '••••••'}
+        </Text>
+        <Text style={styles.pinInstruction}>
+          {hasPin
+            ? 'Touch 6-digit PIN on gate kiosk keypad'
+            : 'PIN issued at creation. Hashed securely for resident safety.'}
+        </Text>
       </View>
 
       {/* QR Code Section */}
       <View style={styles.qrSection}>
-        <QRCodeView value={credentials.qrToken} size={150} />
-        <Text style={styles.qrInstruction}>Scan directly under kiosk camera</Text>
+        <QRCodeView value={qrValue} size={150} />
+        <Text style={styles.qrInstruction}>
+          {hasQr
+            ? 'Scan directly under kiosk camera for contactless entry'
+            : 'Gate verification QR code token'}
+        </Text>
       </View>
 
       {/* Details Grid */}
@@ -144,18 +176,20 @@ export function PassCard({ passData, timezone, onClose, meta }: PassCardProps) {
       {/* Action Buttons */}
       <View style={styles.actionRow}>
         <TouchableOpacity style={styles.whatsappButton} onPress={handleWhatsAppShare} activeOpacity={0.85}>
-          <Text style={styles.whatsappButtonText}>💬 Share via WhatsApp</Text>
+          <Text style={styles.whatsappButtonText}>💬 WhatsApp Pass</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.shareButton} onPress={handleNativeShare} activeOpacity={0.85}>
-          <Text style={styles.shareButtonText}>↗️ Share Pass</Text>
+          <Text style={styles.shareButtonText}>↗️ Share Sheet</Text>
         </TouchableOpacity>
       </View>
 
       <View style={styles.secondaryActions}>
-        <TouchableOpacity style={styles.copyButton} onPress={handleCopyPin}>
-          <Text style={styles.copyButtonText}>{copiedPin ? '✓ PIN Copied' : '📋 Copy PIN'}</Text>
-        </TouchableOpacity>
+        {hasPin ? (
+          <TouchableOpacity style={styles.copyButton} onPress={handleCopyPin}>
+            <Text style={styles.copyButtonText}>{copiedPin ? '✓ PIN Copied' : '📋 Copy PIN'}</Text>
+          </TouchableOpacity>
+        ) : null}
         {onClose ? (
           <TouchableOpacity style={styles.closeButton} onPress={onClose}>
             <Text style={styles.closeButtonText}>Done</Text>
@@ -179,6 +213,10 @@ const styles = StyleSheet.create({
     elevation: 4,
     marginVertical: 12,
     overflow: 'hidden',
+  },
+  ticketTopBar: {
+    height: 4,
+    backgroundColor: colors.amber,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -279,6 +317,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  pinHeroInactive: {
+    backgroundColor: '#f3f4f6',
+    borderColor: '#e5e7eb',
+  },
   pinLabel: {
     fontSize: 11,
     fontWeight: '700',
@@ -293,6 +335,11 @@ const styles = StyleSheet.create({
     color: colors.ink,
     fontFamily: 'Courier',
     marginVertical: 4,
+  },
+  pinNumberHidden: {
+    fontSize: 26,
+    letterSpacing: 4,
+    color: colors.textMuted,
   },
   pinInstruction: {
     fontSize: 12,

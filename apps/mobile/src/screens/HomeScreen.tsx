@@ -39,10 +39,15 @@ export function HomeScreen({
   const [error, setError] = useState<string | null>(null);
   const [activeSubTab, setActiveSubTab] = useState<'current' | 'history'>('current');
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [issuedCredentials, setIssuedCredentials] = useState<
+    Record<string, { pin: string; qrToken: string }>
+  >({});
 
   // Active pass details modal
   const [selectedPassModal, setSelectedPassModal] = useState<{
-    passWithCredentials: PassWithCredentials;
+    passWithCredentials:
+      | PassWithCredentials
+      | { pass: PassView; credentials?: { pin?: string; qrToken?: string } | null };
     meta?: { vehicle?: string; purpose?: string } | null;
   } | null>(null);
 
@@ -121,16 +126,11 @@ export function HomeScreen({
 
   // View pass credential modal
   const handleViewPass = (pass: PassView) => {
-    // Generate credentials display from known pass data
-    const simulatedQr = `SOCIETYOS:PASS:${pass.id}:${pass.societyId}`;
-    const pin = (pass as unknown as { credentials?: { pin?: string } }).credentials?.pin || '847291';
+    const creds = issuedCredentials[pass.id] ?? null;
     setSelectedPassModal({
       passWithCredentials: {
         pass,
-        credentials: {
-          pin,
-          qrToken: simulatedQr,
-        },
+        credentials: creds,
       },
     });
   };
@@ -389,6 +389,10 @@ export function HomeScreen({
           selectedFlat={selectedFlat}
           accessPoints={accessPoints}
           onPassCreated={(newPassWithCreds, meta) => {
+            setIssuedCredentials((prev) => ({
+              ...prev,
+              [newPassWithCreds.pass.id]: newPassWithCreds.credentials,
+            }));
             setSelectedPassModal({
               passWithCredentials: newPassWithCreds,
               meta,

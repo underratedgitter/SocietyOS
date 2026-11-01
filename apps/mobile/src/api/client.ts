@@ -55,20 +55,35 @@ export function getRefreshToken(): string | null {
   return storedRefreshToken;
 }
 
-function parseSetCookie(setCookieHeaders: string[] | string | null | undefined): Record<string, string> {
+export function parseSetCookie(setCookieHeaders: string[] | string | null | undefined): Record<string, string> {
   if (!setCookieHeaders) return {};
   const cookies: Record<string, string> = {};
-  const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  const rawHeaders = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
 
-  for (const header of headers) {
-    for (const part of header.split(',')) {
-      const match = part.trim().match(/^([^=;]+)=([^;]*)/);
-      if (match) {
-        const name = match[1].trim();
-        const value = match[2].trim();
-        if (name && !['expires', 'path', 'domain', 'samesite', 'httponly', 'secure'].includes(name.toLowerCase())) {
-          cookies[name] = value;
-        }
+  // Split on comma only if it's not part of an HTTP Expires date (e.g. 'Expires=Sun, 01 Nov 2026')
+  const individualCookies: string[] = [];
+  for (const header of rawHeaders) {
+    const parts = header.split(/,(?!\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b)/i);
+    for (const part of parts) {
+      if (part.trim()) individualCookies.push(part.trim());
+    }
+  }
+
+  for (const cookieStr of individualCookies) {
+    const segments = cookieStr.split(';');
+    const firstSegment = segments[0]?.trim();
+    if (!firstSegment) continue;
+    const eqIdx = firstSegment.indexOf('=');
+    if (eqIdx > 0) {
+      const name = firstSegment.slice(0, eqIdx).trim();
+      const value = firstSegment.slice(eqIdx + 1).trim();
+      if (
+        name &&
+        !['expires', 'path', 'domain', 'samesite', 'httponly', 'secure', 'max-age'].includes(
+          name.toLowerCase(),
+        )
+      ) {
+        cookies[name] = value;
       }
     }
   }
@@ -245,12 +260,28 @@ export const api = {
     return request<PassView>(`/visitor-passes/${passId}`);
   },
 
-  async createPass(input: CreatePassInput, idempotencyKey?: string): Promise<PassWithCredentials> {
-    return request<PassWithCredentials>('/visitor-passes', {
+  async createPass(
+    input: CreatePassInput,
+    idempotencyKey?: string,
+    societyId?: string,
+  ): Promise<PassWithCredentials> {
+    const key =
+      idempotencyKey ??
+      `pass-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const endpoint = '/visitor-passes';
+    return request<PassWithCredentials>(endpoint, {
       method: 'POST',
-      idempotencyKey: idempotencyKey ?? `pass-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      idempotencyKey: key,
       body: JSON.stringify(input),
     });
+  },
+
+  async createSocietyPass(
+    societyId: string,
+    input: CreatePassInput,
+    idempotencyKey?: string,
+  ): Promise<PassWithCredentials> {
+    return this.createPass(input, idempotencyKey, societyId);
   },
 
   async revokePass(passId: string, reason = 'Revoked by resident'): Promise<PassView> {

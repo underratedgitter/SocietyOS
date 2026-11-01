@@ -12,6 +12,7 @@ import {
 import { api, ApiError } from '../api/client';
 import type { AccessPoint, FlatLink, PassWithCredentials, VisitorCategory } from '../api/types';
 import { colors } from '../styles/theme';
+import { calculateWindowDates, type WindowPreset } from '../utils/format';
 
 interface QuickRegisterModalProps {
   visible: boolean;
@@ -22,8 +23,6 @@ interface QuickRegisterModalProps {
   onPassCreated: (pass: PassWithCredentials, meta: { vehicle?: string; purpose?: string }) => void;
   initialCategory?: VisitorCategory;
 }
-
-type WindowPreset = 'TODAY_4H' | 'REST_OF_DAY' | 'WEEKEND' | 'THREE_DAYS' | 'SEVEN_DAYS';
 
 export function QuickRegisterModal({
   visible,
@@ -40,7 +39,8 @@ export function QuickRegisterModal({
   const [phone, setPhone] = useState('');
   const [vehicle, setVehicle] = useState('');
   const [purpose, setPurpose] = useState('');
-  const [windowPreset, setWindowPreset] = useState<WindowPreset>('THREE_DAYS');
+  const [windowPreset, setWindowPreset] = useState<WindowPreset>('MULTIPLE_DAYS_3');
+  const [customHours, setCustomHours] = useState('12');
   const [maxUses, setMaxUses] = useState(10);
   const [selectedGateIds, setSelectedGateIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -66,65 +66,32 @@ export function QuickRegisterModal({
     setCategory(cat);
     setError(null);
     if (cat === 'RELATIVE') {
-      setWindowPreset('THREE_DAYS');
+      setWindowPreset('MULTIPLE_DAYS_3');
       setMaxUses(10);
       setPurpose('Family Visit');
       if (visitorName === 'Delivery Partner' || visitorName === 'Cab Driver' || visitorName === 'Technician') {
         setVisitorName('');
       }
     } else if (cat === 'FRIEND') {
-      setWindowPreset('TODAY_4H');
+      setWindowPreset('TODAY');
       setMaxUses(2);
       setPurpose('Social Visit');
     } else if (cat === 'DELIVERY') {
-      setWindowPreset('TODAY_4H');
+      setWindowPreset('TODAY');
       setMaxUses(1);
       if (!visitorName) setVisitorName('Delivery Partner');
       setPurpose('Package Delivery');
     } else if (cat === 'CAB') {
-      setWindowPreset('TODAY_4H');
+      setWindowPreset('TODAY');
       setMaxUses(1);
       if (!visitorName) setVisitorName('Cab Driver');
       setPurpose('Cab Pickup / Drop');
     } else if (cat === 'MAINTENANCE') {
-      setWindowPreset('TODAY_4H');
+      setWindowPreset('TODAY');
       setMaxUses(2);
       if (!visitorName) setVisitorName('Technician');
       setPurpose('Maintenance Service');
     }
-  };
-
-  const calculateWindowDates = (preset: WindowPreset): { validFrom: string; validUntil: string } => {
-    const now = new Date();
-    const from = new Date(now);
-
-    let until = new Date(now);
-    switch (preset) {
-      case 'TODAY_4H':
-        until = new Date(now.getTime() + 4 * 3600 * 1000);
-        break;
-      case 'REST_OF_DAY':
-        until.setHours(23, 59, 59, 999);
-        break;
-      case 'WEEKEND': {
-        const dayOfWeek = now.getDay();
-        const daysUntilSunday = (7 - dayOfWeek) % 7;
-        until.setDate(now.getDate() + (daysUntilSunday === 0 ? 1 : daysUntilSunday));
-        until.setHours(23, 59, 59, 999);
-        break;
-      }
-      case 'THREE_DAYS':
-        until = new Date(now.getTime() + 3 * 24 * 3600 * 1000);
-        break;
-      case 'SEVEN_DAYS':
-        until = new Date(now.getTime() + 7 * 24 * 3600 * 1000);
-        break;
-    }
-
-    return {
-      validFrom: from.toISOString(),
-      validUntil: until.toISOString(),
-    };
   };
 
   const toggleGate = (id: string) => {
@@ -153,7 +120,10 @@ export function QuickRegisterModal({
     const trimmedPurpose = purpose.trim();
     const finalName = trimmedVehicle ? `${trimmedName} [${trimmedVehicle}]`.slice(0, 120) : trimmedName;
 
-    const { validFrom, validUntil } = calculateWindowDates(windowPreset);
+    const { validFrom, validUntil } = calculateWindowDates(
+      windowPreset,
+      parseInt(customHours, 10) || 12,
+    );
 
     setLoading(true);
     try {
@@ -288,11 +258,12 @@ export function QuickRegisterModal({
             <Text style={styles.sectionTitle}>VALIDITY WINDOW</Text>
             <View style={styles.windowChipGrid}>
               {[
-                { key: 'TODAY_4H', label: '4 Hours' },
+                { key: 'TODAY', label: 'Today (4h)' },
                 { key: 'REST_OF_DAY', label: 'Rest of Today' },
                 { key: 'WEEKEND', label: 'This Weekend' },
-                { key: 'THREE_DAYS', label: '3 Days' },
-                { key: 'SEVEN_DAYS', label: '7 Days' },
+                { key: 'MULTIPLE_DAYS_3', label: 'Multiple Days (3d)' },
+                { key: 'MULTIPLE_DAYS_7', label: 'Multiple Days (7d)' },
+                { key: 'CUSTOM', label: 'Custom' },
               ].map((item) => (
                 <TouchableOpacity
                   key={item.key}
@@ -313,6 +284,21 @@ export function QuickRegisterModal({
                 </TouchableOpacity>
               ))}
             </View>
+
+            {/* Custom Hours Input if CUSTOM selected */}
+            {windowPreset === 'CUSTOM' ? (
+              <View style={[styles.fieldGroup, { marginTop: 10 }]}>
+                <Text style={styles.fieldLabel}>CUSTOM DURATION (HOURS, 1 - 168)</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. 12, 24, 48"
+                  placeholderTextColor={colors.textMutedLight}
+                  keyboardType="number-pad"
+                  value={customHours}
+                  onChangeText={setCustomHours}
+                />
+              </View>
+            ) : null}
 
             {/* Max Uses Counter */}
             <View style={styles.stepperRow}>

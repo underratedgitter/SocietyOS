@@ -12,6 +12,7 @@
     "test": "tsx --test test/mobile.test.ts"
   },
   "dependencies": {
+    "@babel/runtime": "^8.0.10",
     "expo": "~52.0.37",
     "expo-status-bar": "~2.0.1",
     "qrcode": "^1.5.4",
