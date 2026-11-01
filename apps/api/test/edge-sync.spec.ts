@@ -277,5 +277,42 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       expect(res.duplicateCount).toBe(1);
       expect(mockPrisma.accessEvent.create).toHaveBeenCalledTimes(1);
     });
+
+    it('synchronizes offline pass usage and increments usedCount', async () => {
+      const PASS_UUID = 'e0000000-0000-4000-a000-000000000001';
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.visitorPass = {
+        ...mockPrisma.visitorPass,
+        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
+        update: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 2 }),
+      };
+
+      const events: any[] = [
+        {
+          sequence: 101,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+          passId: PASS_UUID,
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            passId: PASS_UUID,
+            decision: 'AUTHORIZED',
+          }),
+        }),
+      );
+      expect(mockPrisma.visitorPass.update).toHaveBeenCalledWith({
+        where: { id: PASS_UUID },
+        data: expect.objectContaining({ usedCount: 2 }),
+      });
+    });
   });
 });

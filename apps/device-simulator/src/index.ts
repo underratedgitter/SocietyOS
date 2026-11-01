@@ -52,6 +52,8 @@ const env = {
   mqttPassword: process.env.MQTT_PASSWORD || undefined,
   deviceToken: process.env.DEVICE_TOKEN?.trim() || 'sos_dev_demo_simulator_token_a_change_me_2026',
   commandSecret: process.env.COMMAND_SECRET?.trim() || 'demo-command-secret-a-change-me-2026',
+  credentialHmacKey: process.env.CREDENTIAL_HMAC_KEY?.trim() || 'dev-only-credential-hmac-key-change-me-32-bytes',
+  credentialHmacKeyId: process.env.CREDENTIAL_HMAC_KEY_ID?.trim() || 'v1',
   gateId: process.env.ACCESS_POINT_ID?.trim() || undefined,
   heartbeatSeconds: Number.parseInt(process.env.HEARTBEAT_SECONDS || '30', 10) || 30,
   motionMs: Number.parseInt(process.env.GATE_MOTION_MS || '1500', 10) || 1500,
@@ -90,6 +92,12 @@ function ackString(ack: Ack): string {
 
 function hmac(value: string): string {
   return crypto.createHmac('sha256', env.commandSecret).update(value).digest('base64url');
+}
+
+function hashCredential(credential: string): string {
+  const version = env.credentialHmacKeyId;
+  const key = `${version}:${env.credentialHmacKey}`;
+  return crypto.createHmac('sha256', key).update(credential).digest('hex');
 }
 
 function verifySignature(command: SignedCommand): boolean {
@@ -341,6 +349,7 @@ function selectGate(): { id: string; name: string } | null {
 }
 
 interface CachedCredential {
+  passId?: string;
   credentialHash: string;
   kind: 'PIN' | 'QR' | 'BIOMETRIC';
   visitorName: string;
@@ -358,6 +367,8 @@ interface QueuedEvent {
   decision: 'AUTHORIZED' | 'DENIED';
   reasonCode: string;
   timestamp: string;
+  passId?: string;
+  credentialHash?: string;
 }
 
 let isOffline = false;
@@ -416,9 +427,11 @@ function populateInitialCache(): void {
     maxUses: 999999,
     usedCount: 0,
   });
-  // Sample offline-usable PIN
-  credentialCache.set('888999', {
-    credentialHash: '888999',
+  // Sample offline-usable PIN (HMAC hashed)
+  const pinHash = hashCredential('888999');
+  credentialCache.set(pinHash, {
+    passId: '00000000-0000-4000-a000-000000000001',
+    credentialHash: pinHash,
     kind: 'PIN',
     visitorName: 'Offline Test Pass',
     flatNumber: '101',
@@ -456,10 +469,8 @@ function verifyOffline(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): vo
     log('[OFFLINE] no gate assigned');
     return;
   }
-  let cached = credentialCache.get(credential);
-  if (!cached && kind === 'BIOMETRIC') {
-    cached = Array.from(credentialCache.values()).find((c) => c.kind === 'BIOMETRIC');
-  }
+  const lookupKey = kind === 'BIOMETRIC' ? credential : hashCredential(credential);
+  const cached = credentialCache.get(lookupKey);
   const now = Date.now();
   let decision: 'AUTHORIZED' | 'DENIED' = 'DENIED';
   let reason = 'INVALID_CREDENTIAL';
@@ -485,6 +496,8 @@ function verifyOffline(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): vo
     decision,
     reasonCode: reason,
     timestamp: new Date().toISOString(),
+    passId: cached?.passId,
+    credentialHash: cached?.credentialHash || (cached ? lookupKey : undefined),
   };
   const MAX_OFFLINE_BUFFER = 1000;
   if (offlineQueue.length >= MAX_OFFLINE_BUFFER) {

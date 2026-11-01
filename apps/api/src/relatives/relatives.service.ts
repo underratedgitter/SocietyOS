@@ -138,40 +138,53 @@ export class RelativesService {
     const validFrom = now;
     const validUntil = new Date(now.getTime() + validHours * 3600 * 1000);
 
-    const pin = this.credentials.generatePin();
-    const qr = this.credentials.generateQrToken();
+    let pin = this.credentials.generatePin();
+    let qr = this.credentials.generateQrToken();
     const maxUses = Math.min(policy.maxUsesPerPass, 5);
 
-    const pass = await this.prisma.visitorPass.create({
-      data: {
-        societyId: context.societyId,
-        flatId,
-        hostUserId: callerSub,
-        visitorId: visitor.id,
-        category: 'RELATIVE',
-        status: 'ACTIVE',
-        validFrom,
-        validUntil,
-        maxUses,
-        credentials: {
-          create: [
-            {
-              type: pin.type,
-              credentialHash: this.credentials.hash(pin.plaintext),
-              keyId: this.credentials.keyVersion,
+    let pass: any;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        pass = await this.prisma.visitorPass.create({
+          data: {
+            societyId: context.societyId,
+            flatId,
+            hostUserId: callerSub,
+            visitorId: visitor.id,
+            category: 'RELATIVE',
+            status: 'ACTIVE',
+            validFrom,
+            validUntil,
+            maxUses,
+            credentials: {
+              create: [
+                {
+                  type: pin.type,
+                  credentialHash: this.credentials.hash(pin.plaintext),
+                  keyId: this.credentials.keyVersion,
+                },
+                {
+                  type: qr.type,
+                  credentialHash: this.credentials.hash(qr.plaintext),
+                  keyId: this.credentials.keyVersion,
+                },
+              ],
             },
-            {
-              type: qr.type,
-              credentialHash: this.credentials.hash(qr.plaintext),
-              keyId: this.credentials.keyVersion,
+            accessPoints: {
+              create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
             },
-          ],
-        },
-        accessPoints: {
-          create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
-        },
-      },
-    });
+          },
+        });
+        break;
+      } catch (err: any) {
+        if ((err?.code === 'P2002' || String(err).includes('credentialHash')) && attempt < 4) {
+          pin = this.credentials.generatePin();
+          qr = this.credentials.generateQrToken();
+          continue;
+        }
+        throw err;
+      }
+    }
 
     return {
       relative: {
@@ -242,44 +255,57 @@ export class RelativesService {
     const validUntil = new Date(now.getTime() + hours * 3600 * 1000);
     const maxUses = Math.min(dto.maxUses || 5, policy.maxUsesPerPass);
 
-    const pin = this.credentials.generatePin();
-    const qr = this.credentials.generateQrToken();
+    let pin = this.credentials.generatePin();
+    let qr = this.credentials.generateQrToken();
 
-    const pass = await this.prisma.visitorPass.create({
-      data: {
-        societyId: context.societyId,
-        flatId,
-        hostUserId: callerSub,
-        visitorId: visitor.id,
-        category: 'RELATIVE',
-        status: 'ACTIVE',
-        validFrom,
-        validUntil,
-        maxUses,
-        credentials: {
-          create: [
-            {
-              type: pin.type,
-              credentialHash: this.credentials.hash(pin.plaintext),
-              keyId: this.credentials.keyVersion,
+    let pass: any;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        pass = await this.prisma.visitorPass.create({
+          data: {
+            societyId: context.societyId,
+            flatId,
+            hostUserId: callerSub,
+            visitorId: visitor.id,
+            category: 'RELATIVE',
+            status: 'ACTIVE',
+            validFrom,
+            validUntil,
+            maxUses,
+            credentials: {
+              create: [
+                {
+                  type: pin.type,
+                  credentialHash: this.credentials.hash(pin.plaintext),
+                  keyId: this.credentials.keyVersion,
+                },
+                {
+                  type: qr.type,
+                  credentialHash: this.credentials.hash(qr.plaintext),
+                  keyId: this.credentials.keyVersion,
+                },
+              ],
             },
-            {
-              type: qr.type,
-              credentialHash: this.credentials.hash(qr.plaintext),
-              keyId: this.credentials.keyVersion,
+            accessPoints: {
+              create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
             },
-          ],
-        },
-        accessPoints: {
-          create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
-        },
-      },
-      include: {
-        flat: {
-          include: { building: { select: { name: true } } },
-        },
-      },
-    });
+          },
+          include: {
+            flat: {
+              include: { building: { select: { name: true } } },
+            },
+          },
+        });
+        break;
+      } catch (err: any) {
+        if ((err?.code === 'P2002' || String(err).includes('credentialHash')) && attempt < 4) {
+          pin = this.credentials.generatePin();
+          qr = this.credentials.generateQrToken();
+          continue;
+        }
+        throw err;
+      }
+    }
 
     return {
       pass: {

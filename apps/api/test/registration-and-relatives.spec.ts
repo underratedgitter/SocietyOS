@@ -189,7 +189,7 @@ describe('Registration & Relatives Service Modules', () => {
   });
 
   describe('User Registration (Public self signup)', () => {
-    it('successfully registers a new resident user with flat link and issues auth session', async () => {
+    it('successfully registers a new resident user with membership pending administrator approval', async () => {
       const result = await registrationService.registerUser({
         name: 'Sunil Patel',
         email: 'sunil@example.com',
@@ -208,14 +208,10 @@ describe('Registration & Relatives Service Modules', () => {
       expect(mockPrisma.societyMembership.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           role: 'RESIDENT',
-          status: 'ACTIVE',
+          status: 'PENDING_APPROVAL',
         }),
       });
-      expect(mockPrisma.residentFlatMembership.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          relationship: 'OWNER',
-        }),
-      });
+      expect(mockPrisma.residentFlatMembership.create).not.toHaveBeenCalled();
     });
 
     it('rejects registration if email already exists', async () => {
@@ -278,7 +274,22 @@ describe('Registration & Relatives Service Modules', () => {
   });
 
   describe('Visitor & Relative Self-Registration (Public gate check-in)', () => {
-    it('successfully self-registers a relative, auto-approving and returning PIN + QR credentials', async () => {
+    it('marks self-registered relative as PENDING_APPROVAL and omits plaintext credentials', async () => {
+      mockPrisma.visitorPass.create.mockResolvedValueOnce({
+        id: 'pass-uuid-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        visitorId: VISITOR_ID,
+        category: 'RELATIVE',
+        status: 'PENDING_APPROVAL',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 72 * 3600 * 1000),
+        maxUses: 5,
+        usedCount: 0,
+        visitor: { id: VISITOR_ID, name: 'Ramesh Patel [MH 02 CZ 4411]', phone: '+91 98765 00000' },
+      });
+
       const result = await registrationService.selfRegisterVisitor({
         societyId: SOCIETY_ID,
         flatId: FLAT_ID,
@@ -290,10 +301,9 @@ describe('Registration & Relatives Service Modules', () => {
       });
 
       expect(result.passId).toBe('pass-uuid-1');
-      expect(result.status).toBe('ACTIVE');
-      expect(result.credentials.pin).toHaveLength(6);
-      expect(result.credentials.qrToken).toBeTruthy();
-      expect(result.requiresHostApproval).toBe(false);
+      expect(result.status).toBe('PENDING_APPROVAL');
+      expect(result.credentials).toBeNull();
+      expect(result.requiresHostApproval).toBe(true);
       expect(mockPrisma.notification.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -301,6 +311,51 @@ describe('Registration & Relatives Service Modules', () => {
           }),
         }),
       );
+    });
+
+    it('auto-approves and returns credentials when category is excluded from approval policy', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValueOnce({
+        id: FLAT_ID,
+        buildingId: BUILDING_ID,
+        flatNumber: '101',
+        building: {
+          id: BUILDING_ID,
+          name: 'Tower A',
+          societyId: SOCIETY_ID,
+          society: {
+            id: SOCIETY_ID,
+            name: 'Palm Grove',
+            settings: { approvalCategories: ['DELIVERY'], maxPassDurationHours: 24, maxUsesPerPass: 5, maxPassesPerFlatPerDay: 20 },
+          },
+        },
+      });
+
+      mockPrisma.visitorPass.create.mockResolvedValueOnce({
+        id: 'pass-active-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        visitorId: VISITOR_ID,
+        category: 'CAB',
+        status: 'ACTIVE',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 2 * 3600 * 1000),
+        maxUses: 1,
+        usedCount: 0,
+        visitor: { id: VISITOR_ID, name: 'Uber Driver', phone: '+91 98765 11111' },
+      });
+
+      const result = await registrationService.selfRegisterVisitor({
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        visitorName: 'Uber Driver',
+        category: 'CAB',
+      });
+
+      expect(result.status).toBe('ACTIVE');
+      expect(result.requiresHostApproval).toBe(false);
+      expect(result.credentials?.pin).toHaveLength(6);
+      expect(result.credentials?.qrToken).toBeTruthy();
     });
 
     it('marks delivery / cab partner pass as PENDING_APPROVAL per society policy', async () => {
@@ -387,6 +442,52 @@ describe('Registration & Relatives Service Modules', () => {
       ).rejects.toThrow(AppException);
     });
 
+    it('retries on P2002 PIN collision and succeeds with new credentials on subsequent attempt', async () => {
+      mockPrisma.visitorPass.create
+        .mockRejectedValueOnce({ code: 'P2002', message: 'Unique constraint failed on credentialHash' })
+        .mockResolvedValueOnce({
+          id: 'pass-collision-retry-1',
+          societyId: SOCIETY_ID,
+          flatId: FLAT_ID,
+          hostUserId: USER_ID,
+          visitorId: VISITOR_ID,
+          category: 'FRIEND',
+          status: 'PENDING_APPROVAL',
+          validFrom: new Date(),
+          validUntil: new Date(Date.now() + 24 * 3600 * 1000),
+          maxUses: 1,
+          usedCount: 0,
+          visitor: { id: VISITOR_ID, name: 'Friend', phone: '+91 98765 22222' },
+        });
+
+      const result = await registrationService.selfRegisterVisitor({
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        visitorName: 'Friend',
+        category: 'FRIEND',
+      });
+
+      expect(result.passId).toBe('pass-collision-retry-1');
+      expect(mockPrisma.visitorPass.create).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws error when PIN collision occurs on all 5 attempts', async () => {
+      mockPrisma.visitorPass.create.mockRejectedValue({
+        code: 'P2002',
+        message: 'Unique constraint failed on credentialHash',
+      });
+
+      await expect(
+        registrationService.selfRegisterVisitor({
+          societyId: SOCIETY_ID,
+          flatId: FLAT_ID,
+          visitorName: 'Colliding Visitor',
+          category: 'FRIEND',
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      expect(mockPrisma.visitorPass.create).toHaveBeenCalledTimes(5);
+    });
+
     it('rejects self-registration if no active gates exist for the society', async () => {
       mockPrisma.accessPoint.findMany.mockResolvedValueOnce([]);
 
@@ -415,6 +516,32 @@ describe('Registration & Relatives Service Modules', () => {
       expect(result.relative.relation).toBe('Sister');
       expect(result.initialPass.credentials.pin).toHaveLength(6);
       expect(result.initialPass.credentials.qrToken).toBeTruthy();
+    });
+
+    it('retries on P2002 PIN collision during relative registration and succeeds', async () => {
+      mockPrisma.visitorPass.create
+        .mockRejectedValueOnce({ code: 'P2002', message: 'Unique constraint failed on credentialHash' })
+        .mockResolvedValueOnce({
+          id: 'pass-rel-retry-1',
+          societyId: SOCIETY_ID,
+          flatId: FLAT_ID,
+          hostUserId: USER_ID,
+          visitorId: VISITOR_ID,
+          category: 'RELATIVE',
+          status: 'ACTIVE',
+          validFrom: new Date(),
+          validUntil: new Date(Date.now() + 72 * 3600 * 1000),
+          maxUses: 5,
+          usedCount: 0,
+        });
+
+      const result = await relativesService.registerRelative(USER_ID, FLAT_ID, {
+        name: 'Uncle Suresh',
+        relation: 'Uncle',
+      });
+
+      expect(result.initialPass.id).toBe('pass-rel-retry-1');
+      expect(mockPrisma.visitorPass.create).toHaveBeenCalledTimes(2);
     });
 
     it('rejects relative registration with duplicate name and relation for same flat', async () => {

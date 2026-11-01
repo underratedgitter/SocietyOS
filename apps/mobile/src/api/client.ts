@@ -236,15 +236,19 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-let activeRefreshPromise: Promise<boolean> | null = null;
+let refreshPromise: Promise<boolean> | null = null;
+
+export function getInFlightRefreshPromise(): Promise<boolean> | null {
+  return refreshPromise;
+}
 
 export async function refreshSession(): Promise<boolean> {
   if (!storedRefreshToken) return false;
-  if (activeRefreshPromise) {
-    return activeRefreshPromise;
+  if (refreshPromise) {
+    return refreshPromise;
   }
 
-  activeRefreshPromise = (async () => {
+  refreshPromise = (async () => {
     try {
       const res = await fetch(`${currentApiUrl}/auth/refresh`, {
         method: 'POST',
@@ -297,11 +301,11 @@ export async function refreshSession(): Promise<boolean> {
     } catch {
       return false;
     } finally {
-      activeRefreshPromise = null;
+      refreshPromise = null;
     }
   })();
 
-  return activeRefreshPromise;
+  return refreshPromise;
 }
 
 // Concrete API calls

@@ -26,8 +26,10 @@ export function VisitorPassModal({
     `🏷️ *Category:* ${pass.category}`,
     `⏱️ *Valid Until:* ${formatDateTime(pass.validUntil)}`,
     '',
-    `🔑 *Entry PIN:* ${pass.credentials.pin}`,
-    '👉 Type this 6-digit PIN on the boom barrier or gate keypad, or scan this QR token under the camera for entry.',
+    pass.credentials?.pin ? `🔑 *Entry PIN:* ${pass.credentials.pin}` : null,
+    pass.credentials
+      ? '👉 Type this 6-digit PIN on the boom barrier or gate keypad, or scan this QR token under the camera for entry.'
+      : '👉 Access credentials will be issued immediately upon resident approval.',
   ]
     .filter(Boolean)
     .join('\n');
@@ -35,6 +37,7 @@ export function VisitorPassModal({
   const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
 
   async function copyPin() {
+    if (!pass.credentials?.pin) return;
     await navigator.clipboard.writeText(pass.credentials.pin);
     setCopiedPin(true);
     setTimeout(() => setCopiedPin(false), 2000);
@@ -76,66 +79,68 @@ export function VisitorPassModal({
           </div>
         )}
 
-        {/* QR Code Presentation */}
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            padding: 20,
-            background: 'var(--fog)',
-            border: '1px solid var(--line)',
-            borderRadius: 12,
-            textAlign: 'center',
-          }}
-        >
+        {/* QR Code Presentation (Only for Approved / Active Passes) */}
+        {pass.credentials ? (
           <div
             style={{
-              padding: 14,
-              background: '#FFFFFF',
-              borderRadius: 10,
-              boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              padding: 20,
+              background: 'var(--fog)',
+              border: '1px solid var(--line)',
+              borderRadius: 12,
+              textAlign: 'center',
             }}
           >
-            <QRCodeSVG value={pass.credentials.qrToken} size={180} level="M" />
-          </div>
-
-          <div style={{ marginTop: 16, width: '100%' }}>
-            <span className="tiny muted" style={{ textTransform: 'uppercase', letterSpacing: 1.2, fontWeight: 700 }}>
-              6-Digit Touchscreen Keypad PIN
-            </span>
             <div
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 10,
-                marginTop: 6,
+                padding: 14,
+                background: '#FFFFFF',
+                borderRadius: 10,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.06)',
               }}
             >
-              <span
+              <QRCodeSVG value={pass.credentials.qrToken} size={180} level="M" />
+            </div>
+
+            <div style={{ marginTop: 16, width: '100%' }}>
+              <span className="tiny muted" style={{ textTransform: 'uppercase', letterSpacing: 1.2, fontWeight: 700 }}>
+                6-Digit Touchscreen Keypad PIN
+              </span>
+              <div
                 style={{
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                  fontSize: 32,
-                  fontWeight: 800,
-                  letterSpacing: 4,
-                  color: 'var(--primary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 10,
+                  marginTop: 6,
                 }}
               >
-                {pass.credentials.pin}
-              </span>
-              <button
-                type="button"
-                className="btn-ghost btn-small"
-                onClick={copyPin}
-                aria-label="Copy PIN"
-                title="Copy PIN"
-              >
-                {copiedPin ? <Check size={16} color="var(--primary)" /> : <Copy size={16} />}
-              </button>
+                <span
+                  style={{
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    fontSize: 32,
+                    fontWeight: 800,
+                    letterSpacing: 4,
+                    color: 'var(--primary)',
+                  }}
+                >
+                  {pass.credentials.pin}
+                </span>
+                <button
+                  type="button"
+                  className="btn-ghost btn-small"
+                  onClick={copyPin}
+                  aria-label="Copy PIN"
+                  title="Copy PIN"
+                >
+                  {copiedPin ? <Check size={16} color="var(--primary)" /> : <Copy size={16} />}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        ) : null}
 
         {/* Destination & Window Info */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>

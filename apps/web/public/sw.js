@@ -1,6 +1,7 @@
 // SocietyOS Resident PWA Service Worker
-const CACHE_NAME = 'societyos-cache-v1';
+const CACHE_NAME = 'societyos-cache-v2';
 const PRECACHE_ASSETS = [
+  '/offline.html',
   '/icons/icon-192x192.png',
   '/icons/icon-512x512.png',
   '/icons/icon-maskable-512x512.png',
@@ -14,7 +15,20 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE_ASSETS))
+      .then(async (cache) => {
+        await Promise.allSettled(
+          PRECACHE_ASSETS.map(async (asset) => {
+            try {
+              const res = await fetch(asset);
+              if (res.ok) {
+                await cache.put(asset, res);
+              }
+            } catch {
+              // Ignore individual precache asset failure
+            }
+          }),
+        );
+      })
       .then(() => self.skipWaiting()),
   );
 });
@@ -51,12 +65,15 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // Cache static assets on successful response
+        // Cache static assets and next static bundles on successful response
         if (
           response.status === 200 &&
-          (url.pathname.startsWith('/icons/') ||
+          (url.pathname.startsWith('/_next/static/') ||
+            url.pathname.startsWith('/icons/') ||
             url.pathname.endsWith('.png') ||
             url.pathname.endsWith('.svg') ||
+            url.pathname.endsWith('.css') ||
+            url.pathname.endsWith('.js') ||
             url.pathname.endsWith('.webmanifest'))
         ) {
           const clone = response.clone();
@@ -68,8 +85,8 @@ self.addEventListener('fetch', (event) => {
         const cached = await caches.match(event.request);
         if (cached) return cached;
         if (event.request.mode === 'navigate') {
-          const cachedManifest = await caches.match('/manifest.webmanifest');
-          if (cachedManifest) return cachedManifest;
+          const offlinePage = await caches.match('/offline.html');
+          if (offlinePage) return offlinePage;
         }
         return new Response('Network unavailable', {
           status: 503,

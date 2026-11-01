@@ -143,6 +143,20 @@ export function societyList(session: Session | null): SocietySummary[] {
     }));
 }
 
+export function userRoles(session: Session | null): Role[] {
+  if (!session) return [];
+  const roles = new Set<Role>();
+  if (session.user.isPlatformAdmin) {
+    roles.add('PLATFORM_ADMIN');
+  }
+  for (const membership of session.memberships) {
+    if (membership.status === 'ACTIVE') {
+      roles.add(membership.role);
+    }
+  }
+  return Array.from(roles);
+}
+
 export function primaryRole(session: Session | null): Role | null {
   if (!session) return null;
   if (session.user.isPlatformAdmin) return 'PLATFORM_ADMIN';

@@ -112,19 +112,12 @@ export class RegistrationService {
           userId: user.id,
           societyId: dto.societyId,
           role: 'RESIDENT',
-          status: 'ACTIVE',
+          status: 'PENDING_APPROVAL',
         },
       });
 
-      if (dto.flatId) {
-        await tx.residentFlatMembership.create({
-          data: {
-            flatId: dto.flatId,
-            userId: user.id,
-            relationship: dto.relationship || 'FAMILY',
-          },
-        });
-      }
+      // Require society administrator approval before linking flat ownership or granting pass-generation rights
+      // Unauthenticated resident self-registration cannot take over flat ownership directly
 
       const tokens = await this.auth.issueSessionTokens(user, userAgent, tx);
       return { user, tokens };
@@ -243,87 +236,101 @@ export class RegistrationService {
       : trimmedName;
     const phone = dto.visitorPhone?.trim() || null;
 
-    const pin = this.credentials.generatePin();
-    const qr = this.credentials.generateQrToken();
     const maxUses = dto.category === 'RELATIVE' ? Math.min(policy.maxUsesPerPass, 5) : 1;
 
-    const pass = await this.prisma.$transaction(async (tx) => {
-      let visitor = await tx.visitor.findFirst({
-        where: {
-          societyId: dto.societyId,
-          name: finalVisitorName,
-          phone,
-          category: dto.category as VisitorCategory,
-        },
-      });
-      if (!visitor) {
-        visitor = await tx.visitor.create({
-          data: {
-            societyId: dto.societyId,
-            name: finalVisitorName,
-            phone,
-            category: dto.category as VisitorCategory,
-          },
+    let pin = this.credentials.generatePin();
+    let qr = this.credentials.generateQrToken();
+    let pass: any;
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        pass = await this.prisma.$transaction(async (tx) => {
+          let visitor = await tx.visitor.findFirst({
+            where: {
+              societyId: dto.societyId,
+              name: finalVisitorName,
+              phone,
+              category: dto.category as VisitorCategory,
+            },
+          });
+          if (!visitor) {
+            visitor = await tx.visitor.create({
+              data: {
+                societyId: dto.societyId,
+                name: finalVisitorName,
+                phone,
+                category: dto.category as VisitorCategory,
+              },
+            });
+          }
+
+          const created = await tx.visitorPass.create({
+            data: {
+              societyId: dto.societyId,
+              flatId: dto.flatId,
+              hostUserId,
+              visitorId: visitor.id,
+              category: dto.category as VisitorCategory,
+              status,
+              validFrom,
+              validUntil,
+              maxUses,
+              credentials: {
+                create: [
+                  {
+                    type: pin.type,
+                    credentialHash: this.credentials.hash(pin.plaintext),
+                    keyId: this.credentials.keyVersion,
+                  },
+                  {
+                    type: qr.type,
+                    credentialHash: this.credentials.hash(qr.plaintext),
+                    keyId: this.credentials.keyVersion,
+                  },
+                ],
+              },
+              accessPoints: {
+                create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
+              },
+            },
+            include: {
+              visitor: { select: { id: true, name: true, phone: true } },
+            },
+          });
+
+          // Enqueue notification for the resident
+          await tx.notification.create({
+            data: {
+              societyId: dto.societyId,
+              userId: hostUserId,
+              channel: 'PUSH',
+              template: 'VISITOR_SELF_REGISTERED',
+              status: 'PENDING',
+              payload: {
+                event: 'VISITOR_SELF_REGISTERED',
+                passId: created.id,
+                visitorName: trimmedName,
+                vehicle: trimmedVehicle,
+                category: dto.category,
+                requiresApproval,
+                destination: `${flat.building.name} · ${flat.flatNumber}`,
+              },
+              nextAttemptAt: new Date(),
+            },
+          }).catch(() => undefined);
+
+          return created;
         });
+        break;
+      } catch (err: any) {
+        if ((err?.code === 'P2002' || String(err).includes('credentialHash')) && attempt < 4) {
+          pin = this.credentials.generatePin();
+          qr = this.credentials.generateQrToken();
+          continue;
+        }
+        throw err;
       }
-
-      const created = await tx.visitorPass.create({
-        data: {
-          societyId: dto.societyId,
-          flatId: dto.flatId,
-          hostUserId,
-          visitorId: visitor.id,
-          category: dto.category as VisitorCategory,
-          status,
-          validFrom,
-          validUntil,
-          maxUses,
-          credentials: {
-            create: [
-              {
-                type: pin.type,
-                credentialHash: this.credentials.hash(pin.plaintext),
-                keyId: this.credentials.keyVersion,
-              },
-              {
-                type: qr.type,
-                credentialHash: this.credentials.hash(qr.plaintext),
-                keyId: this.credentials.keyVersion,
-              },
-            ],
-          },
-          accessPoints: {
-            create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
-          },
-        },
-        include: {
-          visitor: { select: { id: true, name: true, phone: true } },
-        },
-      });
-
-      // Enqueue notification for the resident
-      await tx.notification.create({
-        data: {
-          societyId: dto.societyId,
-          userId: hostUserId,
-          channel: 'PUSH',
-          template: 'VISITOR_SELF_REGISTERED',
-          status: 'PENDING',
-          payload: {
-            event: 'VISITOR_SELF_REGISTERED',
-            passId: created.id,
-            visitorName: trimmedName,
-            vehicle: trimmedVehicle,
-            category: dto.category,
-            requiresApproval,
-            destination: `${flat.building.name} · ${flat.flatNumber}`,
-          },
-          nextAttemptAt: new Date(),
-        },
-      }).catch(() => undefined);
-
-      return created;
-    });
+    }
 
     return {
       passId: pass.id,
@@ -339,10 +346,12 @@ export class RegistrationService {
       validFrom: pass.validFrom.toISOString(),
       validUntil: pass.validUntil.toISOString(),
       maxUses: pass.maxUses,
-      credentials: {
-        pin: pin.plaintext,
-        qrToken: qr.plaintext,
-      },
+      credentials: requiresApproval || pass.status === 'PENDING_APPROVAL'
+        ? null
+        : {
+            pin: pin.plaintext,
+            qrToken: qr.plaintext,
+          },
       accessPoints,
       requiresHostApproval: requiresApproval,
       message: requiresApproval

@@ -36,6 +36,14 @@ export class QueuedOfflineEventDto {
 
   @IsString()
   timestamp!: string;
+
+  @IsOptional()
+  @IsString()
+  passId?: string;
+
+  @IsOptional()
+  @IsString()
+  credentialHash?: string;
 }
 
 export class SyncOfflineEventsDto {
@@ -223,11 +231,23 @@ export class DeviceApiController {
           }
         }
 
+        const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        let passId = ev.passId;
+        if (!passId && ev.credentialHash && typeof (tx as any).visitorPassCredential?.findFirst === 'function') {
+          const cred = await (tx as any).visitorPassCredential.findFirst({
+            where: { credentialHash: ev.credentialHash },
+            select: { passId: true },
+          });
+          if (cred) passId = cred.passId;
+        }
+        const validPassId = passId && UUID_REGEX.test(passId) ? passId : undefined;
+
         await tx.accessEvent.create({
           data: {
             societyId,
             accessPointId: ev.accessPointId,
             deviceId,
+            passId: validPassId,
             decision: ev.decision,
             reasonCode: ev.reasonCode,
             source: 'OFFLINE_EDGE_CONTROLLER',
@@ -243,6 +263,27 @@ export class DeviceApiController {
             } as never,
           },
         });
+
+        if (ev.decision === 'AUTHORIZED' && validPassId) {
+          if (typeof (tx as any).visitorPass?.findUnique === 'function' && typeof (tx as any).visitorPass?.update === 'function') {
+            const pass = await (tx as any).visitorPass.findUnique({
+              where: { id: validPassId },
+              select: { id: true, usedCount: true, maxUses: true, status: true },
+            });
+            if (pass) {
+              const nextCount = pass.usedCount + 1;
+              await (tx as any).visitorPass.update({
+                where: { id: pass.id },
+                data: {
+                  usedCount: nextCount,
+                  ...(nextCount >= pass.maxUses && pass.status === 'ACTIVE'
+                    ? { status: 'EXHAUSTED' }
+                    : {}),
+                },
+              });
+            }
+          }
+        }
 
         await tx.deviceEvent.create({
           data: {
@@ -310,6 +351,7 @@ export class DeviceApiController {
       .filter((p) => p.usedCount < p.maxUses)
       .flatMap((p) =>
         p.credentials.map((c) => ({
+          passId: p.id,
           credentialHash: c.credentialHash,
           kind: c.type,
           visitorName: p.visitor.name,

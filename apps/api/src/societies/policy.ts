@@ -8,7 +8,7 @@ export interface VisitorPolicy {
 }
 
 export const DEFAULT_VISITOR_POLICY: VisitorPolicy = {
-  approvalCategories: ['DELIVERY', 'CAB'],
+  approvalCategories: ['DELIVERY', 'CAB', 'RELATIVE', 'FRIEND', 'MAINTENANCE', 'OTHER'],
   maxPassDurationHours: 24,
   maxUsesPerPass: 5,
   maxPassesPerFlatPerDay: 20,

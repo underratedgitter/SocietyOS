@@ -148,30 +148,32 @@ export default function LoginPage() {
             </div>
           </div>
 
-          <div className="demo-accounts">
-            <div className="tiny muted">Local demo accounts</div>
-            <div className="demo-list">
-              {DEMO_ACCOUNTS.map((account) => (
-                <button
-                  key={account.email}
-                  type="button"
-                  className="demo-account"
-                  onClick={() => {
-                    setEmail(account.email);
-                    setPassword(account.password);
-                    setError('');
-                  }}
-                >
-                  <strong>{account.label}</strong>
-                  {account.email}
-                </button>
-              ))}
+          {process.env.NODE_ENV !== 'production' && (
+            <div className="demo-accounts">
+              <div className="tiny muted">Local demo accounts</div>
+              <div className="demo-list">
+                {DEMO_ACCOUNTS.map((account) => (
+                  <button
+                    key={account.email}
+                    type="button"
+                    className="demo-account"
+                    onClick={() => {
+                      setEmail(account.email);
+                      setPassword(account.password);
+                      setError('');
+                    }}
+                  >
+                    <strong>{account.label}</strong>
+                    {account.email}
+                  </button>
+                ))}
+              </div>
+              <p className="hint" style={{ marginTop: 10 }}>
+                Seeded accounts are for local demonstration. Production onboarding issues one-time temporary
+                passwords and forces a change at first sign-in.
+              </p>
             </div>
-            <p className="hint" style={{ marginTop: 10 }}>
-              Seeded accounts are for local demonstration. Production onboarding issues one-time temporary
-              passwords and forces a change at first sign-in.
-            </p>
-          </div>
+          )}
         </div>
       </section>
     </main>

@@ -266,21 +266,23 @@ export function LoginScreen() {
               </TouchableOpacity>
 
               {/* Quick Demo Logins */}
-              <View style={styles.demoSection}>
-                <Text style={styles.demoLabel}>⚡ 1-TAP DEMO RESIDENT LOGINS</Text>
-                <View style={styles.demoButtonsRow}>
-                  {DEMO_RESIDENTS.map((demo) => (
-                    <TouchableOpacity
-                      key={demo.email}
-                      style={styles.demoButton}
-                      onPress={() => void handleDemoResident(demo)}
-                      disabled={loading}
-                    >
-                      <Text style={styles.demoButtonText}>{demo.label}</Text>
-                    </TouchableOpacity>
-                  ))}
+              {DEMO_RESIDENTS.length > 0 && (
+                <View style={styles.demoSection}>
+                  <Text style={styles.demoLabel}>⚡ 1-TAP DEMO RESIDENT LOGINS</Text>
+                  <View style={styles.demoButtonsRow}>
+                    {DEMO_RESIDENTS.map((demo) => (
+                      <TouchableOpacity
+                        key={demo.email}
+                        style={styles.demoButton}
+                        onPress={() => void handleDemoResident(demo)}
+                        disabled={loading}
+                      >
+                        <Text style={styles.demoButtonText}>{demo.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
                 </View>
-              </View>
+              )}
             </>
           ) : (
             <>

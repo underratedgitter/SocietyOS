@@ -53,7 +53,7 @@ test.describe('Visitor Self-Registration & Relatives Management Flows', () => {
     await page.getByRole('button', { name: /Register Relative & Issue Pass/i }).click();
 
     // Verify relative is listed in the directory
-    await expect(page.getByText(testName)).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText(testName, { exact: true })).toBeVisible({ timeout: 5000 });
   });
 
   test('login page provides direct links to resident signup and visitor check-in', async ({ page }) => {

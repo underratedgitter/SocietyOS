@@ -3,10 +3,16 @@ import { api, ApiError, getAccessToken, getRefreshToken, initStorage, setAuthTok
 import { mobileStorage } from '../api/storage';
 import type { FlatLink, RegisterUserRequest, Session, SocietyRef } from '../api/types';
 
-export const DEMO_RESIDENTS = [
-  { label: 'Resident 101 (Palm Grove)', email: 'resident.a1@societyos.dev', password: 'Society#2026' },
-  { label: 'Resident 102 (Palm Grove)', email: 'resident.a2@societyos.dev', password: 'Society#2026' },
-];
+const isDev =
+  (typeof __DEV__ !== 'undefined' ? __DEV__ : process.env.NODE_ENV !== 'production') &&
+  process.env.NODE_ENV !== 'production';
+
+export const DEMO_RESIDENTS = isDev
+  ? [
+      { label: 'Resident 101 (Palm Grove)', email: 'resident.a1@societyos.dev', password: 'Society#2026' },
+      { label: 'Resident 102 (Palm Grove)', email: 'resident.a2@societyos.dev', password: 'Society#2026' },
+    ]
+  : [];
 
 interface AuthContextType {
   session: Session | null;
@@ -141,6 +147,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const demoLogin = async (email: string, password: string): Promise<Session> => {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Demo accounts are disabled in production.');
+    }
     return login(email, password);
   };
 

@@ -23,6 +23,7 @@ enum MembershipStatus {
   ACTIVE
   INVITED
   DISABLED
+  PENDING_APPROVAL
 }
 
 enum FlatRelationship {
@@ -144,6 +145,7 @@ model User {
   createdTickets MaintenanceTicket[] @relation("TicketAuthor")
   amenityBookings AmenityBooking[]   @relation("AmenityBooker")
   paidInvoices    MaintenanceInvoice[] @relation("InvoicePayer")
+  biometricTemplates BiometricTemplate[]
 }
 
 model Session {
@@ -183,6 +185,7 @@ model Society {
   maintenanceTickets MaintenanceTicket[]
   amenityBookings AmenityBooking[]
   maintenanceInvoices MaintenanceInvoice[]
+  biometricTemplates BiometricTemplate[]
 }
 
 model SocietyMembership {
@@ -302,6 +305,7 @@ model VisitorPassCredential {
   pass VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
 
   @@unique([passId, type])
+  @@index([credentialHash])
 }
 
 model VisitorPassAccessPoint {
@@ -659,5 +663,27 @@ model MaintenanceInvoice {
   @@index([societyId, status, dueDate])
   @@index([flatId])
   @@map("maintenance_invoices")
+}
+
+model BiometricTemplate {
+  id                String   @id @default(uuid()) @db.Uuid
+  societyId         String   @map("society_id") @db.Uuid
+  society           Society  @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  userId            String   @map("user_id") @db.Uuid
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              String   // 'FINGERPRINT' | 'FACE'
+  templateHash      String   @unique @map("template_hash")
+  encryptedTemplate String?  @map("encrypted_template")
+  algorithm         String
+  consentGivenAt    DateTime @map("consent_given_at") @db.Timestamptz(6)
+  lawfulBasis       String   @default("DPDP_2023_SECTION_6_EXPLICIT_CONSENT") @map("lawful_basis")
+  consentText       String?  @map("consent_text")
+  enrolledBy        String   @map("enrolled_by") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([societyId, userId])
+  @@index([templateHash])
+  @@map("biometric_templates")
 }
 

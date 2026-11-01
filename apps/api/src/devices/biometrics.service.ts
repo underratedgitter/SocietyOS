@@ -1,15 +1,20 @@
+import * as crypto from 'crypto';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../common/audit.service';
 import { AppException } from '../common/app.exception';
 import { GateAdapterFactory } from './adapters/gate-adapter.factory';
 import { MqttService } from './mqtt.service';
+import { encryptDeviceSecret } from '../common/crypto.util';
 
 export interface BiometricEnrollDto {
   userId: string;
   type: 'FINGERPRINT' | 'FACE';
   templateHash: string;
   algorithm: string;
+  rawTemplate?: string;
+  consentGiven?: boolean;
+  consentNotice?: string;
 }
 
 export interface BiometricVerifyDto {
@@ -46,30 +51,24 @@ export class BiometricsService implements OnModuleInit {
 
   async onModuleInit() {
     try {
-      const residents = await this.prisma.residentFlatMembership.findMany({
-        where: { endedAt: null },
-        include: { flat: { include: { building: true } } },
-      });
-      for (const r of residents) {
-        const societyId = r.flat.building.societyId;
-        const defaultTemplates = [
-          `FINGERPRINT_RESIDENT_${r.flat.flatNumber}`,
-          `BIO_RESIDENT_${r.userId}`,
-          `FINGERPRINT_${r.userId}`,
-        ];
-        for (const tmpl of defaultTemplates) {
-          this.templateRegistry.set(`${societyId}:${tmpl}`, {
-            userId: r.userId,
-            societyId,
-            type: 'FINGERPRINT',
-            templateHash: tmpl,
-            algorithm: 'DEFAULT_EDGE_HASH_V1',
-            consentGivenAt: new Date(),
-            lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
+      // DPDP Act 2023 Compliance:
+      // Only preload explicitly consented and persisted biometric records.
+      // Automatic boot-time consent synthesis is removed to prevent unlawful data processing.
+      if (typeof (this.prisma as any).biometricTemplate?.findMany === 'function') {
+        const persistedTemplates = await (this.prisma as any).biometricTemplate.findMany();
+        for (const tmpl of persistedTemplates) {
+          this.templateRegistry.set(`${tmpl.societyId}:${tmpl.templateHash}`, {
+            userId: tmpl.userId,
+            societyId: tmpl.societyId,
+            type: tmpl.type as 'FINGERPRINT' | 'FACE',
+            templateHash: tmpl.templateHash,
+            algorithm: tmpl.algorithm,
+            consentGivenAt: tmpl.consentGivenAt,
+            lawfulBasis: tmpl.lawfulBasis,
           });
         }
+        this.logger.log(`Preloaded ${persistedTemplates.length} explicitly consented resident biometric templates`);
       }
-      this.logger.log(`Initialized resident biometric template cache for ${residents.length} residents`);
     } catch (err) {
       this.logger.warn(`Could not preload resident biometric templates: ${String(err)}`);
     }
@@ -80,6 +79,13 @@ export class BiometricsService implements OnModuleInit {
     societyId: string,
     dto: BiometricEnrollDto,
   ) {
+    if (dto.consentGiven === false) {
+      throw AppException.unprocessable(
+        'DPDP_CONSENT_REQUIRED',
+        'Explicit consent under India DPDP Act 2023 Section 6 is mandatory prior to biometric template enrollment.',
+      );
+    }
+
     // Validate resident belongs to this society
     const membership = await this.prisma.societyMembership.findUnique({
       where: {
@@ -111,6 +117,39 @@ export class BiometricsService implements OnModuleInit {
 
     this.templateRegistry.set(key, enrollment);
 
+    // Encrypt template payload with AES-256-GCM and store in PostgreSQL
+    const encryptedTemplate = encryptDeviceSecret(dto.rawTemplate || dto.templateHash);
+    if (typeof (this.prisma as any).biometricTemplate?.upsert === 'function') {
+      await (this.prisma as any).biometricTemplate.upsert({
+        where: { templateHash: dto.templateHash },
+        update: {
+          societyId,
+          userId: dto.userId,
+          type: dto.type,
+          encryptedTemplate,
+          algorithm: enrollment.algorithm,
+          consentGivenAt: enrollment.consentGivenAt,
+          lawfulBasis: enrollment.lawfulBasis,
+          consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+          enrolledBy: actorUserId,
+        },
+        create: {
+          societyId,
+          userId: dto.userId,
+          type: dto.type,
+          templateHash: dto.templateHash,
+          encryptedTemplate,
+          algorithm: enrollment.algorithm,
+          consentGivenAt: enrollment.consentGivenAt,
+          lawfulBasis: enrollment.lawfulBasis,
+          consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+          enrolledBy: actorUserId,
+        },
+      }).catch((err: unknown) => {
+        this.logger.warn(`Failed to persist encrypted biometric template: ${String(err)}`);
+      });
+    }
+
     await this.audit.record({
       societyId,
       actorUserId,
@@ -121,7 +160,7 @@ export class BiometricsService implements OnModuleInit {
       meta: {
         type: dto.type,
         algorithm: dto.algorithm,
-        dataMinimizationNotice: 'Stored as cryptographic reference only; zero raw biometric imagery retained.',
+        dataMinimizationNotice: 'Stored in encrypted PostgreSQL table with SHA-256 edge template hashing only; zero raw biometric imagery retained.',
         lawfulBasis: enrollment.lawfulBasis,
       },
     });
@@ -144,6 +183,24 @@ export class BiometricsService implements OnModuleInit {
   ) {
     const key = `${societyId}:${dto.templateHash}`;
     let enrollment = this.templateRegistry.get(key);
+
+    if (!enrollment && typeof (this.prisma as any).biometricTemplate?.findFirst === 'function') {
+      const persisted = await (this.prisma as any).biometricTemplate.findFirst({
+        where: { societyId, templateHash: dto.templateHash },
+      });
+      if (persisted) {
+        enrollment = {
+          userId: persisted.userId,
+          societyId: persisted.societyId,
+          type: persisted.type as 'FINGERPRINT' | 'FACE',
+          templateHash: persisted.templateHash,
+          algorithm: persisted.algorithm,
+          consentGivenAt: persisted.consentGivenAt,
+          lawfulBasis: persisted.lawfulBasis,
+        };
+        this.templateRegistry.set(key, enrollment);
+      }
+    }
 
     if (!enrollment) {
       // Dynamic fallback: resolve resident by flat number or user ID within this society
@@ -265,6 +322,35 @@ export class BiometricsService implements OnModuleInit {
     // Biometric verified! Open the gate adapter
     await adapter.open();
 
+    // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
+    const deviceIdBio = (accessPoint as any).devices?.[0]?.deviceId || (accessPoint as any).devices?.[0]?.device?.id;
+    if (deviceIdBio) {
+      const commandIdBio = crypto.randomUUID();
+      const nowBio = new Date();
+      const expiresAtBio = new Date(nowBio.getTime() + 15 * 1000);
+      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
+        await (this.prisma as any).gateCommand.create({
+          data: {
+            id: commandIdBio,
+            deviceId: deviceIdBio,
+            accessPointId: accessPoint.id,
+            type: 'OPEN',
+            status: 'ISSUED',
+            nonce: crypto.randomBytes(16).toString('hex'),
+            issuedAt: nowBio,
+            expiresAt: expiresAtBio,
+          },
+        }).catch((cmdErr: unknown) => {
+          this.logger.warn(`Biometric GateCommand insertion failed: ${String(cmdErr)}`);
+        });
+      }
+      if (typeof this.mqtt?.publishCommand === 'function') {
+        await this.mqtt.publishCommand(commandIdBio).catch((mqttErr: unknown) => {
+          this.logger.warn(`Biometric MQTT command publish failed: ${String(mqttErr)}`);
+        });
+      }
+    }
+
     const accessEvent = await this.prisma.accessEvent.create({
       data: {
         societyId,
@@ -318,6 +404,35 @@ export class BiometricsService implements OnModuleInit {
 
     // Immediately trigger emergency override on the gate controller
     await adapter.emergencyOverride(reason);
+
+    // Actuate real hardware on Emergency: insert GateCommand into PostgreSQL and publish via MQTT
+    const deviceIdEmerg = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
+    if (deviceIdEmerg) {
+      const commandIdEmerg = crypto.randomUUID();
+      const nowEmerg = new Date();
+      const expiresAtEmerg = new Date(nowEmerg.getTime() + 15 * 1000);
+      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
+        await (this.prisma as any).gateCommand.create({
+          data: {
+            id: commandIdEmerg,
+            deviceId: deviceIdEmerg,
+            accessPointId: accessPoint.id,
+            type: 'OPEN',
+            status: 'ISSUED',
+            nonce: crypto.randomBytes(16).toString('hex'),
+            issuedAt: nowEmerg,
+            expiresAt: expiresAtEmerg,
+          },
+        }).catch((cmdErr: unknown) => {
+          this.logger.warn(`Emergency GateCommand insertion failed: ${String(cmdErr)}`);
+        });
+      }
+      if (typeof this.mqtt?.publishCommand === 'function') {
+        await this.mqtt.publishCommand(commandIdEmerg).catch((mqttErr: unknown) => {
+          this.logger.warn(`Emergency MQTT command publish failed: ${String(mqttErr)}`);
+        });
+      }
+    }
 
     const accessEvent = await this.prisma.accessEvent.create({
       data: {

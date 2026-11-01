@@ -34,6 +34,14 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
         findMany: jest.fn().mockResolvedValue([{ id: 'vis-1' }, { id: 'vis-2' }]),
         updateMany: jest.fn().mockResolvedValue({ count: 2 }),
       },
+      gateCommand: {
+        create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: data.id, ...data })),
+      },
+      biometricTemplate: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({}),
+      },
     };
 
     biometricsService = new BiometricsService(
@@ -93,6 +101,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
     });
 
     mockPrisma.user.findUnique.mockResolvedValue({
@@ -119,6 +128,16 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
 
     const adapter = adapterFactory.get('ap-gate-1');
     expect(await adapter?.getState()).toBe('OPEN');
+    expect(mockPrisma.gateCommand.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: 'OPEN',
+          deviceId: 'dev-controller-1',
+          accessPointId: 'ap-gate-1',
+        }),
+      }),
+    );
+    expect(mockMqtt.publishCommand).toHaveBeenCalled();
   });
 
   it('denies unknown biometric templates with audit record', async () => {
@@ -127,6 +146,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
     });
 
     const verifyResult = await biometricsService.verifyResidentBiometric('soc-1', {
@@ -145,6 +165,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
     });
 
     const overrideResult = await biometricsService.triggerEmergencyOverride(
@@ -159,12 +180,83 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     expect(overrideResult.decision).toBe('AUTHORIZED');
     expect(overrideResult.reasonCode).toBe('EMERGENCY_OVERRIDE');
     expect(overrideResult.gateState).toBe('OPEN');
+    expect(mockPrisma.gateCommand.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: 'OPEN',
+          deviceId: 'dev-controller-1',
+          accessPointId: 'ap-gate-1',
+        }),
+      }),
+    );
+    expect(mockMqtt.publishCommand).toHaveBeenCalled();
     expect(mockAudit.record).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'GATE_EMERGENCY_OVERRIDE',
         societyId: 'soc-1',
       }),
     );
+  });
+
+  it('loads persisted biometric template from database on cache miss', async () => {
+    mockPrisma.biometricTemplate.findFirst.mockResolvedValueOnce({
+      id: 'bt-persisted-1',
+      societyId: 'soc-1',
+      userId: 'user-db-1',
+      type: 'FINGERPRINT',
+      templateHash: 'finger_hash_from_db_123',
+      algorithm: 'SUPREMA_V2',
+      consentGivenAt: new Date(),
+      lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
+    });
+
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Tower A Entrance',
+      type: 'DOOR_LOCK',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+
+    mockPrisma.user.findUnique.mockResolvedValue({
+      id: 'user-db-1',
+      name: 'Priya Sharma',
+      flatMemberships: [
+        {
+          flat: { flatNumber: 'B-202' },
+          endedAt: null,
+        },
+      ],
+    });
+
+    const verifyResult = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-1',
+      type: 'FINGERPRINT',
+      templateHash: 'finger_hash_from_db_123',
+    });
+
+    expect(verifyResult.decision).toBe('AUTHORIZED');
+    expect(verifyResult.reasonCode).toBe('VALID_RESIDENT_BIOMETRIC');
+    expect((verifyResult as any).resident.name).toBe('Priya Sharma');
+  });
+
+  it('rejects biometric enrollment when explicit DPDP consent is withheld', async () => {
+    mockPrisma.societyMembership.findUnique.mockResolvedValue({
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+    });
+
+    await expect(
+      biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+        userId: 'user-1',
+        type: 'FACE',
+        templateHash: 'sha256_mock_face_no_consent',
+        algorithm: 'SUPREMA_FACE_V3',
+        consentGiven: false,
+      }),
+    ).rejects.toThrow();
   });
 
   it('generates DPDP compliance report and anonymizes expired visitor data', async () => {

@@ -38,7 +38,7 @@ export interface SelfRegisterVisitorResponse {
   credentials: {
     pin: string;
     qrToken: string;
-  };
+  } | null;
   accessPoints: Array<{
     id: string;
     name: string;
