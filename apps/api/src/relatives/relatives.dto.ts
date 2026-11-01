@@ -9,6 +9,10 @@ import {
 } from 'class-validator';
 
 export class RegisterRelativeDto {
+  @IsOptional()
+  @IsString()
+  flatId?: string;
+
   @IsString()
   @MinLength(2)
   @MaxLength(120)

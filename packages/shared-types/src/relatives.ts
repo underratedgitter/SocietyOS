@@ -25,7 +25,7 @@ export interface RelativeMember {
 }
 
 export interface RegisterRelativeRequest {
-  flatId: string;
+  flatId?: string;
   name: string;
   phone?: string;
   relation: RelativeRelationType | string;

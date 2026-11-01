@@ -51,7 +51,6 @@ export function RegisterRelativeModal({
     setSubmitting(true);
     try {
       const response = await registerRelative(flatId, {
-        flatId,
         name: trimmedName,
         relation,
         phone: phone.trim() || undefined,
