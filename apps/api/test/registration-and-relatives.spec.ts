@@ -228,6 +228,38 @@ describe('Registration & Relatives Service Modules', () => {
       ).rejects.toThrow(AppException);
     });
 
+    it('rejects registration if phone number already exists', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'existing-phone-id', phone: '+91 99999 11111' });
+
+      await expect(
+        registrationService.registerUser({
+          name: 'Duplicate Phone User',
+          email: 'newemail@example.com',
+          phone: '+91 99999 11111',
+          password: 'Password#2026',
+          societyId: SOCIETY_ID,
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('rejects registration if flat belongs to a different society', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValueOnce({
+        id: 'other-flat-id',
+        flatNumber: '999',
+        building: { societyId: 'diff-society-uuid', name: 'Other Tower' },
+      });
+
+      await expect(
+        registrationService.registerUser({
+          name: 'Wrong Flat User',
+          email: 'wrongflat@example.com',
+          password: 'Password#2026',
+          societyId: SOCIETY_ID,
+          flatId: 'other-flat-id',
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
     it('rejects registration if society does not exist', async () => {
       mockPrisma.society.findUnique.mockResolvedValueOnce(null);
 
@@ -322,6 +354,48 @@ describe('Registration & Relatives Service Modules', () => {
         }),
       ).rejects.toThrow(AppException);
     });
+
+    it('rejects self-registration if flat belongs to a different society', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValueOnce({
+        id: 'wrong-flat',
+        building: { societyId: 'diff-society', society: { id: 'diff-society' } },
+      });
+
+      await expect(
+        registrationService.selfRegisterVisitor({
+          societyId: SOCIETY_ID,
+          flatId: 'wrong-flat',
+          visitorName: 'Visitor',
+          category: 'RELATIVE',
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('rejects self-registration when daily pass capacity is exceeded', async () => {
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(25); // exceeds 20
+
+      await expect(
+        registrationService.selfRegisterVisitor({
+          societyId: SOCIETY_ID,
+          flatId: FLAT_ID,
+          visitorName: 'Capacity Visitor',
+          category: 'RELATIVE',
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('rejects self-registration if no active gates exist for the society', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValueOnce([]);
+
+      await expect(
+        registrationService.selfRegisterVisitor({
+          societyId: SOCIETY_ID,
+          flatId: FLAT_ID,
+          visitorName: 'Gate Visitor',
+          category: 'RELATIVE',
+        }),
+      ).rejects.toThrow(AppException);
+    });
   });
 
   describe('Resident Relatives Management & Quick Pass Generation', () => {
@@ -340,6 +414,28 @@ describe('Registration & Relatives Service Modules', () => {
       expect(result.initialPass.credentials.qrToken).toBeTruthy();
     });
 
+    it('rejects relative registration with duplicate name and relation for same flat', async () => {
+      mockPrisma.visitor.findFirst.mockResolvedValueOnce({ id: 'existing-rel' });
+
+      await expect(
+        relativesService.registerRelative(USER_ID, FLAT_ID, {
+          name: 'Kavita Patel',
+          relation: 'Sister',
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('rejects relative registration when no active gates exist', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValueOnce([]);
+
+      await expect(
+        relativesService.registerRelative(USER_ID, FLAT_ID, {
+          name: 'Meena Aunt',
+          relation: 'Aunt',
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
     it('issues a fast 1-click entry pass for a registered relative', async () => {
       const result = await relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, {
         validHours: 48,
@@ -352,7 +448,27 @@ describe('Registration & Relatives Service Modules', () => {
       expect(mockPrisma.visitorPass.create).toHaveBeenCalled();
     });
 
-    it('revokes active passes when a relative is removed', async () => {
+    it('rejects quick pass if visitor does not belong to the flat (IDOR protection)', async () => {
+      mockPrisma.visitorPass.findFirst.mockResolvedValueOnce(null);
+
+      await expect(
+        relativesService.issueQuickPass(USER_ID, FLAT_ID, 'other-flat-visitor-id', {
+          validHours: 24,
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('rejects quick pass if visitor is not found or not active relative', async () => {
+      mockPrisma.visitor.findUnique.mockResolvedValueOnce(null);
+
+      await expect(
+        relativesService.issueQuickPass(USER_ID, FLAT_ID, 'non-existent-visitor', {
+          validHours: 24,
+        }),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('revokes active passes and unlinks relative from directory on delete', async () => {
       const result = await relativesService.deleteRelative(USER_ID, FLAT_ID, VISITOR_ID);
       expect(result.ok).toBe(true);
       expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith(
@@ -367,6 +483,18 @@ describe('Registration & Relatives Service Modules', () => {
           }),
         }),
       );
+      expect(mockPrisma.visitor.update).toHaveBeenCalledWith({
+        where: { id: VISITOR_ID },
+        data: { category: 'OTHER' },
+      });
+    });
+
+    it('rejects deleting relative if relative belongs to a different flat (IDOR protection)', async () => {
+      mockPrisma.visitorPass.findFirst.mockResolvedValueOnce(null);
+
+      await expect(
+        relativesService.deleteRelative(USER_ID, FLAT_ID, 'other-flat-relative-id'),
+      ).rejects.toThrow(AppException);
     });
   });
 });
