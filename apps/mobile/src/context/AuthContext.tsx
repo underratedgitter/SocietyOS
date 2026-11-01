@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { api, ApiError, initStorage, setAuthTokens } from '../api/client';
+import { api, ApiError, getAccessToken, getRefreshToken, initStorage, setAuthTokens } from '../api/client';
 import { mobileStorage } from '../api/storage';
-import type { FlatLink, Session, SocietyRef } from '../api/types';
+import type { FlatLink, RegisterUserRequest, Session, SocietyRef } from '../api/types';
 
 export const DEMO_RESIDENTS = [
   { label: 'Resident 101 (Palm Grove)', email: 'resident.a1@societyos.dev', password: 'Society#2026' },
@@ -18,6 +18,7 @@ interface AuthContextType {
   setSelectedFlat: (flat: FlatLink) => void;
   login: (email: string, password: string) => Promise<Session>;
   demoLogin: (email: string, password: string) => Promise<Session>;
+  register: (payload: RegisterUserRequest) => Promise<Session>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -55,7 +56,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } else {
         setSession(null);
         setSelectedFlat(null);
+        setAuthTokens(null, null);
         void mobileStorage.clearCachedSession();
+        void mobileStorage.clearTokens();
       }
     }
   };
@@ -73,6 +76,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (cached.flats?.length > 0) {
             setSelectedFlat(cached.flats[0]);
           }
+        }
+
+        // If no saved tokens, skip live check and render unauthenticated screen immediately
+        if (!getAccessToken() && !getRefreshToken()) {
+          if (isMounted) {
+            setLoading(false);
+          }
+          return;
         }
 
         // Verify with live backend
@@ -93,7 +104,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           } else {
             setSession(null);
             setSelectedFlat(null);
+            setAuthTokens(null, null);
             void mobileStorage.clearCachedSession();
+            void mobileStorage.clearTokens();
           }
         }
       } finally {
@@ -131,17 +144,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return login(email, password);
   };
 
+  const register = async (payload: RegisterUserRequest): Promise<Session> => {
+    setError(null);
+    try {
+      await api.registerUser(payload);
+      const me = await api.getMe();
+      setSession(me);
+      setIsOffline(false);
+      void mobileStorage.saveCachedSession(me);
+      if (me.flats.length > 0) {
+        setSelectedFlat(me.flats[0]);
+      }
+      return me;
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Registration failed. Please check details.';
+      setError(msg);
+      throw err;
+    }
+  };
+
   const logout = async () => {
     try {
       await api.logout();
     } catch {
       // Clear local state regardless
-      setAuthTokens(null, null);
     } finally {
+      setAuthTokens(null, null);
       setSession(null);
       setSelectedFlat(null);
-      void mobileStorage.clearCachedSession();
+      setIsOffline(false);
       void mobileStorage.clearTokens();
+      void mobileStorage.clearAllCache();
     }
   };
 
@@ -157,6 +190,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSelectedFlat,
         login,
         demoLogin,
+        register,
         logout,
         refreshProfile,
       }}

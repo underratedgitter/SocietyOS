@@ -10,6 +10,7 @@ import {
   ApiError,
   api,
   initStorage,
+  refreshSession,
 } from '../src/api/client';
 import { mobileStorage } from '../src/api/storage';
 import {
@@ -318,16 +319,120 @@ describe('Mobile Local Secure Storage & Persistence', () => {
     setAuthTokens(null, null);
     setApiUrl('http://localhost:80/api/v1');
   });
+
+  test('caches passes, relatives, notices, and credentials offline', async () => {
+    mobileStorage._clearMemory();
+
+    const mockPasses = [
+      { id: 'pass-1', status: 'ACTIVE', category: 'RELATIVE' },
+    ];
+    await mobileStorage.saveCachedPasses(mockPasses);
+    const loadedPasses = await mobileStorage.loadCachedPasses<typeof mockPasses>();
+    assert.deepEqual(loadedPasses, mockPasses);
+
+    const mockRelatives = [
+      { id: 'rel-1', name: 'Asha Patel', relation: 'Mother' },
+    ];
+    await mobileStorage.saveCachedRelatives(mockRelatives);
+    const loadedRelatives = await mobileStorage.loadCachedRelatives<typeof mockRelatives>();
+    assert.deepEqual(loadedRelatives, mockRelatives);
+
+    const mockNotices = [
+      { id: 'not-1', title: 'Water Shutdown', category: 'MAINTENANCE' },
+    ];
+    await mobileStorage.saveCachedNotices(mockNotices);
+    const loadedNotices = await mobileStorage.loadCachedNotices<typeof mockNotices>();
+    assert.deepEqual(loadedNotices, mockNotices);
+
+    const mockCreds = {
+      'pass-1': { pin: '456789', qrToken: 'abcdef1234567890abcdef1234567890' },
+    };
+    await mobileStorage.saveCachedCredentials(mockCreds);
+    const loadedCreds = await mobileStorage.loadCachedCredentials();
+    assert.deepEqual(loadedCreds, mockCreds);
+
+    await mobileStorage.clearAllCache();
+    assert.equal(await mobileStorage.loadCachedPasses(), null);
+    assert.equal(await mobileStorage.loadCachedRelatives(), null);
+    assert.equal(await mobileStorage.loadCachedNotices(), null);
+    assert.equal(await mobileStorage.loadCachedCredentials(), null);
+  });
 });
 
-describe('Mobile Relatives API Client Methods', () => {
-  test('client defines listRelatives, registerRelative, issueQuickPass, deleteRelative', () => {
+describe('Mobile Session Refresh Concurrency & Error Clearance', () => {
+  test('refreshSession deduplicates concurrent requests without duplicate network calls', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCount = 0;
+
+    // Mock fetch that takes 20ms to simulate network latency
+    globalThis.fetch = (async () => {
+      fetchCount++;
+      await new Promise((r) => setTimeout(r, 20));
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          accessToken: 'concurrent-refreshed-at',
+          refreshToken: 'concurrent-refreshed-rt',
+        }),
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    setAuthTokens('expired-at', 'valid-rt');
+
+    // Trigger two refresh calls in parallel
+    const [p1, p2] = await Promise.all([refreshSession(), refreshSession()]);
+
+    assert.equal(p1, true);
+    assert.equal(p2, true);
+    assert.equal(fetchCount, 1, 'Only one network request should be dispatched for concurrent refresh calls');
+    assert.equal(getAccessToken(), 'concurrent-refreshed-at');
+    assert.equal(getRefreshToken(), 'concurrent-refreshed-rt');
+
+    globalThis.fetch = originalFetch;
+    setAuthTokens(null, null);
+  });
+
+  test('refreshSession purges stored tokens when server responds 401 Unauthorized', async () => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => {
+      return {
+        ok: false,
+        status: 401,
+        headers: new Headers(),
+        json: async () => ({ code: 'INVALID_SESSION', message: 'Session is invalid or expired' }),
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    setAuthTokens('expired-at', 'dead-revoked-rt');
+    await mobileStorage.saveTokens({ accessToken: 'expired-at', refreshToken: 'dead-revoked-rt' });
+
+    const success = await refreshSession();
+    assert.equal(success, false);
+    assert.equal(getAccessToken(), null, 'Stored access token should be cleared on 401');
+    assert.equal(getRefreshToken(), null, 'Stored refresh token should be cleared on 401');
+
+    const storedInStorage = await mobileStorage.loadTokens();
+    assert.equal(storedInStorage.accessToken, null);
+    assert.equal(storedInStorage.refreshToken, null);
+
+    globalThis.fetch = originalFetch;
+  });
+});
+
+describe('Mobile Relatives & Directory Client Methods', () => {
+  test('client defines all required endpoints', () => {
     assert.equal(typeof api.listRelatives, 'function');
     assert.equal(typeof api.registerRelative, 'function');
     assert.equal(typeof api.issueQuickPass, 'function');
     assert.equal(typeof api.deleteRelative, 'function');
     assert.equal(typeof api.listPublicSocieties, 'function');
     assert.equal(typeof api.listPublicFlats, 'function');
+    assert.equal(typeof api.registerUser, 'function');
+    assert.equal(typeof api.selfRegisterVisitor, 'function');
+    assert.equal(typeof api.changePassword, 'function');
   });
 });
 

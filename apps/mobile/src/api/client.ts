@@ -10,7 +10,11 @@ import type {
   QuickPassRequest,
   QuickPassResult,
   RegisterRelativeRequest,
+  RegisterUserRequest,
+  RegisterUserResponse,
   RelativeMember,
+  SelfRegisterVisitorRequest,
+  SelfRegisterVisitorResponse,
   Session,
   User,
 } from './types';
@@ -232,52 +236,72 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+let activeRefreshPromise: Promise<boolean> | null = null;
+
 export async function refreshSession(): Promise<boolean> {
   if (!storedRefreshToken) return false;
-  try {
-    const res = await fetch(`${currentApiUrl}/auth/refresh`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-client-type': 'mobile',
-        ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
-      },
-      body: JSON.stringify({ refreshToken: storedRefreshToken }),
-    });
-
-    if (!res.ok) return false;
-
-    try {
-      const data = (await res.json()) as { accessToken?: string; refreshToken?: string };
-      if (data?.accessToken) {
-        setAuthTokens(data.accessToken, data.refreshToken ?? storedRefreshToken);
-        return true;
-      }
-    } catch {
-      // Fall through to cookie parsing
-    }
-
-    let rawSetCookie: string[] | string | null = null;
-    if (typeof (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === 'function') {
-      rawSetCookie = (res.headers as unknown as { getSetCookie: () => string[] }).getSetCookie();
-    } else {
-      rawSetCookie = res.headers.get('set-cookie');
-    }
-    if (rawSetCookie) {
-      const parsed = parseSetCookie(rawSetCookie);
-      storedCookies = { ...storedCookies, ...parsed };
-      if (parsed.so_access) storedAccessToken = parsed.so_access;
-      if (parsed.so_refresh) storedRefreshToken = parsed.so_refresh;
-      void mobileStorage.saveTokens({
-        accessToken: storedAccessToken,
-        refreshToken: storedRefreshToken,
-        cookies: storedCookies,
-      });
-    }
-    return true;
-  } catch {
-    return false;
+  if (activeRefreshPromise) {
+    return activeRefreshPromise;
   }
+
+  activeRefreshPromise = (async () => {
+    try {
+      const res = await fetch(`${currentApiUrl}/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-client-type': 'mobile',
+          ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
+        },
+        body: JSON.stringify({ refreshToken: storedRefreshToken }),
+      });
+
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          // Token is revoked or expired; clear dead tokens to prevent endless auth failure loops
+          setAuthTokens(null, null);
+          void mobileStorage.clearTokens();
+          void mobileStorage.clearCachedSession();
+        }
+        return false;
+      }
+
+      try {
+        const data = (await res.json()) as { accessToken?: string; refreshToken?: string };
+        if (data?.accessToken) {
+          setAuthTokens(data.accessToken, data.refreshToken ?? storedRefreshToken);
+          return true;
+        }
+      } catch {
+        // Fall through to cookie parsing
+      }
+
+      let rawSetCookie: string[] | string | null = null;
+      if (typeof (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === 'function') {
+        rawSetCookie = (res.headers as unknown as { getSetCookie: () => string[] }).getSetCookie();
+      } else {
+        rawSetCookie = res.headers.get('set-cookie');
+      }
+      if (rawSetCookie) {
+        const parsed = parseSetCookie(rawSetCookie);
+        storedCookies = { ...storedCookies, ...parsed };
+        if (parsed.so_access) storedAccessToken = parsed.so_access;
+        if (parsed.so_refresh) storedRefreshToken = parsed.so_refresh;
+        void mobileStorage.saveTokens({
+          accessToken: storedAccessToken,
+          refreshToken: storedRefreshToken,
+          cookies: storedCookies,
+        });
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      activeRefreshPromise = null;
+    }
+  })();
+
+  return activeRefreshPromise;
 }
 
 // Concrete API calls
@@ -425,6 +449,50 @@ export const api = {
 
   async listPublicFlats(societyId: string): Promise<PublicFlat[]> {
     return request<PublicFlat[]>(`/public/societies/${societyId}/flats`);
+  },
+
+  async registerUser(
+    payload: RegisterUserRequest,
+  ): Promise<RegisterUserResponse & { accessToken?: string; refreshToken?: string }> {
+    const res = await request<RegisterUserResponse & { accessToken?: string; refreshToken?: string }>(
+      '/auth/register',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        skipRefresh: true,
+      },
+    );
+    if (res.accessToken) {
+      setAuthTokens(res.accessToken, res.refreshToken ?? null);
+    }
+    return res;
+  },
+
+  async selfRegisterVisitor(
+    payload: SelfRegisterVisitorRequest,
+  ): Promise<SelfRegisterVisitorResponse> {
+    return request<SelfRegisterVisitorResponse>('/visitors/self-register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      skipRefresh: true,
+    });
+  },
+
+  async changePassword(
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<{ user: User; expiresIn: number; accessToken?: string; refreshToken?: string }> {
+    const res = await request<{ user: User; expiresIn: number; accessToken?: string; refreshToken?: string }>(
+      '/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      },
+    );
+    if (res.accessToken) {
+      setAuthTokens(res.accessToken, res.refreshToken ?? null);
+    }
+    return res;
   },
 };
 

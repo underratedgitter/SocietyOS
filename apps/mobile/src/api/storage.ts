@@ -88,6 +88,10 @@ const KEYS = {
   COOKIES: 'societyos_mobile_cookies',
   SESSION: 'societyos_mobile_cached_session',
   API_URL: 'societyos_mobile_api_url',
+  CACHED_PASSES: 'societyos_mobile_cached_passes',
+  CACHED_RELATIVES: 'societyos_mobile_cached_relatives',
+  CACHED_NOTICES: 'societyos_mobile_cached_notices',
+  CACHED_CREDENTIALS: 'societyos_mobile_cached_credentials',
 };
 
 export interface StoredTokens {
@@ -170,6 +174,88 @@ export const mobileStorage = {
 
   async clearCachedSession(): Promise<void> {
     await deleteStorageItem(KEYS.SESSION);
+  },
+
+  async saveCachedPasses(passes: unknown[]): Promise<void> {
+    if (passes && passes.length > 0) {
+      await setStorageItem(KEYS.CACHED_PASSES, JSON.stringify(passes));
+    } else {
+      await deleteStorageItem(KEYS.CACHED_PASSES);
+    }
+  },
+
+  async loadCachedPasses<T>(): Promise<T | null> {
+    const raw = await getStorageItem(KEYS.CACHED_PASSES);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveCachedRelatives(relatives: unknown[]): Promise<void> {
+    if (relatives && relatives.length > 0) {
+      await setStorageItem(KEYS.CACHED_RELATIVES, JSON.stringify(relatives));
+    } else {
+      await deleteStorageItem(KEYS.CACHED_RELATIVES);
+    }
+  },
+
+  async loadCachedRelatives<T>(): Promise<T | null> {
+    const raw = await getStorageItem(KEYS.CACHED_RELATIVES);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveCachedNotices(notices: unknown[]): Promise<void> {
+    if (notices && notices.length > 0) {
+      await setStorageItem(KEYS.CACHED_NOTICES, JSON.stringify(notices));
+    } else {
+      await deleteStorageItem(KEYS.CACHED_NOTICES);
+    }
+  },
+
+  async loadCachedNotices<T>(): Promise<T | null> {
+    const raw = await getStorageItem(KEYS.CACHED_NOTICES);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  },
+
+  async saveCachedCredentials(credentials: Record<string, { pin: string; qrToken: string }>): Promise<void> {
+    if (credentials && Object.keys(credentials).length > 0) {
+      await setStorageItem(KEYS.CACHED_CREDENTIALS, JSON.stringify(credentials));
+    } else {
+      await deleteStorageItem(KEYS.CACHED_CREDENTIALS);
+    }
+  },
+
+  async loadCachedCredentials(): Promise<Record<string, { pin: string; qrToken: string }> | null> {
+    const raw = await getStorageItem(KEYS.CACHED_CREDENTIALS);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as Record<string, { pin: string; qrToken: string }>;
+    } catch {
+      return null;
+    }
+  },
+
+  async clearAllCache(): Promise<void> {
+    await Promise.all([
+      deleteStorageItem(KEYS.SESSION),
+      deleteStorageItem(KEYS.CACHED_PASSES),
+      deleteStorageItem(KEYS.CACHED_RELATIVES),
+      deleteStorageItem(KEYS.CACHED_NOTICES),
+      deleteStorageItem(KEYS.CACHED_CREDENTIALS),
+    ]);
   },
 
   async saveApiUrl(url: string): Promise<void> {

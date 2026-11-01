@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { api, ApiError } from '../api/client';
+import { mobileStorage } from '../api/storage';
 import type { AccessPoint, PassWithCredentials, RelativeMember } from '../api/types';
 import { PassCard } from '../components/PassCard';
 import { QuickRegisterModal } from '../components/QuickRegisterModal';
@@ -36,6 +37,17 @@ export function RelativesScreen() {
 
   const flatId = selectedFlat?.id ?? '';
 
+  // Load cached relatives immediately on mount
+  useEffect(() => {
+    void (async () => {
+      const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>();
+      if (cached && cached.length > 0) {
+        setRelatives(cached);
+        setLoading(false);
+      }
+    })();
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!flatId) return;
     setError(null);
@@ -46,17 +58,28 @@ export function RelativesScreen() {
       ]);
       setRelatives(relativesList);
       setAccessPoints(gates);
+      void mobileStorage.saveCachedRelatives(relativesList);
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Could not refresh family directory.';
-      setError(msg);
+      if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+        if (relatives.length === 0) {
+          const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>();
+          if (cached && cached.length > 0) {
+            setRelatives(cached);
+          } else {
+            setError('Operating offline. No cached relatives directory.');
+          }
+        }
+      } else {
+        const msg = err instanceof ApiError ? err.message : 'Could not refresh family directory.';
+        setError(msg);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [flatId]);
+  }, [flatId, relatives.length]);
 
   useEffect(() => {
-    setLoading(true);
     void loadData();
   }, [loadData]);
 

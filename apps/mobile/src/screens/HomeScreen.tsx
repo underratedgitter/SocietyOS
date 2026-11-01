@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { api, ApiError } from '../api/client';
+import { mobileStorage } from '../api/storage';
 import type { AccessPoint, PassView, PassWithCredentials } from '../api/types';
 import { PassBadge } from '../components/PassBadge';
 import { PassCard } from '../components/PassCard';
@@ -31,7 +32,7 @@ export function HomeScreen({
   registerModalOpen,
   setRegisterModalOpen,
 }: HomeScreenProps) {
-  const { session, selectedFlat, selectedSociety } = useAuth();
+  const { session, selectedFlat, selectedSociety, isOffline } = useAuth();
   const [passes, setPasses] = useState<PassView[]>([]);
   const [accessPoints, setAccessPoints] = useState<AccessPoint[]>([]);
   const [loading, setLoading] = useState(true);
@@ -54,6 +55,23 @@ export function HomeScreen({
   const societyId = selectedSociety?.id ?? '';
   const flatId = selectedFlat?.id ?? '';
 
+  // Load cached passes and credentials on mount for instantaneous offline access
+  useEffect(() => {
+    void (async () => {
+      const [cachedPasses, cachedCreds] = await Promise.all([
+        mobileStorage.loadCachedPasses<PassView[]>(),
+        mobileStorage.loadCachedCredentials(),
+      ]);
+      if (cachedPasses && cachedPasses.length > 0) {
+        setPasses(cachedPasses);
+        setLoading(false);
+      }
+      if (cachedCreds) {
+        setIssuedCredentials(cachedCreds);
+      }
+    })();
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!societyId) return;
     setError(null);
@@ -64,17 +82,29 @@ export function HomeScreen({
       ]);
       setPasses(passPage.items);
       setAccessPoints(gates);
+      void mobileStorage.saveCachedPasses(passPage.items);
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Could not refresh pass data.';
-      setError(msg);
+      if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+        // If passes already exist from local cache, keep showing them gracefully
+        if (passes.length === 0) {
+          const cached = await mobileStorage.loadCachedPasses<PassView[]>();
+          if (cached && cached.length > 0) {
+            setPasses(cached);
+          } else {
+            setError('Operating offline. No cached passes found.');
+          }
+        }
+      } else {
+        const msg = err instanceof ApiError ? err.message : 'Could not refresh pass data.';
+        setError(msg);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [societyId, flatId]);
+  }, [societyId, flatId, passes.length]);
 
   useEffect(() => {
-    setLoading(true);
     void loadData();
   }, [loadData]);
 
@@ -153,6 +183,13 @@ export function HomeScreen({
           />
         }
       >
+        {/* Offline Banner */}
+        {isOffline ? (
+          <View style={styles.offlineBanner}>
+            <Text style={styles.offlineText}>⚡ Operating in offline mode. Viewing cached visitor passes.</Text>
+          </View>
+        ) : null}
+
         {/* Error Alert */}
         {error ? (
           <View style={styles.errorBanner}>
@@ -389,10 +426,12 @@ export function HomeScreen({
           selectedFlat={selectedFlat}
           accessPoints={accessPoints}
           onPassCreated={(newPassWithCreds, meta) => {
-            setIssuedCredentials((prev) => ({
-              ...prev,
+            const nextCreds = {
+              ...issuedCredentials,
               [newPassWithCreds.pass.id]: newPassWithCreds.credentials,
-            }));
+            };
+            setIssuedCredentials(nextCreds);
+            void mobileStorage.saveCachedCredentials(nextCreds);
             setSelectedPassModal({
               passWithCredentials: newPassWithCreds,
               meta,
@@ -433,6 +472,19 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 16,
+  },
+  offlineBanner: {
+    backgroundColor: colors.amberSoft,
+    borderWidth: 1,
+    borderColor: colors.amber,
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  offlineText: {
+    color: colors.amberInk,
+    fontSize: 12,
+    fontWeight: '600',
   },
   errorBanner: {
     backgroundColor: '#ffe4e6',

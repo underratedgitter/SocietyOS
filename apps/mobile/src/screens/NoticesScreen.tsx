@@ -9,6 +9,7 @@ import {
   View,
 } from 'react-native';
 import { api, ApiError } from '../api/client';
+import { mobileStorage } from '../api/storage';
 import type { Announcement } from '../api/types';
 import { NoticeCard } from '../components/NoticeCard';
 import { useAuth } from '../context/AuthContext';
@@ -17,7 +18,7 @@ import { colors } from '../styles/theme';
 type NoticeCategoryFilter = 'ALL' | 'EMERGENCY' | 'MAINTENANCE' | 'EVENT' | 'GENERAL';
 
 export function NoticesScreen() {
-  const { selectedSociety } = useAuth();
+  const { selectedSociety, isOffline } = useAuth();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -26,23 +27,45 @@ export function NoticesScreen() {
 
   const societyId = selectedSociety?.id ?? '';
 
+  // Load cached notices on mount
+  useEffect(() => {
+    void (async () => {
+      const cached = await mobileStorage.loadCachedNotices<Announcement[]>();
+      if (cached && cached.length > 0) {
+        setAnnouncements(cached);
+        setLoading(false);
+      }
+    })();
+  }, []);
+
   const loadNotices = useCallback(async () => {
     if (!societyId) return;
     setError(null);
     try {
       const items = await api.listAnnouncements(societyId);
       setAnnouncements(items);
+      void mobileStorage.saveCachedNotices(items);
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Could not fetch notices.';
-      setError(msg);
+      if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+        if (announcements.length === 0) {
+          const cached = await mobileStorage.loadCachedNotices<Announcement[]>();
+          if (cached && cached.length > 0) {
+            setAnnouncements(cached);
+          } else {
+            setError('Operating offline. No cached notices.');
+          }
+        }
+      } else {
+        const msg = err instanceof ApiError ? err.message : 'Could not fetch notices.';
+        setError(msg);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [societyId]);
+  }, [societyId, announcements.length]);
 
   useEffect(() => {
-    setLoading(true);
     void loadNotices();
   }, [loadNotices]);
 

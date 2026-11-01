@@ -194,3 +194,66 @@ export interface PublicFlat {
   label: string;
 }
 
+export interface RegisterUserRequest {
+  name: string;
+  email: string;
+  password: string;
+  phone?: string;
+  societyId: string;
+  flatId?: string;
+  relationship?: 'OWNER' | 'TENANT' | 'FAMILY';
+}
+
+export interface RegisterUserResponse {
+  user: User;
+  expiresIn: number;
+  society: {
+    id: string;
+    name: string;
+  };
+  flat?: {
+    id: string;
+    flatNumber: string;
+    buildingName: string;
+    relationship: 'OWNER' | 'TENANT' | 'FAMILY';
+  };
+}
+
+export interface SelfRegisterVisitorRequest {
+  societyId: string;
+  flatId: string;
+  visitorName: string;
+  visitorPhone?: string;
+  category: VisitorCategory;
+  vehicle?: string;
+  purpose?: string;
+  expectedDurationMinutes?: number;
+}
+
+export interface SelfRegisterVisitorResponse {
+  passId: string;
+  societyId: string;
+  status: 'ACTIVE' | 'PENDING_APPROVAL';
+  category: VisitorCategory;
+  visitor: {
+    id: string;
+    name: string;
+    phone: string | null;
+  };
+  flat: {
+    id: string;
+    buildingName: string;
+    flatNumber: string;
+  };
+  validFrom: string;
+  validUntil: string;
+  maxUses: number;
+  credentials: {
+    pin: string;
+    qrToken: string;
+  };
+  accessPoints: AccessPoint[];
+  message: string;
+  requiresHostApproval: boolean;
+}
+

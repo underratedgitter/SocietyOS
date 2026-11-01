@@ -137,11 +137,19 @@ export class AuthController {
   async changePassword(
     @CurrentUser() user: JwtUser,
     @Body() dto: ChangePasswordDto,
+    @Req() req: AuthedRequest,
     @Res({ passthrough: true }) res: Response,
   ) {
     const result = await this.auth.changePassword(user!.sub, dto.currentPassword, dto.newPassword);
     this.setAuthCookies(res, result);
-    return { user: result.user, expiresIn: result.expiresIn };
+    const isMobileClient =
+      req.headers['x-client-type'] === 'mobile' ||
+      req.headers['x-auth-mode'] === 'bearer';
+    return {
+      user: result.user,
+      expiresIn: result.expiresIn,
+      ...(isMobileClient ? { accessToken: result.accessToken, refreshToken: result.refreshToken } : {}),
+    };
   }
 
   private cookie(req: Request, name: string): string | undefined {

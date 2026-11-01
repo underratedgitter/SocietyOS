@@ -141,6 +141,7 @@ describe('Registration & Relatives Service Modules', () => {
     mockAuthService = {
       login: jest.fn(),
       refresh: jest.fn(),
+      changePassword: jest.fn(),
       issueSessionTokens: jest.fn().mockResolvedValue({
         accessToken: 'mock_at',
         refreshToken: 'mock_rt',
@@ -587,6 +588,56 @@ describe('Registration & Relatives Service Modules', () => {
 
       expect(result.accessToken).toBe('refreshed-mobile-access');
       expect(result.refreshToken).toBe('refreshed-mobile-refresh');
+    });
+
+    it('returns tokens on changePassword when X-Client-Type is mobile', async () => {
+      mockAuthService.changePassword.mockResolvedValueOnce({
+        user: { id: USER_ID, email: 'resident@societyos.dev', name: 'Resident' },
+        expiresIn: 900,
+        accessToken: 'new-pwd-mobile-access',
+        refreshToken: 'new-pwd-mobile-refresh',
+      });
+
+      const req = {
+        ip: '127.0.0.1',
+        headers: { 'x-client-type': 'mobile', 'user-agent': 'SocietyOS-Mobile/1.0' },
+      };
+
+      const result = await authController.changePassword(
+        { sub: USER_ID, email: 'resident@societyos.dev' } as any,
+        { currentPassword: 'OldPassword#123', newPassword: 'NewPassword#123' },
+        req as any,
+        mockResponse,
+      );
+
+      expect(result.accessToken).toBe('new-pwd-mobile-access');
+      expect(result.refreshToken).toBe('new-pwd-mobile-refresh');
+      expect(result.user.email).toBe('resident@societyos.dev');
+    });
+
+    it('omits tokens on changePassword for standard web clients (cookie only)', async () => {
+      mockAuthService.changePassword.mockResolvedValueOnce({
+        user: { id: USER_ID, email: 'resident@societyos.dev', name: 'Resident' },
+        expiresIn: 900,
+        accessToken: 'new-pwd-web-access',
+        refreshToken: 'new-pwd-web-refresh',
+      });
+
+      const req = {
+        ip: '127.0.0.1',
+        headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      };
+
+      const result = await authController.changePassword(
+        { sub: USER_ID, email: 'resident@societyos.dev' } as any,
+        { currentPassword: 'OldPassword#123', newPassword: 'NewPassword#123' },
+        req as any,
+        mockResponse,
+      );
+
+      expect(result.accessToken).toBeUndefined();
+      expect(result.refreshToken).toBeUndefined();
+      expect(mockResponse.cookie).toHaveBeenCalled();
     });
   });
 });
