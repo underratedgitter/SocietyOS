@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "SocietyOS Resident",
+    "slug": "societyos-resident",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#f6f4ee"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.societyos.resident"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#f6f4ee"
+      },
+      "package": "dev.societyos.resident"
+    },
+    "extra": {
+      "apiUrl": "http://localhost:80/api/v1"
+    }
+  }
+}

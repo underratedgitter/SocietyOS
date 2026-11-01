@@ -10,6 +10,7 @@
   "scripts": {
     "dev:api": "pnpm --filter @societyos/api start:dev",
     "dev:web": "pnpm --filter @societyos/web dev",
+    "dev:mobile": "pnpm --filter @societyos/mobile start",
     "dev:simulator": "pnpm --filter @societyos/device-simulator dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",

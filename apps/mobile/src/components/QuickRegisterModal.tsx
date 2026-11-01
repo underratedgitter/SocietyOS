@@ -1,0 +1,638 @@
+import React, { useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { api, ApiError } from '../api/client';
+import type { AccessPoint, FlatLink, PassWithCredentials, VisitorCategory } from '../api/types';
+import { colors } from '../styles/theme';
+
+interface QuickRegisterModalProps {
+  visible: boolean;
+  onClose: () => void;
+  flats: FlatLink[];
+  selectedFlat: FlatLink | null;
+  accessPoints: AccessPoint[];
+  onPassCreated: (pass: PassWithCredentials, meta: { vehicle?: string; purpose?: string }) => void;
+  initialCategory?: VisitorCategory;
+}
+
+type WindowPreset = 'TODAY_4H' | 'REST_OF_DAY' | 'WEEKEND' | 'THREE_DAYS' | 'SEVEN_DAYS';
+
+export function QuickRegisterModal({
+  visible,
+  onClose,
+  flats,
+  selectedFlat,
+  accessPoints,
+  onPassCreated,
+  initialCategory = 'RELATIVE',
+}: QuickRegisterModalProps) {
+  const [category, setCategory] = useState<VisitorCategory>(initialCategory);
+  const [flatId, setFlatId] = useState<string>(selectedFlat?.id ?? flats[0]?.id ?? '');
+  const [visitorName, setVisitorName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [vehicle, setVehicle] = useState('');
+  const [purpose, setPurpose] = useState('');
+  const [windowPreset, setWindowPreset] = useState<WindowPreset>('THREE_DAYS');
+  const [maxUses, setMaxUses] = useState(10);
+  const [selectedGateIds, setSelectedGateIds] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Sync default flat and gates
+  useEffect(() => {
+    if (selectedFlat) {
+      setFlatId(selectedFlat.id);
+    } else if (flats.length > 0 && !flatId) {
+      setFlatId(flats[0].id);
+    }
+  }, [selectedFlat, flats]);
+
+  useEffect(() => {
+    if (accessPoints.length > 0 && selectedGateIds.length === 0) {
+      setSelectedGateIds(accessPoints.map((a) => a.id));
+    }
+  }, [accessPoints]);
+
+  // Adjust defaults when category changes
+  const applyCategoryDefaults = (cat: VisitorCategory) => {
+    setCategory(cat);
+    setError(null);
+    if (cat === 'RELATIVE') {
+      setWindowPreset('THREE_DAYS');
+      setMaxUses(10);
+      setPurpose('Family Visit');
+      if (visitorName === 'Delivery Partner' || visitorName === 'Cab Driver' || visitorName === 'Technician') {
+        setVisitorName('');
+      }
+    } else if (cat === 'FRIEND') {
+      setWindowPreset('TODAY_4H');
+      setMaxUses(2);
+      setPurpose('Social Visit');
+    } else if (cat === 'DELIVERY') {
+      setWindowPreset('TODAY_4H');
+      setMaxUses(1);
+      if (!visitorName) setVisitorName('Delivery Partner');
+      setPurpose('Package Delivery');
+    } else if (cat === 'CAB') {
+      setWindowPreset('TODAY_4H');
+      setMaxUses(1);
+      if (!visitorName) setVisitorName('Cab Driver');
+      setPurpose('Cab Pickup / Drop');
+    } else if (cat === 'MAINTENANCE') {
+      setWindowPreset('TODAY_4H');
+      setMaxUses(2);
+      if (!visitorName) setVisitorName('Technician');
+      setPurpose('Maintenance Service');
+    }
+  };
+
+  const calculateWindowDates = (preset: WindowPreset): { validFrom: string; validUntil: string } => {
+    const now = new Date();
+    const from = new Date(now);
+
+    let until = new Date(now);
+    switch (preset) {
+      case 'TODAY_4H':
+        until = new Date(now.getTime() + 4 * 3600 * 1000);
+        break;
+      case 'REST_OF_DAY':
+        until.setHours(23, 59, 59, 999);
+        break;
+      case 'WEEKEND': {
+        const dayOfWeek = now.getDay();
+        const daysUntilSunday = (7 - dayOfWeek) % 7;
+        until.setDate(now.getDate() + (daysUntilSunday === 0 ? 1 : daysUntilSunday));
+        until.setHours(23, 59, 59, 999);
+        break;
+      }
+      case 'THREE_DAYS':
+        until = new Date(now.getTime() + 3 * 24 * 3600 * 1000);
+        break;
+      case 'SEVEN_DAYS':
+        until = new Date(now.getTime() + 7 * 24 * 3600 * 1000);
+        break;
+    }
+
+    return {
+      validFrom: from.toISOString(),
+      validUntil: until.toISOString(),
+    };
+  };
+
+  const toggleGate = (id: string) => {
+    setSelectedGateIds((prev) =>
+      prev.includes(id) ? prev.filter((gid) => gid !== id) : [...prev, id],
+    );
+  };
+
+  const handleSubmit = async () => {
+    setError(null);
+    const trimmedName = visitorName.trim();
+    if (!trimmedName) {
+      setError('Please enter visitor / relative name.');
+      return;
+    }
+    if (!flatId) {
+      setError('Please select a destination flat.');
+      return;
+    }
+    if (selectedGateIds.length === 0) {
+      setError('Please select at least one entry gate.');
+      return;
+    }
+
+    const trimmedVehicle = vehicle.trim().toUpperCase();
+    const trimmedPurpose = purpose.trim();
+    const finalName = trimmedVehicle ? `${trimmedName} [${trimmedVehicle}]`.slice(0, 120) : trimmedName;
+
+    const { validFrom, validUntil } = calculateWindowDates(windowPreset);
+
+    setLoading(true);
+    try {
+      const created = await api.createPass({
+        flatId,
+        visitor: {
+          name: finalName,
+          ...(phone.trim() ? { phone: phone.trim() } : {}),
+        },
+        category,
+        validFrom,
+        validUntil,
+        maxUses,
+        accessPointIds: selectedGateIds,
+      });
+
+      onPassCreated(created, { vehicle: trimmedVehicle, purpose: trimmedPurpose });
+      onClose();
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to register visitor pass. Please try again.';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          {/* Header */}
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={styles.modalEyebrow}>FAST RESIDENT PASS</Text>
+              <Text style={styles.modalTitle}>Register Relative / Visitor</Text>
+            </View>
+            <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+              <Text style={styles.closeBtnText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+            {error ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            ) : null}
+
+            {/* Category Presets */}
+            <Text style={styles.sectionTitle}>CATEGORY</Text>
+            <View style={styles.presetChipRow}>
+              {(
+                [
+                  { key: 'RELATIVE', label: 'Family / Relative' },
+                  { key: 'FRIEND', label: 'Guest' },
+                  { key: 'DELIVERY', label: 'Delivery' },
+                  { key: 'CAB', label: 'Cab' },
+                  { key: 'MAINTENANCE', label: 'Service' },
+                ] as const
+              ).map((chip) => (
+                <TouchableOpacity
+                  key={chip.key}
+                  style={[
+                    styles.presetChip,
+                    category === chip.key && styles.presetChipActive,
+                  ]}
+                  onPress={() => applyCategoryDefaults(chip.key)}
+                >
+                  <Text
+                    style={[
+                      styles.presetChipText,
+                      category === chip.key && styles.presetChipTextActive,
+                    ]}
+                  >
+                    {chip.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Visitor Details */}
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>
+                {category === 'RELATIVE' ? "RELATIVE'S FULL NAME *" : 'VISITOR FULL NAME *'}
+              </Text>
+              <TextInput
+                style={styles.input}
+                placeholder={category === 'RELATIVE' ? 'e.g. Ramesh Patel / Priya Sharma' : 'e.g. John Doe'}
+                placeholderTextColor={colors.textMutedLight}
+                value={visitorName}
+                onChangeText={setVisitorName}
+              />
+            </View>
+
+            <View style={styles.rowFields}>
+              <View style={[styles.fieldGroup, { flex: 1.2 }]}>
+                <Text style={styles.fieldLabel}>PHONE NUMBER</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. 98765 43210"
+                  placeholderTextColor={colors.textMutedLight}
+                  keyboardType="phone-pad"
+                  value={phone}
+                  onChangeText={setPhone}
+                />
+              </View>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={styles.fieldLabel}>VEHICLE NO. (OPTIONAL)</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="MH 02 CZ 4411"
+                  placeholderTextColor={colors.textMutedLight}
+                  autoCapitalize="characters"
+                  value={vehicle}
+                  onChangeText={setVehicle}
+                />
+              </View>
+            </View>
+
+            <View style={styles.fieldGroup}>
+              <Text style={styles.fieldLabel}>PURPOSE OF VISIT</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. Weekend family stay / Lunch"
+                placeholderTextColor={colors.textMutedLight}
+                value={purpose}
+                onChangeText={setPurpose}
+              />
+            </View>
+
+            {/* Validity Window Presets */}
+            <Text style={styles.sectionTitle}>VALIDITY WINDOW</Text>
+            <View style={styles.windowChipGrid}>
+              {[
+                { key: 'TODAY_4H', label: '4 Hours' },
+                { key: 'REST_OF_DAY', label: 'Rest of Today' },
+                { key: 'WEEKEND', label: 'This Weekend' },
+                { key: 'THREE_DAYS', label: '3 Days' },
+                { key: 'SEVEN_DAYS', label: '7 Days' },
+              ].map((item) => (
+                <TouchableOpacity
+                  key={item.key}
+                  style={[
+                    styles.windowChip,
+                    windowPreset === item.key && styles.windowChipActive,
+                  ]}
+                  onPress={() => setWindowPreset(item.key as WindowPreset)}
+                >
+                  <Text
+                    style={[
+                      styles.windowChipText,
+                      windowPreset === item.key && styles.windowChipTextActive,
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Max Uses Counter */}
+            <View style={styles.stepperRow}>
+              <View>
+                <Text style={styles.fieldLabel}>MAX GATE ENTRIES</Text>
+                <Text style={styles.stepperSubtext}>Number of times pass can open barriers</Text>
+              </View>
+              <View style={styles.stepperControls}>
+                <TouchableOpacity
+                  style={styles.stepperBtn}
+                  onPress={() => setMaxUses((prev) => Math.max(1, prev - 1))}
+                >
+                  <Text style={styles.stepperBtnText}>−</Text>
+                </TouchableOpacity>
+                <Text style={styles.stepperValue}>{maxUses}</Text>
+                <TouchableOpacity
+                  style={styles.stepperBtn}
+                  onPress={() => setMaxUses((prev) => Math.min(10, prev + 1))}
+                >
+                  <Text style={styles.stepperBtnText}>+</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Gates */}
+            {accessPoints.length > 0 ? (
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>PERMITTED GATE READERS</Text>
+                <View style={styles.gatesRow}>
+                  {accessPoints.map((gate) => {
+                    const isSelected = selectedGateIds.includes(gate.id);
+                    return (
+                      <TouchableOpacity
+                        key={gate.id}
+                        style={[styles.gateChip, isSelected && styles.gateChipSelected]}
+                        onPress={() => toggleGate(gate.id)}
+                      >
+                        <Text style={[styles.gateChipText, isSelected && styles.gateChipTextSelected]}>
+                          {isSelected ? '✓ ' : '+ '}
+                          {gate.name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
+
+            <View style={{ height: 20 }} />
+          </ScrollView>
+
+          {/* Footer Submit */}
+          <View style={styles.modalFooter}>
+            <TouchableOpacity
+              style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+              onPress={handleSubmit}
+              disabled={loading}
+              activeOpacity={0.85}
+            >
+              {loading ? (
+                <ActivityIndicator color={colors.primaryText} />
+              ) : (
+                <Text style={styles.submitButtonText}>
+                  {category === 'RELATIVE' ? '✨ Generate Relative Pass & PIN' : '✨ Generate Visitor Pass & PIN'}
+                </Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const styles = StyleSheet.create({
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(13, 42, 36, 0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  modalEyebrow: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    color: colors.amber,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.ink,
+    fontFamily: 'Georgia',
+    marginTop: 2,
+  },
+  closeBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeBtnText: {
+    fontSize: 16,
+    color: colors.charcoal,
+    fontWeight: '600',
+  },
+  modalBody: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+  },
+  errorBox: {
+    backgroundColor: '#ffe4e6',
+    borderWidth: 1,
+    borderColor: '#fecdd3',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 14,
+  },
+  errorText: {
+    color: '#9f1239',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  sectionTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textMuted,
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  presetChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  presetChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: colors.paper,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+  },
+  presetChipActive: {
+    backgroundColor: colors.ink,
+    borderColor: colors.ink,
+  },
+  presetChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.ink,
+  },
+  presetChipTextActive: {
+    color: colors.primaryText,
+  },
+  fieldGroup: {
+    marginBottom: 14,
+  },
+  rowFields: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  fieldLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.charcoal,
+    letterSpacing: 0.5,
+    marginBottom: 6,
+  },
+  input: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: colors.ink,
+  },
+  windowChipGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  windowChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+  },
+  windowChipActive: {
+    backgroundColor: colors.amberSoft,
+    borderColor: colors.amber,
+  },
+  windowChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.charcoal,
+  },
+  windowChipTextActive: {
+    color: colors.amberInk,
+    fontWeight: '700',
+  },
+  stepperRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  stepperSubtext: {
+    fontSize: 11,
+    color: colors.textMuted,
+  },
+  stepperControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  stepperBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.fog,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepperBtnText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.ink,
+  },
+  stepperValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.ink,
+    minWidth: 20,
+    textAlign: 'center',
+  },
+  gatesRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  gateChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: colors.fog,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  gateChipSelected: {
+    backgroundColor: colors.activeBg,
+    borderColor: colors.activeBorder,
+  },
+  gateChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  gateChipTextSelected: {
+    color: colors.activeText,
+    fontWeight: '700',
+  },
+  modalFooter: {
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: '#FFFFFF',
+  },
+  submitButton: {
+    backgroundColor: colors.primary,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.ink,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  submitButtonDisabled: {
+    opacity: 0.7,
+  },
+  submitButtonText: {
+    color: colors.primaryText,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+});

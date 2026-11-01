@@ -1,0 +1,129 @@
+export type Role = 'PLATFORM_ADMIN' | 'SOCIETY_ADMIN' | 'RESIDENT' | 'GUARD';
+
+export type PassStatus =
+  | 'DRAFT'
+  | 'PENDING_APPROVAL'
+  | 'ACTIVE'
+  | 'REVOKED'
+  | 'EXPIRED'
+  | 'EXHAUSTED'
+  | 'SCHEDULED';
+
+export type VisitorCategory = 'RELATIVE' | 'FRIEND' | 'DELIVERY' | 'CAB' | 'MAINTENANCE' | 'OTHER';
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  isPlatformAdmin: boolean;
+  mustChangePassword: boolean;
+}
+
+export interface SocietyRef {
+  id: string;
+  name: string;
+  slug: string;
+  timezone: string;
+}
+
+export interface Membership {
+  society: SocietyRef;
+  role: Role;
+  status: 'ACTIVE' | 'INVITED' | 'DISABLED';
+}
+
+export interface FlatLink {
+  id: string;
+  flatNumber: string;
+  building: {
+    id: string;
+    name: string;
+    societyId: string;
+  };
+  relationship: 'OWNER' | 'TENANT' | 'FAMILY';
+}
+
+export interface Session {
+  user: User;
+  memberships: Membership[];
+  flats: FlatLink[];
+}
+
+export interface AccessPoint {
+  id: string;
+  name: string;
+  type: 'BOOM_BARRIER' | 'SLIDING_GATE' | 'DOOR_LOCK';
+  location?: string | null;
+}
+
+export interface PassView {
+  id: string;
+  societyId: string;
+  status: PassStatus;
+  effectiveStatus: PassStatus;
+  category: VisitorCategory;
+  visitor: {
+    id: string;
+    name: string;
+    phone: string | null;
+  };
+  flat: {
+    id: string;
+    flatNumber: string;
+    building: string;
+  };
+  host: {
+    id: string;
+    name: string;
+  };
+  validFrom: string;
+  validUntil: string;
+  maxUses: number;
+  usedCount: number;
+  accessPoints: {
+    id: string;
+    name: string;
+    type: string;
+  }[];
+  requiresApproval: boolean;
+  createdAt: string;
+  revokedAt?: string | null;
+}
+
+export interface PassPage {
+  items: PassView[];
+  nextCursor: string | null;
+}
+
+export interface PassWithCredentials {
+  pass: PassView;
+  credentials: {
+    pin: string;
+    qrToken: string;
+  };
+}
+
+export interface Announcement {
+  id: string;
+  societyId: string;
+  title: string;
+  content: string;
+  category: 'GENERAL' | 'EMERGENCY' | 'MAINTENANCE' | 'EVENT';
+  pinned: boolean;
+  createdAt: string;
+  author: { name: string } | string;
+}
+
+export interface CreatePassInput {
+  flatId: string;
+  visitor: {
+    name: string;
+    phone?: string;
+  };
+  category: VisitorCategory;
+  validFrom: string;
+  validUntil: string;
+  maxUses?: number;
+  accessPointIds: string[];
+}
