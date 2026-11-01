@@ -25,6 +25,26 @@ export interface AppEnv {
   rateLimitEnabled: boolean;
   notificationWebhookUrl?: string;
   notificationWebhookSecret?: string;
+  smsProvider: 'twilio' | 'msg91' | 'mock';
+  twilioAccountSid?: string;
+  twilioAuthToken?: string;
+  twilioFromPhone?: string;
+  msg91AuthKey?: string;
+  msg91SenderId?: string;
+  whatsappProvider: 'meta' | 'twilio' | 'mock';
+  whatsappApiToken?: string;
+  whatsappPhoneNumberId?: string;
+  twilioWhatsappFrom?: string;
+  expoAccessToken?: string;
+  webPushContactEmail?: string;
+  webPushPublicKey?: string;
+  webPushPrivateKey?: string;
+  razorpayKeyId?: string;
+  razorpayKeySecret?: string;
+  razorpayWebhookSecret?: string;
+  stripeSecretKey?: string;
+  stripePublishableKey?: string;
+  stripeWebhookSecret?: string;
 }
 
 const logger = new Logger('Config');
@@ -158,6 +178,26 @@ export function loadEnv(): AppEnv {
     rateLimitEnabled: bool('RATE_LIMIT_ENABLED', true),
     notificationWebhookUrl: process.env.NOTIFICATION_WEBHOOK_URL?.trim() || undefined,
     notificationWebhookSecret: process.env.NOTIFICATION_WEBHOOK_SECRET?.trim() || undefined,
+    smsProvider: (process.env.SMS_PROVIDER?.trim().toLowerCase() as AppEnv['smsProvider']) || 'mock',
+    twilioAccountSid: process.env.TWILIO_ACCOUNT_SID?.trim() || undefined,
+    twilioAuthToken: process.env.TWILIO_AUTH_TOKEN?.trim() || undefined,
+    twilioFromPhone: process.env.TWILIO_FROM_PHONE?.trim() || undefined,
+    msg91AuthKey: process.env.MSG91_AUTH_KEY?.trim() || undefined,
+    msg91SenderId: process.env.MSG91_SENDER_ID?.trim() || undefined,
+    whatsappProvider: (process.env.WHATSAPP_PROVIDER?.trim().toLowerCase() as AppEnv['whatsappProvider']) || 'mock',
+    whatsappApiToken: process.env.WHATSAPP_API_TOKEN?.trim() || undefined,
+    whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() || undefined,
+    twilioWhatsappFrom: process.env.TWILIO_WHATSAPP_FROM?.trim() || undefined,
+    expoAccessToken: process.env.EXPO_ACCESS_TOKEN?.trim() || undefined,
+    webPushContactEmail: process.env.WEB_PUSH_CONTACT_EMAIL?.trim() || undefined,
+    webPushPublicKey: process.env.WEB_PUSH_PUBLIC_KEY?.trim() || undefined,
+    webPushPrivateKey: process.env.WEB_PUSH_PRIVATE_KEY?.trim() || undefined,
+    razorpayKeyId: process.env.RAZORPAY_KEY_ID?.trim() || undefined,
+    razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET?.trim() || undefined,
+    razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined,
+    stripeSecretKey: process.env.STRIPE_SECRET_KEY?.trim() || undefined,
+    stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY?.trim() || undefined,
+    stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET?.trim() || undefined,
   };
 
   if (!isProduction && jwtAccessSecret.includes('dev-only')) {

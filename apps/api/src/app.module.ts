@@ -10,6 +10,7 @@ import { AccessModule } from './access/access.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RegistrationModule } from './registration/registration.module';
 import { RelativesModule } from './relatives/relatives.module';
+import { PaymentsModule } from './payments/payments.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -24,6 +25,7 @@ import { HealthController } from './health.controller';
     NotificationsModule,
     RegistrationModule,
     RelativesModule,
+    PaymentsModule,
   ],
   controllers: [HealthController],
 })

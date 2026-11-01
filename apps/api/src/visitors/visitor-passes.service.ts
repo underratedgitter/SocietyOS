@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma, VisitorCategory } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { AuthzService } from '../common/authz.service';
@@ -6,6 +6,7 @@ import { AppException } from '../common/app.exception';
 import { AuditService } from '../common/audit.service';
 import { JwtUser } from '../auth/jwt-auth.guard';
 import { CredentialsService } from './credentials.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { visitorPolicy } from '../societies/policy';
 import { CreateVisitorPassDto, ListPassesQueryDto } from './visitor-passes.dto';
 
@@ -32,11 +33,14 @@ export interface PassView {
 
 @Injectable()
 export class VisitorPassesService {
+  private readonly logger = new Logger(VisitorPassesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly authz: AuthzService,
     private readonly credentials: CredentialsService,
     private readonly audit: AuditService,
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
 
   effectiveStatus(pass: {
@@ -185,10 +189,29 @@ export class VisitorPassesService {
           return created;
         });
 
-        return {
+        const result = {
           pass: await this.viewPass(pass.id),
           credentials: { pin: pin.plaintext, qrToken: qr.plaintext },
         };
+
+        if (this.notifications) {
+          this.notifications
+            .notifyPassCreated({
+              societyId: context.societyId,
+              flatId: dto.flatId,
+              flatNumber: context.flat?.flatNumber,
+              visitorName,
+              visitorPhone: phone,
+              hostUserId: caller.sub,
+              pin: pin.plaintext,
+              validFrom,
+              validUntil,
+              passId: pass.id,
+            })
+            .catch((err) => this.logger.warn(`Failed to notify pass created: ${String(err)}`));
+        }
+
+        return result;
       } catch (error) {
         if (this.isCredentialCollision(error) && attempt < MAX_CREDENTIAL_ATTEMPTS - 1) continue;
         throw error;
@@ -310,7 +333,38 @@ export class VisitorPassesService {
       });
       return tx.visitorPass.findUniqueOrThrow({ where: { id: passId }, include: passInclude });
     });
-    return this.toView(updated);
+
+    const view = this.toView(updated);
+
+    if (this.notifications) {
+      if (nextStatus === 'ACTIVE') {
+        this.notifications
+          .notifyPassApproved({
+            societyId: view.societyId,
+            flatNumber: view.flat.flatNumber,
+            visitorName: view.visitor.name,
+            visitorPhone: view.visitor.phone,
+            hostUserId: pass.hostUserId,
+            validFrom: view.validFrom,
+            validUntil: view.validUntil,
+            passId: view.id,
+          })
+          .catch((err) => this.logger.warn(`Failed to notify pass approved: ${String(err)}`));
+      } else {
+        this.notifications
+          .notifyPassRevoked({
+            societyId: view.societyId,
+            flatNumber: view.flat.flatNumber,
+            visitorName: view.visitor.name,
+            visitorPhone: view.visitor.phone,
+            hostUserId: pass.hostUserId,
+            passId: view.id,
+          })
+          .catch((err) => this.logger.warn(`Failed to notify pass rejected: ${String(err)}`));
+      }
+    }
+
+    return view;
   }
 
   async revoke(caller: JwtUser, passId: string, reason?: string) {
@@ -334,7 +388,23 @@ export class VisitorPassesService {
         },
       });
     });
-    return this.viewPass(passId);
+
+    const view = await this.viewPass(passId);
+
+    if (this.notifications) {
+      this.notifications
+        .notifyPassRevoked({
+          societyId: view.societyId,
+          flatNumber: view.flat.flatNumber,
+          visitorName: view.visitor.name,
+          visitorPhone: view.visitor.phone,
+          hostUserId: pass.hostUserId,
+          passId: view.id,
+        })
+        .catch((err) => this.logger.warn(`Failed to notify pass revoked: ${String(err)}`));
+    }
+
+    return view;
   }
 
   async accessPointsForFlat(caller: JwtUser, flatId: string) {

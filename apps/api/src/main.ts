@@ -33,7 +33,15 @@ async function bootstrap(): Promise<void> {
       referrerPolicy: { policy: 'no-referrer' },
     }),
   );
-  app.use(express.json({ limit: '100kb', type: ['application/json', 'application/*+json'] }));
+  app.use(
+    express.json({
+      limit: '100kb',
+      type: ['application/json', 'application/*+json'],
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: false, limit: '50kb' }));
   app.use((req, res, next) => {
     const supplied = req.headers['x-request-id'];

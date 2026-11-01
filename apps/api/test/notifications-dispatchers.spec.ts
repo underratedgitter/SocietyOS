@@ -1,0 +1,349 @@
+import { SmsDispatcherService } from '../src/notifications/sms-dispatcher.service';
+import { WhatsappDispatcherService } from '../src/notifications/whatsapp-dispatcher.service';
+import { PushDispatcherService } from '../src/notifications/push-dispatcher.service';
+import { NotificationsService } from '../src/notifications/notifications.service';
+import { PushTokenController } from '../src/notifications/push-token.controller';
+import { JwtUser } from '../src/auth/jwt-auth.guard';
+
+describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher)', () => {
+  describe('SmsDispatcherService', () => {
+    let sms: SmsDispatcherService;
+
+    beforeEach(() => {
+      sms = new SmsDispatcherService();
+      sms.clearMockSentStore();
+    });
+
+    test('normalizes various phone number formats into E.164 (+91 standard)', () => {
+      expect(sms.normalizePhoneNumber('9876543210')).toBe('+919876543210');
+      expect(sms.normalizePhoneNumber('09876543210')).toBe('+919876543210');
+      expect(sms.normalizePhoneNumber('+91 98765-43210')).toBe('+919876543210');
+      expect(sms.normalizePhoneNumber('919876543210')).toBe('+919876543210');
+      expect(sms.normalizePhoneNumber('+1 (555) 123-4567')).toBe('+15551234567');
+    });
+
+    test('formats all standard SocietyOS notification templates', () => {
+      const passIssuedMsg = sms.formatMessage('VISITOR_PASS_ISSUED', {
+        flatNumber: '402',
+        pin: '839201',
+        validWindow: 'Today 4PM - 8PM',
+        passUrl: 'https://society.dev/p/pass-1',
+      });
+      expect(passIssuedMsg).toContain('Flat 402');
+      expect(passIssuedMsg).toContain('839201');
+      expect(passIssuedMsg).toContain('https://society.dev/p/pass-1');
+
+      const arrivalMsg = sms.formatMessage('VISITOR_ARRIVED', {
+        visitorName: 'Rajesh Kumar',
+        accessPointName: 'Main Gate Barrier',
+        flatNumber: '402',
+      });
+      expect(arrivalMsg).toContain('Rajesh Kumar');
+      expect(arrivalMsg).toContain('Main Gate Barrier');
+      expect(arrivalMsg).toContain('Flat 402');
+
+      const paymentMsg = sms.formatMessage('PAYMENT_CONFIRMATION', {
+        title: 'Q3 Maintenance',
+        amount: 4500,
+        paymentReference: 'TXN-9988',
+      });
+      expect(paymentMsg).toContain('INR 4500');
+      expect(paymentMsg).toContain('TXN-9988');
+    });
+
+    test('dispatches SMS to mock store and logs delivery', async () => {
+      const res = await sms.sendSms('9876543210', 'VISITOR_PASS_ISSUED', {
+        flatNumber: '101',
+        pin: '123456',
+      });
+
+      expect(res.success).toBe(true);
+      expect(res.provider).toBe('mock');
+
+      const store = sms.getMockSentStore();
+      expect(store).toHaveLength(1);
+      expect(store[0].to).toBe('+919876543210');
+      expect(store[0].message).toContain('123456');
+    });
+  });
+
+  describe('WhatsappDispatcherService', () => {
+    let whatsapp: WhatsappDispatcherService;
+
+    beforeEach(() => {
+      whatsapp = new WhatsappDispatcherService();
+      whatsapp.clearMockSentStore();
+    });
+
+    test('formats WhatsApp message with rich markdown layout and emojis', () => {
+      const msg = whatsapp.formatMessage('VISITOR_ARRIVED', {
+        visitorName: 'Sneha Rao',
+        accessPointName: 'South Pedestrian Turnstile',
+        flatNumber: '204',
+        at: '2026-11-01T12:00:00.000Z',
+      });
+
+      expect(msg).toContain('🚪 *Gate Arrival Alert*');
+      expect(msg).toContain('*Sneha Rao*');
+      expect(msg).toContain('*South Pedestrian Turnstile*');
+      expect(msg).toContain('*Flat 204*');
+    });
+
+    test('dispatches WhatsApp notification safely into store', async () => {
+      const res = await whatsapp.sendWhatsapp('+919888877777', 'VISITOR_PASS_APPROVED', {
+        flatNumber: '305',
+        pin: '778899',
+      });
+
+      expect(res.success).toBe(true);
+      expect(res.provider).toBe('mock');
+
+      const store = whatsapp.getMockSentStore();
+      expect(store).toHaveLength(1);
+      expect(store[0].to).toBe('+919888877777');
+      expect(store[0].message).toContain('778899');
+    });
+  });
+
+  describe('PushDispatcherService', () => {
+    let mockPrisma: any;
+    let push: PushDispatcherService;
+
+    beforeEach(() => {
+      mockPrisma = {
+        pushDeviceToken: {
+          findMany: jest.fn(),
+          deleteMany: jest.fn(),
+        },
+      };
+      push = new PushDispatcherService(mockPrisma);
+      push.clearMockSentStore();
+    });
+
+    test('validates Expo Push Token formats', () => {
+      expect(push.isExpoPushToken('ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]')).toBe(true);
+      expect(push.isExpoPushToken('ExpoPushToken[xxxxxxxxxxxxxxxxxxxxxx]')).toBe(true);
+      expect(push.isExpoPushToken('invalid-token')).toBe(false);
+      expect(push.isExpoPushToken('')).toBe(false);
+    });
+
+    test('sends push notification to all active devices registered for user', async () => {
+      mockPrisma.pushDeviceToken.findMany.mockResolvedValue([
+        { id: 'dev-1', token: 'ExponentPushToken[token1]', platform: 'expo' },
+        { id: 'dev-2', token: 'web-endpoint-token', platform: 'web', endpoint: 'https://fcm.googleapis.com/fcm/send/sub1' },
+      ]);
+
+      const res = await push.sendToUser('user-1', 'VISITOR_ARRIVED', {
+        visitorName: 'Courier Agent',
+        accessPointName: 'Lobby Door',
+      });
+
+      expect(res.sentCount).toBe(2);
+      expect(res.failedCount).toBe(0);
+
+      const store = push.getMockSentStore();
+      expect(store).toHaveLength(2);
+      expect(store[0].title).toBe('Visitor Arrived');
+      expect(store[0].body).toContain('Courier Agent');
+    });
+
+    test('dispatches push notifications to devices with ios and android platforms', async () => {
+      mockPrisma.pushDeviceToken.findMany.mockResolvedValue([
+        { id: 'dev-ios', token: 'ExponentPushToken[ios-token]', platform: 'ios' },
+        { id: 'dev-android', token: 'ExponentPushToken[android-token]', platform: 'android' },
+      ]);
+
+      const res = await push.sendToUser('user-2', 'VISITOR_PASS_APPROVED', {
+        flatNumber: '502',
+      });
+
+      expect(res.sentCount).toBe(2);
+      expect(res.failedCount).toBe(0);
+      const store = push.getMockSentStore();
+      expect(store).toHaveLength(2);
+      expect(store[0].body).toContain('Flat 502');
+    });
+  });
+
+  describe('NotificationsService Outbox & Automation', () => {
+    let mockPrisma: any;
+    let sms: SmsDispatcherService;
+    let whatsapp: WhatsappDispatcherService;
+    let push: PushDispatcherService;
+    let notifications: NotificationsService;
+
+    beforeEach(() => {
+      mockPrisma = {
+        notification: {
+          create: jest.fn(),
+          findMany: jest.fn(),
+          updateMany: jest.fn(),
+          update: jest.fn(),
+        },
+        user: {
+          findUnique: jest.fn(),
+        },
+        pushDeviceToken: {
+          findMany: jest.fn().mockResolvedValue([]),
+        },
+      };
+
+      sms = new SmsDispatcherService();
+      whatsapp = new WhatsappDispatcherService();
+      push = new PushDispatcherService(mockPrisma);
+      notifications = new NotificationsService(mockPrisma, sms, whatsapp, push);
+    });
+
+    test('enqueue creates persistent outbox record', async () => {
+      await notifications.enqueue({
+        societyId: 'soc-1',
+        userId: 'user-1',
+        channel: 'SMS',
+        template: 'VISITOR_PASS_ISSUED',
+        payload: { flatNumber: '101' },
+      });
+
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          societyId: 'soc-1',
+          userId: 'user-1',
+          channel: 'SMS',
+          template: 'VISITOR_PASS_ISSUED',
+        }),
+      });
+    });
+
+    test('notifyPassCreated dispatches to visitor (SMS + WhatsApp) and host (Push)', async () => {
+      await notifications.notifyPassCreated({
+        societyId: 'soc-1',
+        flatId: 'flat-1',
+        flatNumber: '101',
+        visitorName: 'Aarav Sharma',
+        visitorPhone: '+919876500000',
+        hostUserId: 'user-host',
+        pin: '654321',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 3600_000),
+        passId: 'pass-101',
+      });
+
+      // Should enqueue 3 notifications: SMS to visitor, WhatsApp to visitor, Push to host
+      expect(mockPrisma.notification.create).toHaveBeenCalledTimes(3);
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ channel: 'SMS', template: 'VISITOR_PASS_ISSUED' }),
+        }),
+      );
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ channel: 'WHATSAPP', template: 'VISITOR_PASS_ISSUED' }),
+        }),
+      );
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ channel: 'PUSH', template: 'VISITOR_PASS_ISSUED', userId: 'user-host' }),
+        }),
+      );
+    });
+
+    test('notifyGateArrival alerts resident via Push, SMS, and WhatsApp when phone is configured', async () => {
+      mockPrisma.user.findUnique.mockResolvedValue({ phone: '+919999988888' });
+
+      await notifications.notifyGateArrival({
+        societyId: 'soc-1',
+        hostUserId: 'user-host',
+        visitorName: 'Deepak Verma',
+        accessPointName: 'Gate 1',
+        flatNumber: '302',
+      });
+
+      expect(mockPrisma.notification.create).toHaveBeenCalledTimes(3);
+    });
+
+    test('drain delivers pending notifications and marks SENT', async () => {
+      const mockPending = [
+        {
+          id: 'notif-1',
+          channel: 'SMS',
+          template: 'VISITOR_PASS_ISSUED',
+          payload: { phone: '+919876543210', flatNumber: '101', pin: '998877' },
+          attempts: 0,
+        },
+      ];
+
+      mockPrisma.notification.findMany.mockResolvedValue(mockPending);
+      mockPrisma.notification.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-1', status: 'SENT' });
+
+      await notifications.drain();
+
+      expect(mockPrisma.notification.updateMany).toHaveBeenCalled();
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-1' },
+          data: expect.objectContaining({ status: 'SENT' }),
+        }),
+      );
+    });
+  });
+
+  describe('PushTokenController', () => {
+    let mockPrisma: any;
+    let controller: PushTokenController;
+    const testUser: JwtUser = {
+      sub: 'user-100',
+      email: 'res@societyos.dev',
+      name: 'Resident',
+      isPlatformAdmin: false,
+      mustChangePassword: false,
+    };
+
+    beforeEach(() => {
+      mockPrisma = {
+        pushDeviceToken: {
+          upsert: jest.fn(),
+          deleteMany: jest.fn(),
+          findMany: jest.fn(),
+        },
+      };
+      controller = new PushTokenController(mockPrisma);
+    });
+
+    test('registers or updates device push token', async () => {
+      mockPrisma.pushDeviceToken.upsert.mockResolvedValue({
+        id: 'token-rec-1',
+        platform: 'expo',
+      });
+
+      const res = await controller.registerToken(testUser, {
+        token: 'ExponentPushToken[test12345]',
+        platform: 'expo',
+        deviceName: 'Pixel 8',
+      });
+
+      expect(res.ok).toBe(true);
+      expect(res.id).toBe('token-rec-1');
+      expect(mockPrisma.pushDeviceToken.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { token: 'ExponentPushToken[test12345]' },
+        }),
+      );
+    });
+
+    test('unregisters device token on logout', async () => {
+      mockPrisma.pushDeviceToken.deleteMany.mockResolvedValue({ count: 1 });
+
+      const res = await controller.unregisterToken(testUser, {
+        token: 'ExponentPushToken[test12345]',
+      });
+
+      expect(res.ok).toBe(true);
+      expect(mockPrisma.pushDeviceToken.deleteMany).toHaveBeenCalledWith({
+        where: {
+          token: 'ExponentPushToken[test12345]',
+          userId: 'user-100',
+        },
+      });
+    });
+  });
+});

@@ -257,3 +257,30 @@ export interface SelfRegisterVisitorResponse {
   requiresHostApproval: boolean;
 }
 
+export interface RazorpayOrderResponse {
+  orderId: string;
+  amount: number;
+  currency: string;
+  keyId: string;
+  invoiceId: string;
+  flatNumber?: string;
+  title?: string;
+}
+
+export interface StripeIntentResponse {
+  clientSecret: string;
+  paymentIntentId: string;
+  publishableKey: string;
+  amount: number;
+  currency: string;
+  invoiceId: string;
+}
+
+export interface PushTokenRecord {
+  id: string;
+  platform: string;
+  deviceName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+

@@ -3,6 +3,7 @@ import { Response } from 'express';
 import { PrismaService } from './common/prisma.service';
 import { RateLimitService } from './common/rate-limit.service';
 import { MqttService } from './devices/mqtt.service';
+import { getEnv } from './config';
 
 @Controller()
 export class HealthController {
@@ -30,6 +31,25 @@ export class HealthController {
     }
     components.redis = this.rateLimit.redisReady ? 'ok' : 'degraded';
     components.mqtt = this.mqtt.connected ? 'ok' : 'degraded';
+
+    try {
+      const failedCount = await this.prisma.notification.count({
+        where: { status: 'FAILED' },
+      });
+      components.notificationsOutbox = failedCount > 50 ? 'alert_deadletters' : 'ok';
+    } catch {
+      components.notificationsOutbox = 'unknown';
+    }
+
+    const env = getEnv();
+    components.smsProvider = env.smsProvider;
+    components.whatsappProvider = env.whatsappProvider;
+    components.paymentGateway = env.razorpayKeyId
+      ? 'razorpay'
+      : env.stripeSecretKey
+        ? 'stripe'
+        : 'mock';
+
     res.status(databaseReady ? 200 : 503);
     return {
       status: databaseReady ? 'ready' : 'not-ready',

@@ -12,10 +12,13 @@ import type {
   RegisterRelativeRequest,
   RegisterUserRequest,
   RegisterUserResponse,
+  PushTokenRecord,
+  RazorpayOrderResponse,
   RelativeMember,
   SelfRegisterVisitorRequest,
   SelfRegisterVisitorResponse,
   Session,
+  StripeIntentResponse,
   User,
 } from './types';
 import { mobileStorage } from './storage';
@@ -497,6 +500,86 @@ export const api = {
       setAuthTokens(res.accessToken, res.refreshToken ?? null);
     }
     return res;
+  },
+
+  // Push Notifications
+  async registerPushToken(
+    token: string,
+    platform: 'expo' | 'web' | 'ios' | 'android' = 'expo',
+    deviceName?: string,
+  ): Promise<{ ok: boolean; id: string; platform: string }> {
+    return request<{ ok: boolean; id: string; platform: string }>('/notifications/push-token', {
+      method: 'POST',
+      body: JSON.stringify({ token, platform, deviceName }),
+    });
+  },
+
+  async unregisterPushToken(token: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/notifications/push-token', {
+      method: 'DELETE',
+      body: JSON.stringify({ token }),
+    });
+  },
+
+  async listPushTokens(): Promise<PushTokenRecord[]> {
+    return request<PushTokenRecord[]>('/notifications/push-token');
+  },
+
+  // Online Maintenance Payments
+  async createRazorpayOrder(
+    societyId: string,
+    invoiceId: string,
+    notes?: string,
+  ): Promise<RazorpayOrderResponse> {
+    return request<RazorpayOrderResponse>(
+      `/societies/${societyId}/invoices/${invoiceId}/payment/razorpay/order`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ notes }),
+      },
+    );
+  },
+
+  async verifyRazorpayPayment(
+    societyId: string,
+    invoiceId: string,
+    data: { razorpayOrderId: string; razorpayPaymentId: string; razorpaySignature: string },
+  ): Promise<any> {
+    return request(
+      `/societies/${societyId}/invoices/${invoiceId}/payment/razorpay/verify`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      },
+    );
+  },
+
+  async createStripePaymentIntent(
+    societyId: string,
+    invoiceId: string,
+    currency = 'inr',
+  ): Promise<StripeIntentResponse> {
+    return request<StripeIntentResponse>(
+      `/societies/${societyId}/invoices/${invoiceId}/payment/stripe/intent`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ currency }),
+      },
+    );
+  },
+
+  async verifyStripePayment(
+    societyId: string,
+    invoiceId: string,
+    paymentIntentId: string,
+  ): Promise<any> {
+    return request(
+      `/societies/${societyId}/invoices/${invoiceId}/payment/stripe/verify`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ paymentIntentId }),
+      },
+    );
   },
 };
 

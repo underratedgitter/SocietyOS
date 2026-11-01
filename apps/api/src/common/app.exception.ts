@@ -42,4 +42,8 @@ export class AppException extends HttpException {
   static tooMany(message = 'Too many requests. Try again later.', code = 'RATE_LIMIT_EXCEEDED') {
     return new AppException(code, message, HttpStatus.TOO_MANY_REQUESTS);
   }
+
+  static badGateway(code = 'BAD_GATEWAY', message = 'Upstream gateway error') {
+    return new AppException(code, message, HttpStatus.BAD_GATEWAY);
+  }
 }

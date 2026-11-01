@@ -95,6 +95,11 @@ unreadable.
 | `RATE_LIMIT_ENABLED` | no | Defaults to `true` |
 | `CORS_ORIGINS` | no | Extra comma-separated origins; `WEB_URL` is always allowed |
 | `NOTIFICATION_WEBHOOK_URL` / `NOTIFICATION_WEBHOOK_SECRET` | no | Outbound notification delivery |
+| `SMS_PROVIDER` / `TWILIO_*` / `MSG91_*` | no | Automated SMS delivery (`twilio`, `msg91`, or `mock`) |
+| `WHATSAPP_PROVIDER` / `WHATSAPP_*` | no | WhatsApp Business / Twilio WhatsApp delivery |
+| `EXPO_ACCESS_TOKEN` / `WEB_PUSH_*` | no | Mobile Expo Push and Web Push notification delivery |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | no | Razorpay online order creation & signature verification |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | no | Stripe payment intent creation & webhook processing |
 | `API_PORT` | no | API listen port, `4000` in the image |
 
 ## 2. Generate broker credentials

@@ -115,6 +115,7 @@ enum NotificationChannel {
   PUSH
   SMS
   EMAIL
+  WHATSAPP
 }
 
 enum NotificationStatus {
@@ -146,6 +147,7 @@ model User {
   amenityBookings AmenityBooking[]   @relation("AmenityBooker")
   paidInvoices    MaintenanceInvoice[] @relation("InvoicePayer")
   biometricTemplates BiometricTemplate[]
+  pushTokens     PushDeviceToken[]
 }
 
 model Session {
@@ -657,11 +659,15 @@ model MaintenanceInvoice {
   paidById         String?       @map("paid_by_id") @db.Uuid
   paidBy           User?         @relation("InvoicePayer", fields: [paidById], references: [id], onDelete: SetNull)
   paymentReference String?       @map("payment_reference")
+  gatewayOrderId   String?       @map("gateway_order_id")
+  gatewayPaymentId String?       @map("gateway_payment_id")
+  paymentGateway   String?       @map("payment_gateway")
   createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([societyId, status, dueDate])
   @@index([flatId])
+  @@index([gatewayOrderId])
   @@map("maintenance_invoices")
 }
 
@@ -685,5 +691,22 @@ model BiometricTemplate {
   @@index([societyId, userId])
   @@index([templateHash])
   @@map("biometric_templates")
+}
+
+model PushDeviceToken {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token      String   @unique
+  platform   String   @default("expo") // "expo" | "web" | "ios" | "android"
+  deviceName String?  @map("device_name")
+  endpoint   String?  // for Web Push
+  p256dh     String?  // for Web Push
+  auth       String?  // for Web Push
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId])
+  @@map("push_device_tokens")
 }
 

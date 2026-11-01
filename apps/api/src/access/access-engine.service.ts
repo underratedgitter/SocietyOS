@@ -64,6 +64,8 @@ type AuthorizedOutcome = {
   societyId: string;
   deviceId?: string;
   accessPointId: string;
+  accessPointName: string;
+  flatNumber?: string;
 };
 
 type TxOutcome =
@@ -163,16 +165,12 @@ export class AccessEngineService {
     await this.remember(idemKey, response, credentialHash);
 
     await this.notifications
-      .enqueue({
+      .notifyGateArrival({
         societyId: outcome.societyId,
-        userId: outcome.hostUserId,
-        channel: 'PUSH',
-        template: 'VISITOR_ARRIVED',
-        payload: {
-          visitorName: outcome.visitorName,
-          accessPointId: outcome.accessPointId,
-          at: new Date().toISOString(),
-        },
+        hostUserId: outcome.hostUserId,
+        visitorName: outcome.visitorName,
+        accessPointName: outcome.accessPointName,
+        flatNumber: outcome.flatNumber,
       })
       .catch((error) => this.logger.warn(`Notification enqueue failed: ${String(error)}`));
 
@@ -187,7 +185,7 @@ export class AccessEngineService {
     const now = new Date();
     const accessPoint = await tx.accessPoint.findFirst({
       where: { id: ctx.accessPointId, societyId: ctx.societyId },
-      select: { id: true },
+      select: { id: true, name: true },
     });
     if (!accessPoint) {
       return {
@@ -235,7 +233,15 @@ export class AccessEngineService {
 
     const credential = await tx.visitorPassCredential.findUnique({
       where: { credentialHash },
-      include: { pass: { include: { visitor: true, accessPoints: true } } },
+      include: {
+        pass: {
+          include: {
+            visitor: true,
+            accessPoints: true,
+            flat: { select: { flatNumber: true } },
+          },
+        },
+      },
     });
     if (!credential || credential.type !== ctx.credentialType) {
       return {
@@ -357,6 +363,8 @@ export class AccessEngineService {
         visitorName: pass.visitor.name,
         societyId: ctx.societyId,
         accessPointId: ctx.accessPointId,
+        accessPointName: accessPoint.name,
+        flatNumber: pass.flat?.flatNumber,
       };
     }
 
@@ -387,6 +395,8 @@ export class AccessEngineService {
       societyId: ctx.societyId,
       deviceId: ctx.deviceId,
       accessPointId: ctx.accessPointId,
+      accessPointName: accessPoint.name,
+      flatNumber: pass.flat?.flatNumber,
     };
   }
 

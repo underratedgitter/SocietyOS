@@ -2,8 +2,13 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { createHmac } from 'crypto';
 import { PrismaService } from '../common/prisma.service';
 import { getEnv } from '../config';
+import { SmsDispatcherService } from './sms-dispatcher.service';
+import { WhatsappDispatcherService } from './whatsapp-dispatcher.service';
+import { PushDispatcherService } from './push-dispatcher.service';
 
 const MAX_ATTEMPTS = 5;
+
+export type NotificationChannelType = 'PUSH' | 'SMS' | 'EMAIL' | 'WHATSAPP';
 
 @Injectable()
 export class NotificationsService implements OnModuleInit, OnModuleDestroy {
@@ -11,7 +16,12 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly smsDispatcher: SmsDispatcherService,
+    private readonly whatsappDispatcher: WhatsappDispatcherService,
+    private readonly pushDispatcher: PushDispatcherService,
+  ) {}
 
   onModuleInit(): void {
     this.timer = setInterval(() => void this.drain(), 5000);
@@ -25,7 +35,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   async enqueue(input: {
     societyId?: string;
     userId?: string;
-    channel: 'PUSH' | 'SMS' | 'EMAIL';
+    channel: NotificationChannelType;
     template: string;
     payload: Record<string, unknown>;
   }): Promise<void> {
@@ -33,12 +43,208 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       data: {
         societyId: input.societyId,
         userId: input.userId,
-        channel: input.channel,
+        channel: input.channel as any,
         template: input.template,
         payload: input.payload as never,
         nextAttemptAt: new Date(),
       },
     });
+  }
+
+  /**
+   * High-level automation: Notify visitor and host upon pass creation.
+   */
+  async notifyPassCreated(params: {
+    societyId: string;
+    flatId: string;
+    flatNumber?: string;
+    visitorName: string;
+    visitorPhone?: string | null;
+    hostUserId: string;
+    pin?: string;
+    validFrom: Date;
+    validUntil: Date;
+    passId: string;
+  }): Promise<void> {
+    const validWindow = `${params.validFrom.toLocaleDateString()} ${params.validFrom.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${params.validUntil.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const env = getEnv();
+    const passUrl = `${env.webUrl}/p/${params.passId}`;
+
+    const commonPayload = {
+      passId: params.passId,
+      flatId: params.flatId,
+      flatNumber: params.flatNumber,
+      visitorName: params.visitorName,
+      pin: params.pin,
+      validWindow,
+      passUrl,
+    };
+
+    // 1. Notify visitor via SMS if phone is present
+    if (params.visitorPhone) {
+      await this.enqueue({
+        societyId: params.societyId,
+        channel: 'SMS',
+        template: 'VISITOR_PASS_ISSUED',
+        payload: {
+          ...commonPayload,
+          phone: params.visitorPhone,
+        },
+      });
+
+      // 2. Notify visitor via WhatsApp
+      await this.enqueue({
+        societyId: params.societyId,
+        channel: 'WHATSAPP',
+        template: 'VISITOR_PASS_ISSUED',
+        payload: {
+          ...commonPayload,
+          phone: params.visitorPhone,
+        },
+      });
+    }
+
+    // 3. Notify host resident via Mobile Push
+    await this.enqueue({
+      societyId: params.societyId,
+      userId: params.hostUserId,
+      channel: 'PUSH',
+      template: 'VISITOR_PASS_ISSUED',
+      payload: commonPayload,
+    });
+  }
+
+  /**
+   * High-level automation: Notify visitor and host when pass is approved.
+   */
+  async notifyPassApproved(params: {
+    societyId: string;
+    flatNumber?: string;
+    visitorName: string;
+    visitorPhone?: string | null;
+    hostUserId: string;
+    pin?: string;
+    validFrom: Date;
+    validUntil: Date;
+    passId: string;
+  }): Promise<void> {
+    const validWindow = `${params.validFrom.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${params.validUntil.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const commonPayload = {
+      passId: params.passId,
+      flatNumber: params.flatNumber,
+      visitorName: params.visitorName,
+      pin: params.pin,
+      validWindow,
+    };
+
+    if (params.visitorPhone) {
+      await this.enqueue({
+        societyId: params.societyId,
+        channel: 'SMS',
+        template: 'VISITOR_PASS_APPROVED',
+        payload: { ...commonPayload, phone: params.visitorPhone },
+      });
+      await this.enqueue({
+        societyId: params.societyId,
+        channel: 'WHATSAPP',
+        template: 'VISITOR_PASS_APPROVED',
+        payload: { ...commonPayload, phone: params.visitorPhone },
+      });
+    }
+
+    await this.enqueue({
+      societyId: params.societyId,
+      userId: params.hostUserId,
+      channel: 'PUSH',
+      template: 'VISITOR_PASS_APPROVED',
+      payload: commonPayload,
+    });
+  }
+
+  /**
+   * High-level automation: Notify visitor and host when pass is revoked.
+   */
+  async notifyPassRevoked(params: {
+    societyId: string;
+    flatNumber?: string;
+    visitorName: string;
+    visitorPhone?: string | null;
+    hostUserId: string;
+    passId: string;
+  }): Promise<void> {
+    const commonPayload = {
+      passId: params.passId,
+      flatNumber: params.flatNumber,
+      visitorName: params.visitorName,
+    };
+
+    if (params.visitorPhone) {
+      await this.enqueue({
+        societyId: params.societyId,
+        channel: 'SMS',
+        template: 'VISITOR_PASS_REVOKED',
+        payload: { ...commonPayload, phone: params.visitorPhone },
+      });
+    }
+
+    await this.enqueue({
+      societyId: params.societyId,
+      userId: params.hostUserId,
+      channel: 'PUSH',
+      template: 'VISITOR_PASS_REVOKED',
+      payload: commonPayload,
+    });
+  }
+
+  /**
+   * High-level automation: Gate arrival alerts (Push + SMS + WhatsApp).
+   */
+  async notifyGateArrival(params: {
+    societyId: string;
+    hostUserId: string;
+    visitorName: string;
+    accessPointName?: string;
+    flatNumber?: string;
+  }): Promise<void> {
+    const payload = {
+      visitorName: params.visitorName,
+      accessPointName: params.accessPointName,
+      flatNumber: params.flatNumber,
+      at: new Date().toISOString(),
+    };
+
+    // 1. Mobile Push
+    await this.enqueue({
+      societyId: params.societyId,
+      userId: params.hostUserId,
+      channel: 'PUSH',
+      template: 'VISITOR_ARRIVED',
+      payload,
+    });
+
+    // 2. Fetch host resident's phone number to send SMS / WhatsApp arrival alert
+    const hostUser = await this.prisma.user.findUnique({
+      where: { id: params.hostUserId },
+      select: { phone: true },
+    });
+
+    if (hostUser?.phone) {
+      await this.enqueue({
+        societyId: params.societyId,
+        userId: params.hostUserId,
+        channel: 'SMS',
+        template: 'VISITOR_ARRIVED',
+        payload: { ...payload, phone: hostUser.phone },
+      });
+
+      await this.enqueue({
+        societyId: params.societyId,
+        userId: params.hostUserId,
+        channel: 'WHATSAPP',
+        template: 'VISITOR_ARRIVED',
+        payload: { ...payload, phone: hostUser.phone },
+      });
+    }
   }
 
   async drain(): Promise<void> {
@@ -55,6 +261,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         orderBy: { createdAt: 'asc' },
         take: 20,
       });
+
       for (const notification of pending) {
         const claimed = await this.prisma.notification.updateMany({
           where: {
@@ -70,7 +277,12 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         if (claimed.count !== 1) continue;
 
         try {
-          await this.deliver(notification.channel, notification.template, notification.payload);
+          await this.deliver(
+            notification.channel as NotificationChannelType,
+            notification.template,
+            notification.payload as Record<string, any>,
+            notification.userId,
+          );
           await this.prisma.notification.update({
             where: { id: notification.id },
             data: { status: 'SENT', sentAt: new Date(), lastError: null, nextAttemptAt: null },
@@ -85,7 +297,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
               nextAttemptAt: attempts >= MAX_ATTEMPTS ? null : new Date(Date.now() + 60_000 * attempts),
             },
           });
-          this.logger.warn(`Notification ${notification.id} delivery failed (attempt ${attempts})`);
+          this.logger.warn(`Notification ${notification.id} delivery failed (attempt ${attempts}): ${String(error)}`);
         }
       }
     } catch (error) {
@@ -96,34 +308,99 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async deliver(
-    channel: 'PUSH' | 'SMS' | 'EMAIL',
+    channel: NotificationChannelType,
     template: string,
-    payload: unknown,
+    payload: Record<string, any>,
+    userId?: string | null,
   ): Promise<void> {
-    const env = getEnv();
-    if (!env.notificationWebhookUrl) {
-      // Development/MVP transport: the outbox is still durable and visible in
-      // the database. Stage 6 replaces this with FCM/SMS providers.
-      this.logger.log(`Notification queued (${channel}/${template})`);
-      return;
+    const targetUser = userId || (payload.targetUserId as string | undefined);
+
+    // 1. Channel Dispatching
+    switch (channel) {
+      case 'SMS': {
+        const phone = payload.phone || (targetUser ? await this.getUserPhone(targetUser) : null);
+        if (phone) {
+          await this.smsDispatcher.sendSms(phone, template, payload);
+        } else {
+          this.logger.warn(`Cannot deliver SMS for template ${template}: no recipient phone found`);
+        }
+        break;
+      }
+      case 'WHATSAPP': {
+        const phone = payload.phone || (targetUser ? await this.getUserPhone(targetUser) : null);
+        if (phone) {
+          await this.whatsappDispatcher.sendWhatsapp(phone, template, payload);
+        } else {
+          this.logger.warn(`Cannot deliver WhatsApp for template ${template}: no recipient phone found`);
+        }
+        break;
+      }
+      case 'PUSH': {
+        if (targetUser) {
+          const res = await this.pushDispatcher.sendToUser(targetUser, template, payload);
+          if (res.sentCount === 0 && res.failedCount > 0) {
+            throw new Error(`Push notification delivery failed for user ${targetUser} (${res.failedCount} devices failed)`);
+          }
+        } else if (payload.token) {
+          const res = await this.pushDispatcher.sendExpoPushBatch([
+            {
+              to: payload.token,
+              ...this.pushDispatcher.formatPushPayload(template, payload),
+              data: payload,
+            },
+          ]);
+          if (res.sent === 0 && res.failed > 0) {
+            throw new Error(`Push notification delivery failed for token ${payload.token}`);
+          }
+        }
+        break;
+      }
+      case 'EMAIL': {
+        this.logger.log(`Email notification queued (${template})`);
+        break;
+      }
     }
-    const body = JSON.stringify({ channel, template, payload });
+
+    // 2. Webhook Dispatching (if configured)
+    const env = getEnv();
+    if (env.notificationWebhookUrl) {
+      await this.fireWebhook(env.notificationWebhookUrl, env.notificationWebhookSecret, {
+        channel,
+        template,
+        payload,
+        userId,
+      });
+    }
+  }
+
+  private async getUserPhone(userId: string): Promise<string | null> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { phone: true },
+    });
+    return user?.phone ?? null;
+  }
+
+  private async fireWebhook(
+    url: string,
+    secret: string | undefined,
+    data: Record<string, any>,
+  ): Promise<void> {
+    const body = JSON.stringify(data);
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (env.notificationWebhookSecret) {
-      headers['x-societyos-signature'] = createHmac('sha256', env.notificationWebhookSecret)
-        .update(body)
-        .digest('hex');
+    if (secret) {
+      headers['x-societyos-signature'] = createHmac('sha256', secret).update(body).digest('hex');
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
-      const response = await fetch(env.notificationWebhookUrl, {
+      const response = await fetch(url, {
         method: 'POST',
         headers,
         body,
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`Notification provider returned ${response.status}`);
+      if (!response.ok) throw new Error(`Notification webhook returned HTTP ${response.status}`);
     } finally {
       clearTimeout(timeout);
     }

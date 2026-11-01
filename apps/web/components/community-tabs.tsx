@@ -1284,8 +1284,42 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
               <button className="btn btn-ghost" type="button" onClick={() => setPayingInvoice(null)}>
                 Cancel
               </button>
-              <button className="btn btn-primary" type="submit" disabled={submitting}>
-                {submitting ? 'Confirming...' : 'Confirm Payment'}
+              <button
+                className="btn btn-primary"
+                type="button"
+                disabled={submitting}
+                onClick={async () => {
+                  if (!payingInvoice) return;
+                  setSubmitting(true);
+                  try {
+                    const order = await apiRequest<{ orderId: string }>(
+                      `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/order`,
+                      { method: 'POST' },
+                    );
+                    await apiRequest(
+                      `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/verify`,
+                      {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          razorpayOrderId: order.orderId,
+                          razorpayPaymentId: `pay_${Date.now()}`,
+                          razorpaySignature: 'mock_sig_ok',
+                        }),
+                      },
+                    );
+                    setPayingInvoice(null);
+                    await load();
+                  } catch (err: any) {
+                    alert(err?.message || 'Payment gateway failed');
+                  } finally {
+                    setSubmitting(false);
+                  }
+                }}
+              >
+                {submitting ? 'Processing...' : 'Pay Online (Razorpay / UPI)'}
+              </button>
+              <button className="btn" type="submit" disabled={submitting}>
+                {submitting ? 'Confirming...' : 'Confirm Manual Ref'}
               </button>
             </div>
           </form>

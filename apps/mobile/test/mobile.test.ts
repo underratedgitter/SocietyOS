@@ -433,6 +433,56 @@ describe('Mobile Relatives & Directory Client Methods', () => {
     assert.equal(typeof api.registerUser, 'function');
     assert.equal(typeof api.selfRegisterVisitor, 'function');
     assert.equal(typeof api.changePassword, 'function');
+    assert.equal(typeof api.registerPushToken, 'function');
+    assert.equal(typeof api.unregisterPushToken, 'function');
+    assert.equal(typeof api.listPushTokens, 'function');
+    assert.equal(typeof api.createRazorpayOrder, 'function');
+    assert.equal(typeof api.verifyRazorpayPayment, 'function');
+    assert.equal(typeof api.createStripePaymentIntent, 'function');
+    assert.equal(typeof api.verifyStripePayment, 'function');
+  });
+
+  test('payment and push methods format HTTP requests accurately', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: { url: string; method: string; body: any }[] = [];
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        method: init?.method || 'GET',
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return new Response(JSON.stringify({ ok: true, orderId: 'ord_123', clientSecret: 'pi_secret_123' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
+
+    try {
+      // 1. Push registration
+      await api.registerPushToken('ExponentPushToken[abc123456]', 'expo', 'iPhone 15 Pro');
+      assert.equal(calls[0].url.endsWith('/notifications/push-token'), true);
+      assert.equal(calls[0].body.token, 'ExponentPushToken[abc123456]');
+
+      // 2. Razorpay order
+      await api.createRazorpayOrder('soc-1', 'inv-101');
+      assert.equal(calls[1].url.endsWith('/societies/soc-1/invoices/inv-101/payment/razorpay/order'), true);
+
+      // 3. Razorpay verify
+      await api.verifyRazorpayPayment('soc-1', 'inv-101', {
+        razorpayOrderId: 'ord_123',
+        razorpayPaymentId: 'pay_123',
+        razorpaySignature: 'sig_123',
+      });
+      assert.equal(calls[2].url.endsWith('/societies/soc-1/invoices/inv-101/payment/razorpay/verify'), true);
+
+      // 4. Stripe intent
+      await api.createStripePaymentIntent('soc-1', 'inv-101', 'inr');
+      assert.equal(calls[3].url.endsWith('/societies/soc-1/invoices/inv-101/payment/stripe/intent'), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
+
 
