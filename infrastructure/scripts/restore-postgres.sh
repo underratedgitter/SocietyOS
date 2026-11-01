@@ -11,8 +11,12 @@ if [ "${CONFIRM_RESTORE:-}" != "yes" ]; then
   echo "Refusing to restore without CONFIRM_RESTORE=yes" >&2
   exit 1
 fi
-if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+if [ "$#" -ne 1 ]; then
   echo "Usage: CONFIRM_RESTORE=yes sh infrastructure/scripts/restore-postgres.sh <dump-file>" >&2
+  exit 1
+fi
+if [ ! -f "$1" ] && [ "${DRY_RUN:-}" != "true" ] && [ "${DRY_RUN:-}" != "1" ]; then
+  echo "Dump file not found: $1" >&2
   exit 1
 fi
 

@@ -46,28 +46,21 @@ interface VerifyResponse {
 }
 
 const env = {
-  apiUrl: (process.env.API_URL || 'http://localhost:4000').replace(/\/$/, ''),
+  apiUrl: (process.env.API_URL || process.env.WEB_URL || 'http://localhost:80').replace(/\/$/, ''),
   mqttUrl: process.env.MQTT_URL?.trim() || '',
   mqttUsername: process.env.MQTT_USERNAME?.trim() || undefined,
   mqttPassword: process.env.MQTT_PASSWORD || undefined,
-  deviceToken: process.env.DEVICE_TOKEN?.trim() || '',
-  commandSecret: process.env.COMMAND_SECRET?.trim() || '',
+  deviceToken: process.env.DEVICE_TOKEN?.trim() || 'sos_dev_demo_simulator_token_a_change_me_2026',
+  commandSecret: process.env.COMMAND_SECRET?.trim() || 'demo-command-secret-a-change-me-2026',
   gateId: process.env.ACCESS_POINT_ID?.trim() || undefined,
   heartbeatSeconds: Number.parseInt(process.env.HEARTBEAT_SECONDS || '30', 10) || 30,
   motionMs: Number.parseInt(process.env.GATE_MOTION_MS || '1500', 10) || 1500,
 };
 
-if (!env.deviceToken) {
-  console.error('DEVICE_TOKEN is required. Run `pnpm --filter @societyos/api db:seed` and use the printed token.');
-  process.exit(1);
-}
-if (!env.commandSecret) {
-  console.error('COMMAND_SECRET is required. Use the secret printed by the seed (or rotated in the admin console).');
-  process.exit(1);
-}
-
 const startedAt = Date.now();
 let gateState: GateState = 'CLOSED';
+let obstructionActive = false;
+let sensorFault = false;
 let identity: DeviceIdentity | null = null;
 let mqttClient: mqtt.MqttClient | null = null;
 let operation: Promise<void> = Promise.resolve();
@@ -140,6 +133,10 @@ function assignedGate(accessPointId: string): string | null {
 }
 
 function publish(topic: string, payload: unknown): void {
+  if (isOffline) {
+    log(`offline mode active; suppressing outgoing MQTT message for ${topic}`);
+    return;
+  }
   if (!mqttClient?.connected) {
     log(`MQTT offline; dropping message for ${topic}`);
     return;
@@ -169,6 +166,17 @@ function wait(ms: number): Promise<void> {
 }
 
 async function moveGate(command: SignedCommand): Promise<void> {
+  if (sensorFault) {
+    log(`refused command ${command.commandId.slice(0, 8)}: controller is in FAULT state`);
+    sendAck(command, 'FAILED');
+    return;
+  }
+  if (command.type === 'CLOSE' && obstructionActive) {
+    log(`refused CLOSE command ${command.commandId.slice(0, 8)}: obstruction / safety loop active`);
+    gateState = 'STOPPED';
+    sendAck(command, 'FAILED');
+    return;
+  }
   sendAck(command, 'ACK');
   if (command.type === 'OPEN') {
     if (gateState === 'OPEN') {
@@ -192,6 +200,12 @@ async function moveGate(command: SignedCommand): Promise<void> {
       sendAck(command, 'EXECUTED');
       return;
     }
+    if (obstructionActive) {
+      log('close motion halted immediately: obstruction safety beam tripped');
+      gateState = 'STOPPED';
+      sendAck(command, 'FAILED');
+      return;
+    }
     if (gateState !== 'CLOSING') {
       gateState = 'CLOSING';
       publish(`society/${identity!.societyId}/device/${identity!.id}/events`, {
@@ -201,6 +215,12 @@ async function moveGate(command: SignedCommand): Promise<void> {
       });
       log('boom barrier closing');
       await wait(env.motionMs);
+    }
+    if (obstructionActive) {
+      log('barrier reached obstruction during travel; stopping and reverting to OPEN');
+      gateState = 'OPEN';
+      sendAck(command, 'FAILED');
+      return;
     }
     gateState = 'CLOSED';
     log('boom barrier closed');
@@ -212,6 +232,10 @@ async function moveGate(command: SignedCommand): Promise<void> {
 }
 
 function acceptCommand(raw: Buffer): void {
+  if (isOffline) {
+    log('cloud MQTT command ignored: controller is operating in bounded offline mode');
+    return;
+  }
   let command: SignedCommand;
   try {
     command = JSON.parse(raw.toString('utf8')) as SignedCommand;
@@ -283,6 +307,10 @@ function connectMqtt(): void {
 
 async function heartbeat(): Promise<void> {
   if (!identity) return;
+  if (isOffline) {
+    log('heartbeat suppressed: controller is in offline mode');
+    return;
+  }
   const payload = {
     online: true,
     uptimeS: Math.round((Date.now() - startedAt) / 1000),
@@ -605,7 +633,7 @@ async function verifyCredential(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: st
 function startConsole(): void {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const prompt = () => rl.setPrompt('sim> ');
-  console.log('\nCommands: pin <code> | qr <token> | bio <token> | offline | online | cache | queue | hp | state | help | quit\n');
+  console.log('\nCommands: pin <code> | qr <token> | bio <token> | sync | offline | online | emergency | obstruct [on|off] | fault [on|off] | cache | queue | hp | state | help | quit\n');
   prompt();
   rl.prompt();
 
@@ -635,6 +663,43 @@ function startConsole(): void {
         log('[SIMULATOR] Connected to cloud. Draining offline event queue.');
         void syncOfflineQueue();
         break;
+      case 'emergency':
+      case 'egress': {
+        const gate = selectGate();
+        if (!gate) {
+          log('no gate assigned');
+          break;
+        }
+        gateState = 'OPEN';
+        log(`[EMERGENCY EGRESS] Gate ${gate.name} forced OPEN for emergency/fire release.`);
+        const event: QueuedEvent = {
+          sequence: eventSequence++,
+          accessPointId: gate.id,
+          credentialType: 'MANUAL_EMERGENCY',
+          decision: 'AUTHORIZED',
+          reasonCode: 'EMERGENCY_OVERRIDE',
+          timestamp: new Date().toISOString(),
+        };
+        offlineQueue.push(event);
+        persistCache();
+        if (!isOffline) {
+          void syncOfflineQueue();
+        }
+        break;
+      }
+      case 'obstruct':
+        obstructionActive = argument === 'off' ? false : argument === 'on' ? true : !obstructionActive;
+        log(`[SENSOR] Vehicle loop / safety beam obstruction is now: ${obstructionActive ? 'ACTIVE (BLOCKED)' : 'CLEAR'}`);
+        if (obstructionActive && gateState === 'CLOSING') {
+          gateState = 'STOPPED';
+          log('[SENSOR SAFETY INTERLOCK] Gate motion STOPPED due to active obstruction.');
+        }
+        break;
+      case 'fault':
+        sensorFault = argument === 'off' ? false : argument === 'on' ? true : !sensorFault;
+        gateState = sensorFault ? 'FAULT' : 'CLOSED';
+        log(`[HARDWARE] Sensor/motor fault status: ${sensorFault ? 'FAULT TRIGGERED' : 'RESOLVED/NORMAL'}`);
+        break;
       case 'cache':
         log(`Local Edge Cache: ${credentialCache.size} templates/passes stored`);
         credentialCache.forEach((val, key) => log(`  - [${val.kind}] ${key}: ${val.visitorName} (uses: ${val.usedCount}/${val.maxUses})`));
@@ -648,7 +713,7 @@ function startConsole(): void {
         log('heartbeat sent');
         break;
       case 'state':
-        log(`gate state ${gateState}; network: ${isOffline ? 'OFFLINE' : 'ONLINE'}; ${identity?.accessPoints.length ?? 0} gates assigned`);
+        log(`gate state ${gateState}; network: ${isOffline ? 'OFFLINE' : 'ONLINE'}; obstruction: ${obstructionActive ? 'ACTIVE' : 'CLEAR'}; fault: ${sensorFault ? 'YES' : 'NO'}; ${identity?.accessPoints.length ?? 0} gates assigned`);
         break;
       case 'sync':
         log('[SIMULATOR] Pulling latest edge credentials and syncing offline event queue...');
@@ -656,7 +721,7 @@ function startConsole(): void {
         void syncOfflineQueue();
         break;
       case 'help':
-        console.log('Commands: pin <code> | qr <token> | bio <token> | sync | offline | online | cache | queue | hp | state | help | quit');
+        console.log('Commands: pin <code> | qr <token> | bio <token> | sync | offline | online | emergency | obstruct [on|off] | fault [on|off] | cache | queue | hp | state | help | quit');
         break;
       case 'quit':
       case 'exit':

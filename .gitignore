@@ -21,3 +21,4 @@ apps/api/prisma/migrations/dev.db*
 generated/
 prisma/*.db
 .controller_cache.json
+*.tsbuildinfo
