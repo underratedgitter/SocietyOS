@@ -62,6 +62,7 @@ describe('Registration & Relatives Service Modules', () => {
       },
       user: {
         findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({
           id: USER_ID,
           name: 'Sunil Patel',
@@ -97,9 +98,18 @@ describe('Registration & Relatives Service Modules', () => {
           category: 'RELATIVE',
           createdAt: new Date(),
         }),
+        update: jest.fn().mockResolvedValue({
+          id: VISITOR_ID,
+          category: 'OTHER',
+        }),
       },
       visitorPass: {
         count: jest.fn().mockResolvedValue(0),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'pass-uuid-1',
+          flatId: FLAT_ID,
+          visitorId: VISITOR_ID,
+        }),
         create: jest.fn().mockResolvedValue({
           id: 'pass-uuid-1',
           societyId: SOCIETY_ID,
