@@ -252,8 +252,27 @@ async function main() {
   });
   const societyB = await prisma.society.upsert({
     where: { slug: 'harbour-heights' },
-    create: { name: 'Harbour Heights', slug: 'harbour-heights', timezone: 'Asia/Kolkata' },
-    update: { name: 'Harbour Heights', timezone: 'Asia/Kolkata' },
+    create: {
+      name: 'Harbour Heights',
+      slug: 'harbour-heights',
+      timezone: 'Asia/Kolkata',
+      settings: {
+        approvalCategories: ['DELIVERY', 'CAB'],
+        maxPassDurationHours: 24,
+        maxUsesPerPass: 5,
+        maxPassesPerFlatPerDay: 20,
+      },
+    },
+    update: {
+      name: 'Harbour Heights',
+      timezone: 'Asia/Kolkata',
+      settings: {
+        approvalCategories: ['DELIVERY', 'CAB'],
+        maxPassDurationHours: 24,
+        maxUsesPerPass: 5,
+        maxPassesPerFlatPerDay: 20,
+      },
+    },
   });
 
   const adminA = await upsertUser({ name: 'Ananya Rao', email: 'admin.a@societyos.dev', password: 'AdminA#2026' });

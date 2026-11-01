@@ -67,6 +67,39 @@ export class RateLimitService implements OnModuleDestroy {
     this.memory.clear();
   }
 
+  async reset(key: string): Promise<void> {
+    this.memory.delete(key);
+    if (this.redisReady) {
+      try {
+        await this.redis!.del(`rl:${key}`);
+      } catch (err) {
+        this.logger.warn(`Failed to reset rate limit for ${key}: ${err}`);
+      }
+    }
+  }
+
+  async decrement(key: string): Promise<void> {
+    const entry = this.memory.get(key);
+    if (entry && entry.count > 0) {
+      entry.count -= 1;
+    }
+    if (this.redisReady) {
+      try {
+        await this.redis!.eval(
+          `local count = redis.call('GET', KEYS[1])
+           if count and tonumber(count) > 0 then
+             return redis.call('DECR', KEYS[1])
+           end
+           return 0`,
+          1,
+          `rl:${key}`,
+        );
+      } catch (err) {
+        this.logger.warn(`Failed to decrement rate limit for ${key}: ${err}`);
+      }
+    }
+  }
+
   private hitMemory(key: string, limit: number, windowSec: number): RateHit {
     const now = Date.now();
     const entry = this.memory.get(key);

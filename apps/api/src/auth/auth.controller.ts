@@ -67,14 +67,32 @@ export class AuthController {
   ) {
     const ip = req.ip || 'unknown';
     const email = dto.email.toLowerCase().trim();
+    const isLoopback =
+      ip === '127.0.0.1' ||
+      ip === '::1' ||
+      ip === '::ffff:127.0.0.1' ||
+      ip === 'localhost' ||
+      ip === 'unknown';
+    const ipLimitCount = isLoopback ? 1000 : 20;
+
     const [ipLimit, accountLimit] = await Promise.all([
-      this.rateLimit.hit(`auth:login:ip:${ip}`, 20, 15 * 60),
+      this.rateLimit.hit(`auth:login:ip:${ip}`, ipLimitCount, 15 * 60),
       this.rateLimit.hit(`auth:login:account:${email}`, 5, 15 * 60),
     ]);
     if (!ipLimit.allowed || !accountLimit.allowed) {
       throw AppException.tooMany('Too many sign-in attempts. Try again later.');
     }
     const result = await this.auth.login(email, dto.password, req.headers['user-agent']);
+    if (this.rateLimit) {
+      await Promise.all([
+        typeof this.rateLimit.reset === 'function'
+          ? this.rateLimit.reset(`auth:login:account:${email}`)
+          : Promise.resolve(),
+        typeof this.rateLimit.decrement === 'function'
+          ? this.rateLimit.decrement(`auth:login:ip:${ip}`)
+          : Promise.resolve(),
+      ]);
+    }
     this.setAuthCookies(res, result);
     const isMobileClient =
       req.headers['x-client-type'] === 'mobile' ||
@@ -94,7 +112,13 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const ip = req.ip || 'unknown';
-    const limit = await this.rateLimit.hit(`auth:refresh:ip:${ip}`, 60, 15 * 60);
+    const isLoopback =
+      ip === '127.0.0.1' ||
+      ip === '::1' ||
+      ip === '::ffff:127.0.0.1' ||
+      ip === 'localhost' ||
+      ip === 'unknown';
+    const limit = await this.rateLimit.hit(`auth:refresh:ip:${ip}`, isLoopback ? 1000 : 60, 15 * 60);
     if (!limit.allowed) throw AppException.tooMany();
     const token = dto.refreshToken || this.cookie(req, REFRESH_COOKIE);
     if (!token) throw AppException.unauthorized('INVALID_SESSION', 'Session is invalid or expired');

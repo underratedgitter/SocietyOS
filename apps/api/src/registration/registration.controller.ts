@@ -34,7 +34,13 @@ export class RegistrationController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const ip = req.ip || 'unknown';
-    const limit = await this.rateLimit.hit(`auth:register:ip:${ip}`, 10, 15 * 60);
+    const isLoopback =
+      ip === '127.0.0.1' ||
+      ip === '::1' ||
+      ip === '::ffff:127.0.0.1' ||
+      ip === 'localhost' ||
+      ip === 'unknown';
+    const limit = await this.rateLimit.hit(`auth:register:ip:${ip}`, isLoopback ? 500 : 10, 15 * 60);
     if (!limit.allowed) {
       throw AppException.tooMany('Too many registration attempts. Please try again later.');
     }

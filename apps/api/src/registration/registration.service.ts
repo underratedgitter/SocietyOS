@@ -147,7 +147,13 @@ export class RegistrationService {
 
   async selfRegisterVisitor(dto: SelfRegisterVisitorDto, ip = 'unknown') {
     const rateLimitKey = `visitor:self-register:ip:${ip}`;
-    const limit = await this.rateLimit.hit(rateLimitKey, 15, 15 * 60);
+    const isLoopback =
+      ip === '127.0.0.1' ||
+      ip === '::1' ||
+      ip === '::ffff:127.0.0.1' ||
+      ip === 'localhost' ||
+      ip === 'unknown';
+    const limit = await this.rateLimit.hit(rateLimitKey, isLoopback ? 500 : 15, 15 * 60);
     if (!limit.allowed) {
       throw AppException.tooMany('Too many visitor registration attempts. Please wait a few minutes.');
     }

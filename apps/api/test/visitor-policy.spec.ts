@@ -48,7 +48,7 @@ describe('visitorPolicy', () => {
 
   it('does not share the approval array between calls', () => {
     const first = visitorPolicy(undefined);
-    first.approvalCategories.push('EXTRA_UNKNOWN' as any);
-    expect(visitorPolicy(undefined).approvalCategories).not.toContain('EXTRA_UNKNOWN');
+    first.approvalCategories.push('OTHER');
+    expect(visitorPolicy(undefined).approvalCategories).not.toContain('OTHER');
   });
 });

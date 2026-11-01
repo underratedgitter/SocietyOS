@@ -160,6 +160,8 @@ describe('Registration & Relatives Service Modules', () => {
     credentialsService = new CredentialsService();
     mockRateLimit = {
       hit: jest.fn().mockResolvedValue({ allowed: true, remaining: 9, resetAt: new Date() }),
+      reset: jest.fn().mockResolvedValue(undefined),
+      decrement: jest.fn().mockResolvedValue(undefined),
     };
     mockAudit = {
       record: jest.fn().mockResolvedValue(undefined),
@@ -275,6 +277,22 @@ describe('Registration & Relatives Service Modules', () => {
 
   describe('Visitor & Relative Self-Registration (Public gate check-in)', () => {
     it('marks self-registered relative as PENDING_APPROVAL and omits plaintext credentials', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValueOnce({
+        id: FLAT_ID,
+        buildingId: BUILDING_ID,
+        flatNumber: '101',
+        building: {
+          id: BUILDING_ID,
+          name: 'Tower A',
+          societyId: SOCIETY_ID,
+          society: {
+            id: SOCIETY_ID,
+            name: 'Palm Grove',
+            settings: { approvalCategories: ['RELATIVE', 'DELIVERY', 'CAB'], maxPassDurationHours: 24, maxUsesPerPass: 5, maxPassesPerFlatPerDay: 20 },
+          },
+        },
+      });
+
       mockPrisma.visitorPass.create.mockResolvedValueOnce({
         id: 'pass-uuid-1',
         societyId: SOCIETY_ID,
