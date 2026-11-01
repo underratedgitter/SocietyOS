@@ -171,13 +171,12 @@ test('society operations lifecycle: notice board circulars, maintenance tickets,
 
   // Find any unsettled invoice or our newly generated invoice
   const settleBtn = page.getByRole('button', { name: 'Settle Bill' }).first();
-  if (await settleBtn.isVisible()) {
-    await settleBtn.click();
-    await expect(page.getByRole('dialog', { name: /Settle Bill/ })).toBeVisible();
-    await page.getByRole('button', { name: 'Confirm Payment' }).click();
-    await expect(page.getByRole('dialog')).toHaveCount(0);
-    await expect(page.getByText('PAID').first()).toBeVisible();
-  }
+  await expect(settleBtn).toBeVisible({ timeout: 15_000 });
+  await settleBtn.click();
+  await expect(page.getByRole('dialog', { name: /Settle Bill/ })).toBeVisible();
+  await page.getByRole('button', { name: /Confirm (Payment|Manual Ref)/i }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('PAID').first()).toBeVisible();
 
   expect(pageErrors).toEqual([]);
 });

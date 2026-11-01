@@ -46,6 +46,29 @@ describe('RateLimitService memory fallback', () => {
     });
   });
 
+  it('resets a specific rate limit key while leaving others intact', async () => {
+    await service.hit('unit:reset:a', 1, 60);
+    await service.hit('unit:reset:b', 1, 60);
+    await expect(service.hit('unit:reset:a', 1, 60)).resolves.toMatchObject({ allowed: false });
+    await expect(service.hit('unit:reset:b', 1, 60)).resolves.toMatchObject({ allowed: false });
+
+    await service.reset('unit:reset:a');
+    await expect(service.hit('unit:reset:a', 1, 60)).resolves.toMatchObject({ allowed: true, count: 1 });
+    await expect(service.hit('unit:reset:b', 1, 60)).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('decrements a rate limit counter without falling below zero', async () => {
+    await service.hit('unit:decr', 2, 60);
+    await service.hit('unit:decr', 2, 60);
+    await expect(service.hit('unit:decr', 2, 60)).resolves.toMatchObject({ allowed: false, count: 3 });
+
+    await service.decrement('unit:decr');
+    await service.decrement('unit:decr');
+    await expect(service.hit('unit:decr', 2, 60)).resolves.toMatchObject({ allowed: true, count: 2 });
+
+    await service.decrement('unit:nonexistent');
+  });
+
   it('honours the global disable switch', async () => {
     service.onModuleDestroy();
     process.env.RATE_LIMIT_ENABLED = 'false';

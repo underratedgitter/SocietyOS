@@ -1318,8 +1318,8 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
               >
                 {submitting ? 'Processing...' : 'Pay Online (Razorpay / UPI)'}
               </button>
-              <button className="btn" type="submit" disabled={submitting}>
-                {submitting ? 'Confirming...' : 'Confirm Manual Ref'}
+              <button className="btn" type="submit" disabled={submitting} aria-label="Confirm Payment">
+                {submitting ? 'Confirming...' : 'Confirm Payment'}
               </button>
             </div>
           </form>
