@@ -3,6 +3,9 @@ import { AuthzService } from '../src/common/authz.service';
 import { AuditService } from '../src/common/audit.service';
 import { CommunityService } from '../src/societies/community.service';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { CreateMaintenanceInvoiceDto } from '../src/societies/community.dto';
 
 describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amenities)', () => {
   const SOCIETY_A = 'society-aaa-111';
@@ -492,6 +495,16 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
   // 4. MAINTENANCE BILLING & INVOICING
   // =========================================================================
   describe('Maintenance Billing & Invoicing', () => {
+    it('rejects invoice amounts with sub-paisa precision so gateway charges equal the invoice', async () => {
+      const base = { flatId: '7d0c7a1e-2f43-4c5b-9a59-0d9f3f1d2a10', title: 'Q4 Maintenance', dueDate: '2026-12-01' };
+
+      const subPaisa = await validate(plainToInstance(CreateMaintenanceInvoiceDto, { ...base, amount: 1500.005 }));
+      const twoDecimals = await validate(plainToInstance(CreateMaintenanceInvoiceDto, { ...base, amount: 1500.05 }));
+
+      expect(subPaisa.map((e) => e.property)).toContain('amount');
+      expect(twoDecimals).toHaveLength(0);
+    });
+
     it('creates a maintenance invoice for a valid flat in the society', async () => {
       mockPrisma.flat.findUnique.mockResolvedValue({
         id: FLAT_101,
