@@ -1,5 +1,6 @@
 import { AppException } from '../src/common/app.exception';
-import { RegistrationService } from '../src/registration/registration.service';
+import { publicIpRateLimit, RegistrationService } from '../src/registration/registration.service';
+import * as config from '../src/config';
 import { RelativesService } from '../src/relatives/relatives.service';
 import { CredentialsService } from '../src/visitors/credentials.service';
 import { RateLimitService } from '../src/common/rate-limit.service';
@@ -555,6 +556,61 @@ describe('Registration & Relatives Service Modules', () => {
           category: 'RELATIVE',
         }),
       ).rejects.toThrow(AppException);
+    });
+
+    describe('public endpoint rate limits behind a proxy in production', () => {
+      afterEach(() => {
+        jest.restoreAllMocks();
+      });
+
+      const useProduction = (isProduction: boolean) => {
+        const realEnv = config.getEnv();
+        jest.spyOn(config, 'getEnv').mockReturnValue({ ...realEnv, isProduction });
+      };
+
+      it.each(['unknown', '127.0.0.1', '::ffff:127.0.0.1'])(
+        'applies the strict self-registration limit for %s in production',
+        async (ip) => {
+          useProduction(true);
+          mockRateLimit.hit.mockResolvedValueOnce({ allowed: false, remaining: 0, resetAt: new Date() });
+
+          await expect(
+            registrationService.selfRegisterVisitor(
+              { societyId: SOCIETY_ID, flatId: FLAT_ID, visitorName: 'Proxy Visitor', category: 'RELATIVE' },
+              ip,
+            ),
+          ).rejects.toThrow(AppException);
+          expect(mockRateLimit.hit).toHaveBeenCalledWith(`visitor:self-register:ip:${ip}`, 15, 900);
+        },
+      );
+
+      it('keeps the relaxed loopback limit outside production for local e2e runs', () => {
+        useProduction(false);
+        expect(publicIpRateLimit('127.0.0.1', 15, 500)).toBe(500);
+        expect(publicIpRateLimit('unknown', 15, 500)).toBe(500);
+        expect(publicIpRateLimit('203.0.113.9', 15, 500)).toBe(15);
+      });
+
+      it('applies the strict account-registration limit for loopback in production', async () => {
+        useProduction(true);
+        const { RegistrationController } = await import('../src/registration/registration.controller');
+        const controller = new RegistrationController(registrationService, mockRateLimit);
+        mockRateLimit.hit.mockResolvedValueOnce({ allowed: false, remaining: 0, resetAt: new Date() });
+
+        await expect(
+          controller.register(
+            {
+              name: 'Proxy User',
+              email: 'proxy@example.com',
+              password: 'Password#2026',
+              societyId: SOCIETY_ID,
+            },
+            { ip: '127.0.0.1', headers: {} } as never,
+            { cookie: jest.fn() } as never,
+          ),
+        ).rejects.toThrow(AppException);
+        expect(mockRateLimit.hit).toHaveBeenCalledWith('auth:register:ip:127.0.0.1', 10, 900);
+      });
     });
 
     it('rejects self-registration if flat belongs to a different society', async () => {

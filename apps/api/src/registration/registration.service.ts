@@ -8,7 +8,20 @@ import { CredentialsService } from '../visitors/credentials.service';
 import { RateLimitService } from '../common/rate-limit.service';
 import { AuditService } from '../common/audit.service';
 import { visitorPolicy } from '../societies/policy';
+import { getEnv } from '../config';
 import { RegisterUserDto, SelfRegisterVisitorDto } from './registration.dto';
+
+const LOOPBACK_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost']);
+
+/**
+ * Local e2e runs hammer these public endpoints from loopback, so dev/test get a relaxed
+ * limit. In production a loopback or unresolved ('unknown') address means a same-host
+ * proxy or a missing client IP, so relaxing there would lift the limit for everyone.
+ */
+export function publicIpRateLimit(ip: string, strictLimit: number, relaxedLimit: number): number {
+  if (getEnv().isProduction) return strictLimit;
+  return LOOPBACK_IPS.has(ip) || ip === 'unknown' ? relaxedLimit : strictLimit;
+}
 
 const BCRYPT_ROUNDS = 12;
 
@@ -147,13 +160,7 @@ export class RegistrationService {
 
   async selfRegisterVisitor(dto: SelfRegisterVisitorDto, ip = 'unknown') {
     const rateLimitKey = `visitor:self-register:ip:${ip}`;
-    const isLoopback =
-      ip === '127.0.0.1' ||
-      ip === '::1' ||
-      ip === '::ffff:127.0.0.1' ||
-      ip === 'localhost' ||
-      ip === 'unknown';
-    const limit = await this.rateLimit.hit(rateLimitKey, isLoopback ? 500 : 15, 15 * 60);
+    const limit = await this.rateLimit.hit(rateLimitKey, publicIpRateLimit(ip, 15, 500), 15 * 60);
     if (!limit.allowed) {
       throw AppException.tooMany('Too many visitor registration attempts. Please wait a few minutes.');
     }
