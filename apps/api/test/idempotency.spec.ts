@@ -145,6 +145,23 @@ describe('IdempotencyService', () => {
       }),
     );
   });
+
+  it('propagates error when updateMany fails during P2002 conflict handling', async () => {
+    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
+      code: 'P2002',
+      clientVersion: '6.16.0',
+    });
+    const updateMany = jest.fn().mockRejectedValue(new Error('updateMany failed'));
+    const { service } = serviceWith({
+      findUnique: jest.fn(),
+      create: jest.fn().mockRejectedValue(duplicate),
+      updateMany,
+    });
+
+    await expect(
+      service.save('key', 'visitor-passes.create', 'abc', { ok: true }),
+    ).rejects.toThrow('updateMany failed');
+  });
 });
 
 describe('VisitorPassesController Idempotency Credential Protection', () => {

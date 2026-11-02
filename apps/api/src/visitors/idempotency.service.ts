@@ -45,18 +45,17 @@ export class IdempotencyService {
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        if (typeof (this.prisma as any).idempotencyRecord?.updateMany === 'function') {
-          await (this.prisma as any).idempotencyRecord
-            .updateMany({
-              where: { key, expiresAt: { lte: new Date() } },
-              data: {
-                endpoint,
-                requestHash: fingerprint,
-                responseBody: body as Prisma.InputJsonValue,
-                expiresAt: new Date(Date.now() + ttlHours * 3600 * 1000),
-              },
-            })
-            .catch(() => undefined);
+        const recordDelegate = this.prisma.idempotencyRecord as Partial<PrismaService['idempotencyRecord']>;
+        if (recordDelegate.updateMany) {
+          await recordDelegate.updateMany({
+            where: { key, expiresAt: { lte: new Date() } },
+            data: {
+              endpoint,
+              requestHash: fingerprint,
+              responseBody: body as Prisma.InputJsonValue,
+              expiresAt: new Date(Date.now() + ttlHours * 3600 * 1000),
+            },
+          });
         }
         return;
       }

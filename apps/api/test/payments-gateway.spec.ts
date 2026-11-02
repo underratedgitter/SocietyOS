@@ -4,6 +4,7 @@ import { PaymentsController } from '../src/payments/payments.controller';
 import { WebhooksController } from '../src/payments/webhooks.controller';
 import { AppException } from '../src/common/app.exception';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import * as configModule from '../src/config';
 
 describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)', () => {
   const SOCIETY_ID = 'soc-abc-123';
@@ -39,6 +40,7 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       $transaction: jest.fn(async (cb) => {
         const tx = {
           $executeRawUnsafe: jest.fn().mockResolvedValue(undefined),
+          $executeRaw: jest.fn().mockResolvedValue(undefined),
           maintenanceInvoice: mockPrisma.maintenanceInvoice,
           auditLog: mockPrisma.auditLog,
         };
@@ -611,6 +613,34 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       const res = await webhooksController.razorpayWebhook(req, 'sig_header');
       expect(res.received).toBe(true);
       expect(spy).toHaveBeenCalledWith(req.rawBody, 'sig_header');
+    });
+
+    test('settleInvoice propagates advisory lock errors instead of swallowing them', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValueOnce({
+        id: INVOICE_ID,
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        status: 'PENDING',
+        amount: 500,
+        gatewayOrderId: 'order_rzp_123',
+      });
+      mockPrisma.$transaction.mockImplementationOnce(async (cb: (tx: unknown) => Promise<unknown>) => {
+        const tx = {
+          $executeRaw: jest.fn().mockRejectedValue(new Error('Deadlock detected')),
+          $executeRawUnsafe: jest.fn().mockResolvedValue(undefined),
+          maintenanceInvoice: mockPrisma.maintenanceInvoice,
+          auditLog: mockPrisma.auditLog,
+        };
+        return cb(tx);
+      });
+
+      await expect(
+        service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          razorpayOrderId: 'order_rzp_123',
+          razorpayPaymentId: 'pay_rzp_123',
+          razorpaySignature: 'mock_sig_pass',
+        }),
+      ).rejects.toThrow('Deadlock detected');
     });
   });
 });

@@ -569,10 +569,7 @@ export class PaymentsService {
   }) {
     return this.prisma.$transaction(async (tx) => {
       // Serialize invoice settlement using advisory lock
-      await tx.$executeRawUnsafe(
-        `SELECT pg_advisory_xact_lock(hashtext($1))`,
-        `invoice:${params.invoiceId}`,
-      ).catch(() => undefined);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`invoice:${params.invoiceId}`}))`;
 
       const fresh = await tx.maintenanceInvoice.findUnique({
         where: { id: params.invoiceId },
