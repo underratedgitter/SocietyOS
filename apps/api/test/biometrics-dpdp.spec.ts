@@ -305,6 +305,285 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
   });
 
+  it('records AccessEvent and audit entry and leaves adapter state unchanged when triggerEmergencyOverride dispatch fails', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Hardware controller offline'));
+
+    const adapter = adapterFactory.getOrCreate('ap-gate-1', 'Main Perimeter Boom Barrier', 'BOOM_BARRIER');
+    expect(await adapter.getState()).toBe('CLOSED');
+
+    await expect(
+      biometricsService.triggerEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Fire alarm trigger',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency override command');
+
+    // Gate adapter state must remain unchanged (CLOSED, not OPEN)
+    expect(await adapter.getState()).toBe('CLOSED');
+    const telemetry = await adapter.getTelemetry();
+    expect(telemetry.emergencyActive).toBe(false);
+
+    // Must record AccessEvent with DENIED and EMERGENCY_DISPATCH_FAILED
+    expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          societyId: 'soc-1',
+          accessPointId: 'ap-gate-1',
+          decision: 'DENIED',
+          reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+          meta: expect.objectContaining({
+            deviceResults: [
+              expect.objectContaining({
+                deviceId: 'dev-controller-1',
+                status: 'FAILED',
+                error: 'Hardware controller offline',
+              }),
+            ],
+          }),
+        }),
+      }),
+    );
+
+    // Must record audit log for the failed attempt
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_OVERRIDE',
+        societyId: 'soc-1',
+        meta: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      }),
+    );
+  });
+
+  it('records AccessEvent and audit entry and leaves adapter state unchanged when resetEmergencyOverride dispatch fails', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+
+    const adapter = adapterFactory.getOrCreate('ap-gate-1', 'Main Perimeter Boom Barrier', 'BOOM_BARRIER');
+    await adapter.emergencyOverride('Prior emergency');
+    expect(await adapter.getState()).toBe('OPEN');
+    expect((await adapter.getTelemetry()).emergencyActive).toBe(true);
+
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Reset dispatch bus error'));
+
+    await expect(
+      biometricsService.resetEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Clear emergency',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency reset command');
+
+    // Gate adapter state must remain in emergency (OPEN, emergencyActive: true)
+    expect(await adapter.getState()).toBe('OPEN');
+    expect((await adapter.getTelemetry()).emergencyActive).toBe(true);
+
+    // Must record AccessEvent with DENIED and EMERGENCY_DISPATCH_FAILED
+    expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          societyId: 'soc-1',
+          accessPointId: 'ap-gate-1',
+          decision: 'DENIED',
+          reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+          meta: expect.objectContaining({
+            deviceResults: [
+              expect.objectContaining({
+                deviceId: 'dev-controller-1',
+                status: 'FAILED',
+                error: 'Reset dispatch bus error',
+              }),
+            ],
+          }),
+        }),
+      }),
+    );
+
+    // Must record audit log for the failed reset attempt
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_RESET',
+        societyId: 'soc-1',
+        meta: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      }),
+    );
+  });
+
+  it('records AccessEvent and audit entry when triggerEmergencyOverride fails due to no devices', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-standalone',
+      name: 'Gate Without Devices',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [],
+    });
+
+    const adapter = adapterFactory.getOrCreate('ap-gate-standalone', 'Gate Without Devices', 'BOOM_BARRIER');
+    expect(await adapter.getState()).toBe('CLOSED');
+
+    await expect(
+      biometricsService.triggerEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-standalone',
+        'Fire drill',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency override command');
+
+    expect(await adapter.getState()).toBe('CLOSED');
+    expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          decision: 'DENIED',
+          reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+          meta: expect.objectContaining({
+            deviceResults: [],
+          }),
+        }),
+      }),
+    );
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_OVERRIDE',
+        meta: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      }),
+    );
+  });
+
+  it('records AccessEvent and audit entry and leaves adapter state unchanged when resetEmergencyOverride fails due to no devices', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-standalone-reset',
+      name: 'Gate Without Devices Reset',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [],
+    });
+
+    const adapter = adapterFactory.getOrCreate('ap-gate-standalone-reset', 'Gate Without Devices Reset', 'BOOM_BARRIER');
+    await adapter.emergencyOverride('Prior emergency');
+    expect(await adapter.getState()).toBe('OPEN');
+    expect((await adapter.getTelemetry()).emergencyActive).toBe(true);
+
+    await expect(
+      biometricsService.resetEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-standalone-reset',
+        'Reset drill',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency reset command');
+
+    expect(await adapter.getState()).toBe('OPEN');
+    expect((await adapter.getTelemetry()).emergencyActive).toBe(true);
+    expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          decision: 'DENIED',
+          reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+          meta: expect.objectContaining({
+            deviceResults: [],
+          }),
+        }),
+      }),
+    );
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_RESET',
+        meta: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      }),
+    );
+  });
+
+  it('records audit entry and throws COMMAND_DISPATCH_FAILED even if accessEvent creation fails during triggerEmergencyOverride failure', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Hardware offline'));
+    mockPrisma.accessEvent.create.mockRejectedValueOnce(new Error('AccessEvent database connection lost'));
+
+    await expect(
+      biometricsService.triggerEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Fire drill failure',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency override command');
+
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_OVERRIDE',
+        societyId: 'soc-1',
+        meta: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      }),
+    );
+  });
+
+  it('records audit entry and throws COMMAND_DISPATCH_FAILED even if accessEvent creation fails during resetEmergencyOverride failure', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Reset bus error'));
+    mockPrisma.accessEvent.create.mockRejectedValueOnce(new Error('AccessEvent database connection lost'));
+
+    await expect(
+      biometricsService.resetEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Reset drill failure',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency reset command');
+
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_RESET',
+        societyId: 'soc-1',
+        meta: expect.objectContaining({
+          status: 'FAILED',
+        }),
+      }),
+    );
+  });
+
   it('loads persisted biometric template from database on cache miss', async () => {
     mockPrisma.biometricTemplate.findFirst.mockResolvedValueOnce({
       id: 'bt-persisted-1',
