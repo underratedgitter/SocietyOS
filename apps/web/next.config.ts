@@ -7,6 +7,14 @@ const apiInternal = (
 ).replace(/\/$/, '');
 const isDev = process.env.NODE_ENV !== 'production';
 
+// rewrites() is evaluated at build time and baked into routes-manifest.json, so a runtime
+// API_INTERNAL_URL is ignored by the standalone server. Make a localhost fallback visible.
+if (!isDev && !process.env.API_INTERNAL_URL) {
+  console.warn(
+    '[next.config] API_INTERNAL_URL is not set for this production build; /api/v1 rewrites will target http://localhost:4000.',
+  );
+}
+
 const contentSecurityPolicy = [
   "default-src 'self'",
   `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''}`,
