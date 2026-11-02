@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { BiometricsService } from '../src/devices/biometrics.service';
 import { GateAdapterFactory } from '../src/devices/adapters/gate-adapter.factory';
 
@@ -859,5 +860,164 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       }),
     ).rejects.toThrow('BiometricTemplate table constraint failure');
   });
-});
 
+  describe('tenant isolation & persistence regressions', () => {
+    const activeMembership = {
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+    };
+    const gate = {
+      id: 'ap-gate-1',
+      name: 'Tower A Entrance',
+      type: 'DOOR_LOCK',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    };
+
+    it('denies a resident whose only active flat is in another society', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue(activeMembership);
+      await biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+        userId: 'user-1',
+        type: 'FINGERPRINT',
+        templateHash: 'finger_hash_moved_out_555',
+        algorithm: 'ZKFINGER_V10',
+      });
+      mockPrisma.accessPoint.findFirst.mockResolvedValue(gate);
+      // Emulate the database: only flat memberships matching the requested filter are returned.
+      const memberships = [
+        { endedAt: null, flat: { flatNumber: 'Z-9', building: { societyId: 'soc-2' } } },
+      ];
+      mockPrisma.user.findUnique.mockImplementation(
+        (args: { include: { flatMemberships: { where: { flat?: { building?: { societyId?: string } } } } } }) => {
+          const wanted = args.include.flatMemberships.where.flat?.building?.societyId;
+          return Promise.resolve({
+            id: 'user-1',
+            name: 'Moved Out',
+            flatMemberships: memberships.filter(
+              (m) => wanted === undefined || m.flat.building.societyId === wanted,
+            ),
+          });
+        },
+      );
+
+      const result = await biometricsService.verifyResidentBiometric('soc-1', {
+        accessPointId: 'ap-gate-1',
+        type: 'FINGERPRINT',
+        templateHash: 'finger_hash_moved_out_555',
+      });
+
+      expect(result.decision).toBe('DENIED');
+      expect(result.reasonCode).toBe('RESIDENT_MEMBERSHIP_INACTIVE');
+      expect(mockPrisma.gateCommand.create).not.toHaveBeenCalled();
+      expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
+    });
+
+    it('refuses to re-home a template already enrolled by another society', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue(activeMembership);
+      mockPrisma.biometricTemplate.upsert.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed on template_hash', {
+          code: 'P2002',
+          clientVersion: '6.16.0',
+          meta: { target: ['template_hash'] },
+        }),
+      );
+
+      await expect(
+        biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+          userId: 'user-1',
+          type: 'FACE',
+          templateHash: 'face_hash_owned_by_soc_2',
+          algorithm: 'SUPREMA_FACE_V3',
+        }),
+      ).rejects.toMatchObject({ code: 'BIOMETRIC_TEMPLATE_CONFLICT', status: 409 });
+
+      const upsertArgs = mockPrisma.biometricTemplate.upsert.mock.calls[0][0];
+      expect(upsertArgs.where).toEqual({ templateHash: 'face_hash_owned_by_soc_2', societyId: 'soc-1' });
+      expect(upsertArgs.update).not.toHaveProperty('societyId');
+      expect(mockAudit.record).not.toHaveBeenCalled();
+    });
+
+    it('does not authorize a template whose enrollment failed to persist', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue(activeMembership);
+      mockPrisma.biometricTemplate.upsert.mockRejectedValueOnce(new Error('database unavailable'));
+      await expect(
+        biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+          userId: 'user-1',
+          type: 'FINGERPRINT',
+          templateHash: 'finger_hash_not_persisted_1',
+          algorithm: 'ZKFINGER_V10',
+        }),
+      ).rejects.toThrow('database unavailable');
+
+      mockPrisma.accessPoint.findFirst.mockResolvedValue(gate);
+      mockPrisma.user.findUnique.mockResolvedValue({
+        id: 'user-1',
+        name: 'Aarav Patel',
+        flatMemberships: [{ flat: { flatNumber: 'A-101' }, endedAt: null }],
+      });
+
+      const result = await biometricsService.verifyResidentBiometric('soc-1', {
+        accessPointId: 'ap-gate-1',
+        type: 'FINGERPRINT',
+        templateHash: 'finger_hash_not_persisted_1',
+      });
+
+      expect(result.decision).toBe('DENIED');
+      expect(result.reasonCode).toBe('BIOMETRIC_NOT_RECOGNIZED');
+      expect(mockPrisma.gateCommand.create).not.toHaveBeenCalled();
+    });
+
+    it('actuates the requesting reader and records its device and request ids', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue(activeMembership);
+      await biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+        userId: 'user-1',
+        type: 'FACE',
+        templateHash: 'face_hash_reader_origin_1',
+        algorithm: 'SUPREMA_FACE_V3',
+      });
+      mockPrisma.accessPoint.findFirst.mockResolvedValue({
+        ...gate,
+        devices: [
+          { deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } },
+          { deviceId: 'dev-reader-2', device: { id: 'dev-reader-2' } },
+        ],
+      });
+      mockPrisma.user.findUnique.mockResolvedValue({
+        id: 'user-1',
+        name: 'Aarav Patel',
+        flatMemberships: [{ flat: { flatNumber: 'A-101' }, endedAt: null }],
+      });
+
+      const result = await biometricsService.verifyResidentBiometric(
+        'soc-1',
+        { accessPointId: 'ap-gate-1', type: 'FACE', templateHash: 'face_hash_reader_origin_1' },
+        { deviceId: 'dev-reader-2', requestId: 'req-reader-1' },
+      );
+
+      expect(result.decision).toBe('AUTHORIZED');
+      expect(mockPrisma.gateCommand.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ deviceId: 'dev-reader-2' }) }),
+      );
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ deviceId: 'dev-reader-2', requestId: 'req-reader-1' }),
+        }),
+      );
+    });
+
+    it('keeps visitors with a pass still inside the retention window when anonymizing', async () => {
+      const before = Date.now();
+      const result = await biometricsService.anonymizeExpiredVisitorData('soc-1', 90);
+
+      expect(result.anonymizedCount).toBe(2);
+      expect(mockPrisma.visitor.findMany).not.toHaveBeenCalled();
+      const args = mockPrisma.visitor.updateMany.mock.calls[0][0];
+      expect(args.where.societyId).toBe('soc-1');
+      const cutoff: Date = args.where.createdAt.lt;
+      expect(args.where.passes).toEqual({ none: { validUntil: { gte: cutoff } } });
+      expect(before - cutoff.getTime()).toBeGreaterThanOrEqual(90 * 24 * 3600 * 1000 - 1000);
+    });
+  });
+});

@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../common/audit.service';
 import { AppException } from '../common/app.exception';
@@ -21,6 +22,12 @@ export interface BiometricVerifyDto {
   accessPointId: string;
   templateHash: string;
   type: 'FINGERPRINT' | 'FACE';
+}
+
+/** Set when the scan arrives from an authenticated gate reader rather than the guard console. */
+export interface BiometricVerifyOrigin {
+  deviceId: string;
+  requestId: string;
 }
 
 @Injectable()
@@ -124,36 +131,25 @@ export class BiometricsService implements OnModuleInit {
       lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
     };
 
-    this.templateRegistry.set(key, enrollment);
-
-    // Encrypt template payload with AES-256-GCM and store in PostgreSQL
+    // Encrypt template payload with AES-256-GCM and store in PostgreSQL.
+    // templateHash is globally unique, so the society is part of the upsert match: a hash
+    // already enrolled by another society falls through to create and hits the unique
+    // constraint instead of silently re-homing that tenant's template.
     const encryptedTemplate = encryptDeviceSecret(dto.rawTemplate || dto.templateHash);
-    await this.prisma.biometricTemplate.upsert({
-      where: { templateHash: dto.templateHash },
-      update: {
-        societyId,
-        userId: dto.userId,
-        type: dto.type,
-        encryptedTemplate,
-        algorithm: enrollment.algorithm,
-        consentGivenAt: enrollment.consentGivenAt,
-        lawfulBasis: enrollment.lawfulBasis,
-        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
-        enrolledBy: actorUserId,
-      },
-      create: {
-        societyId,
-        userId: dto.userId,
-        type: dto.type,
-        templateHash: dto.templateHash,
-        encryptedTemplate,
-        algorithm: enrollment.algorithm,
-        consentGivenAt: enrollment.consentGivenAt,
-        lawfulBasis: enrollment.lawfulBasis,
-        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
-        enrolledBy: actorUserId,
-      },
-    });
+    try {
+      await this.persistTemplate(actorUserId, societyId, dto, enrollment, encryptedTemplate);
+    } catch (err: unknown) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw AppException.conflict(
+          'BIOMETRIC_TEMPLATE_CONFLICT',
+          'This biometric template is already enrolled elsewhere',
+        );
+      }
+      throw err;
+    }
+
+    // Only cache once persisted, otherwise a failed enrollment would still authorize at the gate.
+    this.templateRegistry.set(key, enrollment);
 
     await this.audit.record({
       societyId,
@@ -182,9 +178,44 @@ export class BiometricsService implements OnModuleInit {
     };
   }
 
+  private async persistTemplate(
+    actorUserId: string,
+    societyId: string,
+    dto: BiometricEnrollDto,
+    enrollment: { algorithm: string; consentGivenAt: Date; lawfulBasis: string },
+    encryptedTemplate: string,
+  ): Promise<void> {
+    await this.prisma.biometricTemplate.upsert({
+      where: { templateHash: dto.templateHash, societyId },
+      update: {
+        userId: dto.userId,
+        type: dto.type,
+        encryptedTemplate,
+        algorithm: enrollment.algorithm,
+        consentGivenAt: enrollment.consentGivenAt,
+        lawfulBasis: enrollment.lawfulBasis,
+        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+        enrolledBy: actorUserId,
+      },
+      create: {
+        societyId,
+        userId: dto.userId,
+        type: dto.type,
+        templateHash: dto.templateHash,
+        encryptedTemplate,
+        algorithm: enrollment.algorithm,
+        consentGivenAt: enrollment.consentGivenAt,
+        lawfulBasis: enrollment.lawfulBasis,
+        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+        enrolledBy: actorUserId,
+      },
+    });
+  }
+
   async verifyResidentBiometric(
     societyId: string,
     dto: BiometricVerifyDto,
+    origin?: BiometricVerifyOrigin,
   ) {
     const isSynthetic =
       !dto.templateHash ||
@@ -239,6 +270,8 @@ export class BiometricsService implements OnModuleInit {
           decision: 'DENIED',
           reasonCode: 'BIOMETRIC_NOT_RECOGNIZED',
           source: 'BIOMETRIC_READER',
+          deviceId: origin?.deviceId,
+          requestId: origin?.requestId,
           meta: { type: dto.type },
         },
       });
@@ -250,12 +283,12 @@ export class BiometricsService implements OnModuleInit {
       };
     }
 
-    // Verify resident is still active in society
+    // Verify resident still lives in THIS society: an active flat elsewhere must not open this gate.
     const resident = await this.prisma.user.findUnique({
       where: { id: enrollment.userId },
       include: {
         flatMemberships: {
-          where: { endedAt: null },
+          where: { endedAt: null, flat: { building: { societyId } } },
           include: { flat: true },
         },
       },
@@ -269,6 +302,8 @@ export class BiometricsService implements OnModuleInit {
           decision: 'DENIED',
           reasonCode: 'RESIDENT_MEMBERSHIP_INACTIVE',
           source: 'BIOMETRIC_READER',
+          deviceId: origin?.deviceId,
+          requestId: origin?.requestId,
           meta: { userId: enrollment.userId },
         },
       });
@@ -284,7 +319,10 @@ export class BiometricsService implements OnModuleInit {
     await adapter.open();
 
     // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
-    const deviceIdBio = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
+    // A reader-originated scan actuates the reader's own (already authenticated and linked)
+    // controller rather than whichever device happens to be linked first.
+    const deviceIdBio =
+      origin?.deviceId ?? (accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id);
     let gateCommand:
       | { status: 'ISSUED'; id: string }
       | { status: 'FAILED'; error: string };
@@ -327,6 +365,8 @@ export class BiometricsService implements OnModuleInit {
         decision: 'AUTHORIZED',
         reasonCode: 'VALID_RESIDENT_BIOMETRIC',
         source: 'BIOMETRIC_READER',
+        deviceId: origin?.deviceId,
+        requestId: origin?.requestId,
         meta: {
           userId: resident.id,
           userName: resident.name,
@@ -686,28 +726,25 @@ export class BiometricsService implements OnModuleInit {
   async anonymizeExpiredVisitorData(societyId: string, daysRetention = 90) {
     const cutoff = new Date(Date.now() - daysRetention * 24 * 3600 * 1000);
 
-    const expiredVisitors = await this.prisma.visitor.findMany({
+    // Visitor rows are reused for repeat visits, so createdAt alone is not the retention clock:
+    // anyone holding a pass that is still inside the window (including a live pass) is kept.
+    // A single set-based update also avoids loading an unbounded id list into memory.
+    const anonymized = await this.prisma.visitor.updateMany({
       where: {
         societyId,
         createdAt: { lt: cutoff },
         name: { not: 'ANONYMIZED_VISITOR' },
+        passes: { none: { validUntil: { gte: cutoff } } },
       },
-      select: { id: true },
+      data: {
+        name: 'ANONYMIZED_VISITOR',
+        phone: null,
+      },
     });
-
-    if (expiredVisitors.length > 0) {
-      await this.prisma.visitor.updateMany({
-        where: { id: { in: expiredVisitors.map((v) => v.id) } },
-        data: {
-          name: 'ANONYMIZED_VISITOR',
-          phone: null,
-        },
-      });
-    }
 
     return {
       societyId,
-      anonymizedCount: expiredVisitors.length,
+      anonymizedCount: anonymized.count,
       retentionDays: daysRetention,
       status: 'SUCCESS',
     };
