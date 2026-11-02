@@ -577,7 +577,7 @@ describe('Registration & Relatives Service Modules', () => {
               ip,
             ),
           ).rejects.toThrow(AppException);
-          expect(mockRateLimit.hit).toHaveBeenCalledWith(`visitor:self-register:ip:${ip}`, 15, 900);
+          expect(mockRateLimit.hit).toHaveBeenCalledWith(`visitor:self-register:ip:${ip}`, 15, 900, { failClosed: true });
         },
       );
 
@@ -606,7 +606,7 @@ describe('Registration & Relatives Service Modules', () => {
             { cookie: jest.fn() } as never,
           ),
         ).rejects.toThrow(AppException);
-        expect(mockRateLimit.hit).toHaveBeenCalledWith('auth:register:ip:127.0.0.1', 10, 900);
+        expect(mockRateLimit.hit).toHaveBeenCalledWith('auth:register:ip:127.0.0.1', 10, 900, { failClosed: true });
       });
     });
 

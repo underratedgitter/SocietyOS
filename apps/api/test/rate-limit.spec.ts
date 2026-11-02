@@ -158,7 +158,6 @@ describe('RateLimitService without a usable Redis', () => {
     await expect(service.onModuleInit()).rejects.toThrow(
       'Redis is required for rate limiting in production',
     );
-    expect(service.healthy).toBe(false);
   });
 
   it('refuses to start in production when Redis is unreachable', async () => {
@@ -170,16 +169,24 @@ describe('RateLimitService without a usable Redis', () => {
     );
   });
 
-  it('fails closed in production instead of falling back to per-process counters', async () => {
+  it('fails closed in production for brute-force-sensitive (auth) limits', async () => {
     useProduction(await startNoAuthRedis());
     service = new RateLimitService();
     await service.onModuleInit().catch(() => undefined);
 
-    await expect(service.hit('auth:login:ip:203.0.113.9', 20, 900)).resolves.toEqual({
+    await expect(service.hit('auth:login:ip:203.0.113.9', 20, 900, { failClosed: true })).resolves.toEqual({
       allowed: false,
       count: 0,
       limit: 20,
     });
+  });
+
+  it('keeps gate verification working in production during a Redis outage', async () => {
+    useProduction(await startNoAuthRedis());
+    service = new RateLimitService();
+    await service.onModuleInit().catch(() => undefined);
+
+    await expect(service.hit('verify:device:gate-1', 60, 60)).resolves.toMatchObject({ allowed: true, count: 1 });
   });
 
   it('keeps the in-memory fallback outside production', async () => {
@@ -189,13 +196,12 @@ describe('RateLimitService without a usable Redis', () => {
     service = new RateLimitService();
 
     await expect(service.onModuleInit()).resolves.toBeUndefined();
-    expect(service.healthy).toBe(true);
     await expect(service.hit('unit:dev', 1, 60)).resolves.toMatchObject({ allowed: true, count: 1 });
   });
 });
 
 describe('HealthController readiness with rate limiting', () => {
-  function controller(rateLimit: { healthy: boolean; redisReady: boolean }): HealthController {
+  function controller(rateLimit: { redisReady: boolean }): HealthController {
     const prisma = {
       $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
       notification: { count: jest.fn().mockResolvedValue(0) },
@@ -211,20 +217,9 @@ describe('HealthController readiness with rate limiting', () => {
     return { status: jest.fn() };
   }
 
-  it('reports not-ready (503) when rate limiting cannot be enforced', async () => {
+  it('stays ready with Redis degraded so an outage cannot pull every replica (and the gates)', async () => {
     const res = response();
-    const body = await controller({ healthy: false, redisReady: false }).readyz(
-      res as unknown as Response,
-    );
-
-    expect(res.status).toHaveBeenCalledWith(503);
-    expect(body.status).toBe('not-ready');
-    expect(body.components.redis).toBe('down');
-  });
-
-  it('stays ready with Redis degraded when the memory fallback is permitted', async () => {
-    const res = response();
-    const body = await controller({ healthy: true, redisReady: false }).readyz(
+    const body = await controller({ redisReady: false }).readyz(
       res as unknown as Response,
     );
 

@@ -34,7 +34,7 @@ export class RegistrationController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const ip = req.ip || 'unknown';
-    const limit = await this.rateLimit.hit(`auth:register:ip:${ip}`, publicIpRateLimit(ip, 10, 500), 15 * 60);
+    const limit = await this.rateLimit.hit(`auth:register:ip:${ip}`, publicIpRateLimit(ip, 10, 500), 15 * 60, { failClosed: true });
     if (!limit.allowed) {
       throw AppException.tooMany('Too many registration attempts. Please try again later.');
     }

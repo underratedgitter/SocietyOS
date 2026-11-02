@@ -779,13 +779,13 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
           await expect(
             controller.login({ email: 'a@societyos.local', password: 'Password#123' }, req, res),
           ).rejects.toMatchObject({ status: 429 });
-          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:login:ip:/), 20, 900);
+          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:login:ip:/), 20, 900, { failClosed: true });
 
           hit.mockClear();
           await expect(controller.refresh({ refreshToken: 'x' } as any, req, res)).rejects.toMatchObject({
             status: 429,
           });
-          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:refresh:ip:/), 60, 900);
+          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:refresh:ip:/), 60, 900, { failClosed: true });
         }
       } finally {
         process.env = saved;

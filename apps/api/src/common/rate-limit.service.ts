@@ -65,16 +65,16 @@ export class RateLimitService implements OnModuleInit, OnModuleDestroy {
     this.redis?.disconnect();
   }
 
-  /** Whether limits can be enforced as this environment requires (Redis in production). */
-  get healthy(): boolean {
-    return !this.failClosed || this.redisReady;
-  }
-
   get redisReady(): boolean {
     return !!this.redis && this.redis.status === 'ready';
   }
 
-  async hit(key: string, limit: number, windowSec: number): Promise<RateHit> {
+  /**
+   * `failClosed` is for brute-force-sensitive endpoints (login, refresh, signup): in production
+   * they are denied while Redis is down. Everything else, notably gate verification, falls back to
+   * per-process counters so a cache outage never becomes a physical-access outage.
+   */
+  async hit(key: string, limit: number, windowSec: number, opts: { failClosed?: boolean } = {}): Promise<RateHit> {
     if (!this.enabled) return { allowed: true, count: 0, limit };
     if (this.redisReady) {
       try {
@@ -86,8 +86,8 @@ export class RateLimitService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn('redis rate-limit failure; falling back to memory');
       }
     }
-    if (this.failClosed) {
-      this.logger.error('redis unavailable in production; denying rate-limited request');
+    if (this.failClosed && opts.failClosed) {
+      this.logger.error('redis unavailable in production; denying fail-closed rate-limited request');
       return { allowed: false, count: 0, limit };
     }
     return this.hitMemory(key, limit, windowSec);

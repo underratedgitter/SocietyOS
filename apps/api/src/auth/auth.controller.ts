@@ -79,8 +79,8 @@ export class AuthController {
     const ipLimitCount = relaxed ? 1000 : 20;
 
     const [ipLimit, accountLimit] = await Promise.all([
-      this.rateLimit.hit(`auth:login:ip:${ip}`, ipLimitCount, 15 * 60),
-      this.rateLimit.hit(`auth:login:account:${email}`, 5, 15 * 60),
+      this.rateLimit.hit(`auth:login:ip:${ip}`, ipLimitCount, 15 * 60, { failClosed: true }),
+      this.rateLimit.hit(`auth:login:account:${email}`, 5, 15 * 60, { failClosed: true }),
     ]);
     if (!ipLimit.allowed || !accountLimit.allowed) {
       throw AppException.tooMany('Too many sign-in attempts. Try again later.');
@@ -122,7 +122,7 @@ export class AuthController {
       ip === 'localhost' ||
       ip === 'unknown';
     const relaxed = isLoopback && !getEnv().isProduction;
-    const limit = await this.rateLimit.hit(`auth:refresh:ip:${ip}`, relaxed ? 1000 : 60, 15 * 60);
+    const limit = await this.rateLimit.hit(`auth:refresh:ip:${ip}`, relaxed ? 1000 : 60, 15 * 60, { failClosed: true });
     if (!limit.allowed) throw AppException.tooMany();
     const token = dto.refreshToken || this.cookie(req, REFRESH_COOKIE);
     if (!token) throw AppException.unauthorized('INVALID_SESSION', 'Session is invalid or expired');

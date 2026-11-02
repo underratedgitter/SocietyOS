@@ -29,10 +29,9 @@ export class HealthController {
       components.database = 'down';
       databaseReady = false;
     }
-    // In production rate limiting fails closed without Redis, so the replica
-    // must leave the load balancer rather than 429 every sign-in.
-    const rateLimitReady = this.rateLimit.healthy;
-    components.redis = this.rateLimit.redisReady ? 'ok' : rateLimitReady ? 'degraded' : 'down';
+    // Redis loss degrades (auth endpoints fail closed; gates fall back to per-process limits) but
+    // must not pull every replica from the load balancer at once and take the gates down with it.
+    components.redis = this.rateLimit.redisReady ? 'ok' : 'degraded';
     components.mqtt = this.mqtt.connected ? 'ok' : 'degraded';
 
     try {
@@ -53,7 +52,7 @@ export class HealthController {
         ? 'stripe'
         : 'mock';
 
-    const ready = databaseReady && rateLimitReady;
+    const ready = databaseReady;
     res.status(ready ? 200 : 503);
     return {
       status: ready ? 'ready' : 'not-ready',
