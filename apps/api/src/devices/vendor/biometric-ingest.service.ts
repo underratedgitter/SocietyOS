@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DeviceProtocol, Prisma } from '@prisma/client';
 import { PrismaService } from '../../common/prisma.service';
-import { DeviceSyncService } from './device-sync.service';
 import {
   DEVICE_USER_ID_PATTERN,
   IngestOutcome,
@@ -31,10 +30,7 @@ type Decision = { decision: 'AUTHORIZED' | 'DENIED'; reasonCode: string; userId?
 export class BiometricIngestService {
   private readonly logger = new Logger(BiometricIngestService.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly sync: DeviceSyncService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async ingest(device: IngestingDevice, events: VendorBiometricEvent[], now = new Date()): Promise<IngestOutcome[]> {
     if (events.length > MAX_EVENTS_PER_BATCH) {
@@ -83,12 +79,14 @@ export class BiometricIngestService {
           },
         });
         await tx.biometricEventReceipt.update({ where: { id: receipt.id }, data: { accessEventId: accessEvent.id } });
+        // Same transaction as the receipt: if this fails the punch rolls back and the device's
+        // retry redoes it, instead of hitting DUPLICATE and silently losing the revocation.
+        if (event.matched && decision.decision === 'DENIED') {
+          await this.handleStaleDeviceUser(tx, device, event, decision.reasonCode);
+        }
         return accessEvent.id;
       });
 
-      if (event.matched && decision.decision === 'DENIED') {
-        await this.handleStaleDeviceUser(device, event, decision.reasonCode);
-      }
       return { status: 'RECORDED', dedupeKey, accessEventId, ...decision };
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -134,9 +132,14 @@ export class BiometricIngestService {
   }
 
   /** The terminal admitted someone SocietyOS denies: alert, and remove known-revoked users. */
-  private async handleStaleDeviceUser(device: IngestingDevice, event: VendorBiometricEvent, reasonCode: string): Promise<void> {
+  private async handleStaleDeviceUser(
+    tx: Prisma.TransactionClient,
+    device: IngestingDevice,
+    event: VendorBiometricEvent,
+    reasonCode: string,
+  ): Promise<void> {
     this.logger.warn(`Device ${device.id} admitted device user ${event.deviceUserId} denied by SocietyOS (${reasonCode})`);
-    await this.prisma.securityAlert.create({
+    await tx.securityAlert.create({
       data: {
         societyId: device.societyId,
         severity: 'WARNING',
@@ -147,7 +150,7 @@ export class BiometricIngestService {
     // Unknown IDs are only flagged: on terminals that predate SocietyOS they are real residents
     // who have not been mapped yet, and deleting them would lock them out.
     if (reasonCode === 'UNKNOWN_DEVICE_USER') return;
-    const alreadyQueued = await this.prisma.deviceSyncCommand.findFirst({
+    const alreadyQueued = await tx.deviceSyncCommand.findFirst({
       where: {
         deviceId: device.id,
         kind: 'DELETE_USER',
@@ -157,7 +160,9 @@ export class BiometricIngestService {
       select: { id: true },
     });
     if (!alreadyQueued) {
-      await this.sync.enqueue([device.id], 'DELETE_USER', { deviceUserId: event.deviceUserId });
+      await tx.deviceSyncCommand.create({
+        data: { deviceId: device.id, kind: 'DELETE_USER', payload: { deviceUserId: event.deviceUserId } },
+      });
     }
   }
 

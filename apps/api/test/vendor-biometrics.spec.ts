@@ -45,29 +45,31 @@ describe('BiometricIngestService', () => {
     const receiptCreate = opts.duplicate
       ? jest.fn().mockRejectedValue(uniqueViolation())
       : jest.fn().mockResolvedValue({ id: 'r-1' });
+    const securityAlert = { create: jest.fn().mockResolvedValue({}) };
+    const deviceSyncCommand = {
+      findFirst: jest.fn().mockResolvedValue(opts.queuedDelete ? { id: 'c-1' } : null),
+      create: jest.fn().mockResolvedValue({}),
+    };
     const tx = {
       biometricEventReceipt: { create: receiptCreate, update: jest.fn().mockResolvedValue({}) },
       accessEvent: { create: accessEventCreate },
+      securityAlert,
+      deviceSyncCommand,
     };
     const prisma = {
       deviceAccessPoint: { findFirst: jest.fn().mockResolvedValue({ accessPointId: AP }) },
       biometricIdentity: { findUnique: jest.fn().mockResolvedValue(opts.identity ?? null) },
       residentFlatMembership: { findFirst: jest.fn().mockResolvedValue(opts.membership ?? null) },
-      securityAlert: { create: jest.fn().mockResolvedValue({}) },
-      deviceSyncCommand: { findFirst: jest.fn().mockResolvedValue(opts.queuedDelete ? { id: 'c-1' } : null) },
+      securityAlert,
       device: { update: jest.fn().mockResolvedValue({}) },
       $transaction: jest.fn(async (cb: (client: typeof tx) => Promise<unknown>) => cb(tx)),
     };
-    const sync = { enqueue: jest.fn().mockResolvedValue(1) };
-    const service = new BiometricIngestService(
-      prisma as unknown as PrismaService,
-      sync as unknown as DeviceSyncService,
-    );
-    return { service, prisma, sync, accessEventCreate };
+    const service = new BiometricIngestService(prisma as unknown as PrismaService);
+    return { service, prisma, accessEventCreate, deviceSyncCommand };
   }
 
   it('authorizes a mapped resident with an active flat and records the punch time', async () => {
-    const { service, accessEventCreate, sync } = build({
+    const { service, accessEventCreate, deviceSyncCommand } = build({
       identity: { userId: USER, revokedAt: null },
       membership: { flat: { flatNumber: 'A-101' } },
     });
@@ -85,7 +87,7 @@ describe('BiometricIngestService', () => {
         meta: expect.objectContaining({ userId: USER, flatNumber: 'A-101', method: 'FINGERPRINT' }),
       }),
     });
-    expect(sync.enqueue).not.toHaveBeenCalled();
+    expect(deviceSyncCommand.create).not.toHaveBeenCalled();
   });
 
   it('reports a resent punch as DUPLICATE instead of recording it twice', async () => {
@@ -98,7 +100,7 @@ describe('BiometricIngestService', () => {
   });
 
   it('denies a revoked identity, alerts, and queues its removal from the terminal', async () => {
-    const { service, prisma, sync } = build({ identity: { userId: USER, revokedAt: new Date('2026-10-01') } });
+    const { service, prisma, deviceSyncCommand } = build({ identity: { userId: USER, revokedAt: new Date('2026-10-01') } });
 
     const [outcome] = await service.ingest(device, [event()], NOW);
 
@@ -106,26 +108,35 @@ describe('BiometricIngestService', () => {
     expect(prisma.securityAlert.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ type: 'VENDOR_DEVICE_STALE_USER' }),
     });
-    expect(sync.enqueue).toHaveBeenCalledWith([DEVICE], 'DELETE_USER', { deviceUserId: '1001' });
+    expect(deviceSyncCommand.create).toHaveBeenCalledWith({
+      data: { deviceId: DEVICE, kind: 'DELETE_USER', payload: { deviceUserId: '1001' } },
+    });
+  });
+
+  it('fails the punch (so the retry redoes it) when the revocation follow-up fails, instead of losing it', async () => {
+    const { service, prisma } = build({ identity: { userId: USER, revokedAt: new Date('2026-10-01') } });
+    prisma.securityAlert.create.mockRejectedValueOnce(new Error('db blip'));
+
+    await expect(service.ingest(device, [event()], NOW)).rejects.toThrow('db blip');
   });
 
   it('denies a resident who moved out and does not queue a second delete when one is pending', async () => {
-    const { service, sync } = build({ identity: { userId: USER, revokedAt: null }, membership: null, queuedDelete: true });
+    const { service, deviceSyncCommand } = build({ identity: { userId: USER, revokedAt: null }, membership: null, queuedDelete: true });
 
     const [outcome] = await service.ingest(device, [event()], NOW);
 
     expect(outcome).toMatchObject({ decision: 'DENIED', reasonCode: 'RESIDENT_MEMBERSHIP_INACTIVE' });
-    expect(sync.enqueue).not.toHaveBeenCalled();
+    expect(deviceSyncCommand.create).not.toHaveBeenCalled();
   });
 
   it('alerts on an unmapped terminal user but never deletes it (pre-existing residents)', async () => {
-    const { service, prisma, sync } = build({ identity: null });
+    const { service, prisma, deviceSyncCommand } = build({ identity: null });
 
     const [outcome] = await service.ingest(device, [event()], NOW);
 
     expect(outcome).toMatchObject({ decision: 'DENIED', reasonCode: 'UNKNOWN_DEVICE_USER' });
     expect(prisma.securityAlert.create).toHaveBeenCalled();
-    expect(sync.enqueue).not.toHaveBeenCalled();
+    expect(deviceSyncCommand.create).not.toHaveBeenCalled();
   });
 
   it('logs a scan the terminal itself rejected without alerting', async () => {
