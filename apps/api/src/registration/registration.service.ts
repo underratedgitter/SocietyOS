@@ -232,11 +232,8 @@ export class RegistrationService {
       throw AppException.unprocessable('NO_GATES_CONFIGURED', 'No active gates configured for this society');
     }
 
-    const publicMandatoryApprovalCategories: VisitorCategory[] = ['FRIEND', 'OTHER'];
-    const requiresApproval =
-      publicMandatoryApprovalCategories.includes(dto.category as VisitorCategory) ||
-      policy.approvalCategories.includes(dto.category as VisitorCategory);
-    const status = requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE';
+    const requiresApproval = true;
+    const status = 'PENDING_APPROVAL';
 
     const trimmedName = dto.visitorName.trim();
     const trimmedVehicle = dto.vehicle?.trim().toUpperCase();
@@ -290,6 +287,7 @@ export class RegistrationService {
                     type: pin.type,
                     credentialHash: this.credentials.hash(pin.plaintext),
                     keyId: this.credentials.keyVersion,
+                    societyId: dto.societyId,
                   },
                   {
                     type: qr.type,
@@ -355,15 +353,11 @@ export class RegistrationService {
       validFrom: pass.validFrom.toISOString(),
       validUntil: pass.validUntil.toISOString(),
       maxUses: pass.maxUses,
-      credentials: {
-        pin: pin.plaintext,
-        qrToken: qr.plaintext,
-      },
+      credentials: null,
       accessPoints,
-      requiresHostApproval: requiresApproval,
-      message: requiresApproval
-        ? 'Pass registered and pending resident approval. You will receive entry access once approved.'
-        : 'Pass successfully issued! Use your 6-digit PIN or scan the QR token at any gate.',
+      requiresHostApproval: true,
+      message:
+        'Pass registered and pending resident approval. You will receive entry access once approved.',
     };
   }
 }

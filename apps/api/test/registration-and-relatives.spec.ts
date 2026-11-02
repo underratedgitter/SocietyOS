@@ -173,6 +173,11 @@ describe('Registration & Relatives Service Modules', () => {
         userId: USER_ID,
         role: 'RESIDENT',
       }),
+      society: jest.fn().mockResolvedValue({
+        societyId: SOCIETY_ID,
+        userId: USER_ID,
+        role: 'RESIDENT',
+      }),
     };
 
     registrationService = new RegistrationService(
@@ -320,8 +325,7 @@ describe('Registration & Relatives Service Modules', () => {
 
       expect(result.passId).toBe('pass-uuid-1');
       expect(result.status).toBe('PENDING_APPROVAL');
-      expect(result.credentials?.pin).toHaveLength(6);
-      expect(result.credentials?.qrToken).toBeTruthy();
+      expect(result.credentials).toBeNull();
       expect(result.requiresHostApproval).toBe(true);
       expect(mockPrisma.notification.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -373,11 +377,11 @@ describe('Registration & Relatives Service Modules', () => {
 
       expect(result.status).toBe('PENDING_APPROVAL');
       expect(result.requiresHostApproval).toBe(true);
-      expect(result.credentials?.pin).toHaveLength(6);
+      expect(result.credentials).toBeNull();
     });
 
 
-    it('auto-approves and returns credentials when category is excluded from approval policy', async () => {
+    it('marks self-registration as PENDING_APPROVAL even when category is excluded from approval policy (replaced auto-approves assertion)', async () => {
       mockPrisma.flat.findUnique.mockResolvedValueOnce({
         id: FLAT_ID,
         buildingId: BUILDING_ID,
@@ -401,7 +405,7 @@ describe('Registration & Relatives Service Modules', () => {
         hostUserId: USER_ID,
         visitorId: VISITOR_ID,
         category: 'CAB',
-        status: 'ACTIVE',
+        status: 'PENDING_APPROVAL',
         validFrom: new Date(),
         validUntil: new Date(Date.now() + 2 * 3600 * 1000),
         maxUses: 1,
@@ -416,10 +420,85 @@ describe('Registration & Relatives Service Modules', () => {
         category: 'CAB',
       });
 
-      expect(result.status).toBe('ACTIVE');
-      expect(result.requiresHostApproval).toBe(false);
-      expect(result.credentials?.pin).toHaveLength(6);
-      expect(result.credentials?.qrToken).toBeTruthy();
+      expect(result.status).toBe('PENDING_APPROVAL');
+      expect(result.requiresHostApproval).toBe(true);
+      expect(result.credentials).toBeNull();
+    });
+
+    it('sends generated PIN to visitor phone upon host approval and does not expose it in the approval response', async () => {
+      const mockNotificationsService = {
+        notifyPassApproved: jest.fn().mockResolvedValue(undefined),
+        notifyPassRevoked: jest.fn().mockResolvedValue(undefined),
+      };
+      const { VisitorPassesService } = require('../src/visitors/visitor-passes.service');
+      const passesService = new VisitorPassesService(
+        mockPrisma,
+        mockAuthz,
+        credentialsService,
+        mockAudit,
+        mockNotificationsService,
+      );
+
+      mockPrisma.visitorPass.findUnique = jest.fn().mockResolvedValueOnce({
+        id: 'pass-pending-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        status: 'PENDING_APPROVAL',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 3600 * 1000),
+        usedCount: 0,
+        maxUses: 1,
+        category: 'CAB',
+        flat: { building: { societyId: SOCIETY_ID, name: 'Tower A' }, flatNumber: '101' },
+      });
+
+      mockPrisma.visitorPass.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.visitorPassCredential = {
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        createMany: jest.fn().mockResolvedValue({ count: 2 }),
+      };
+      mockPrisma.visitorApproval = {
+        create: jest.fn().mockResolvedValue({ id: 'appr-1' }),
+      };
+      mockPrisma.auditLog = {
+        create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+      };
+      mockPrisma.visitorPass.findUniqueOrThrow = jest.fn().mockResolvedValueOnce({
+        id: 'pass-pending-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        visitorId: VISITOR_ID,
+        status: 'ACTIVE',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 3600 * 1000),
+        maxUses: 1,
+        usedCount: 0,
+        category: 'CAB',
+        visitor: { id: VISITOR_ID, name: 'Uber Driver', phone: '+919876511111' },
+        flat: { id: FLAT_ID, flatNumber: '101', building: { name: 'Tower A' } },
+        host: { id: USER_ID, name: 'Resident Host' },
+        accessPoints: [{ accessPoint: { id: GATE_ID, name: 'Main Gate', type: 'BOOM_BARRIER' } }],
+        createdAt: new Date(),
+      });
+
+      const approved = await passesService.approve(
+        { sub: USER_ID, isPlatformAdmin: false },
+        'pass-pending-1',
+        { decision: 'APPROVED' },
+      );
+
+      expect(approved.status).toBe('ACTIVE');
+      expect((approved as { credentials?: unknown }).credentials).toBeUndefined();
+      expect(mockNotificationsService.notifyPassApproved).toHaveBeenCalledWith(
+        expect.objectContaining({
+          societyId: SOCIETY_ID,
+          flatNumber: '101',
+          visitorPhone: '+919876511111',
+          pin: expect.stringMatching(/^\d{6}$/),
+        }),
+      );
     });
 
     it('marks delivery / cab partner pass as PENDING_APPROVAL per society policy', async () => {

@@ -360,6 +360,9 @@ export class PaymentsService {
         clearTimeout(timeout);
       }
     } else {
+      if (env.isProduction) {
+        throw AppException.badGateway('GATEWAY_NOT_CONFIGURED', 'Stripe payment gateway is not configured in production');
+      }
       // Mock / Dev fallback
       paymentIntentId = `pi_${Date.now()}_${randomBytes(4).toString('hex')}`;
       clientSecret = `${paymentIntentId}_secret_${randomBytes(8).toString('hex')}`;
@@ -430,6 +433,10 @@ export class PaymentsService {
         if (typeof data.amount === 'number' && data.amount < expectedAmountInCents) {
           throw AppException.badRequest('INSUFFICIENT_AMOUNT', `Payment amount (${data.amount}) is less than invoice (${expectedAmountInCents})`);
         }
+      } catch (err) {
+        if (err instanceof AppException) throw err;
+        this.logger.error(`Stripe verification failed: ${String(err)}`);
+        throw AppException.badGateway('PAYMENT_GATEWAY_ERROR', 'Stripe payment gateway verification failed');
       } finally {
         clearTimeout(timeout);
       }
@@ -569,10 +576,7 @@ export class PaymentsService {
   }) {
     return this.prisma.$transaction(async (tx) => {
       // Serialize invoice settlement using advisory lock
-      await tx.$executeRawUnsafe(
-        `SELECT pg_advisory_xact_lock(hashtext($1))`,
-        `invoice:${params.invoiceId}`,
-      ).catch(() => undefined);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`invoice:${params.invoiceId}`}))`;
 
       const fresh = await tx.maintenanceInvoice.findUnique({
         where: { id: params.invoiceId },

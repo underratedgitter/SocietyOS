@@ -188,6 +188,7 @@ model Society {
   amenityBookings AmenityBooking[]
   maintenanceInvoices MaintenanceInvoice[]
   biometricTemplates BiometricTemplate[]
+  credentials VisitorPassCredential[]
 }
 
 model SocietyMembership {
@@ -300,13 +301,16 @@ model VisitorPassCredential {
   id             String         @id @default(uuid()) @db.Uuid
   passId         String         @db.Uuid
   type           CredentialType
-  credentialHash String         @unique
+  credentialHash String
   keyId          String
   createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+  societyId      String?        @db.Uuid
 
-  pass VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
+  pass    VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
+  society Society?    @relation(fields: [societyId], references: [id], onDelete: Cascade)
 
   @@unique([passId, type])
+  @@unique([societyId, credentialHash])
   @@index([credentialHash])
 }
 

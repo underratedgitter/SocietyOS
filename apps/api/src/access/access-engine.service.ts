@@ -231,8 +231,19 @@ export class AccessEngineService {
       }
     }
 
-    const credential = await tx.visitorPassCredential.findUnique({
-      where: { credentialHash },
+    const credential = await tx.visitorPassCredential.findFirst({
+      where: {
+        credentialHash,
+        type: ctx.credentialType as CredentialType,
+        ...(ctx.credentialType === 'PIN'
+          ? {
+              OR: [
+                { societyId: ctx.societyId },
+                { pass: { societyId: ctx.societyId } },
+              ],
+            }
+          : {}),
+      },
       include: {
         pass: {
           include: {
