@@ -268,19 +268,64 @@ export class VisitorPassesService {
       }
     }
 
-    const rows = await this.prisma.visitorPass.findMany({
-      where,
-      include: passInclude,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-      take: Math.min(limit * 3, 300),
-    });
-    let views = rows.map((pass) => this.toView(pass));
-    if (query.status) views = views.filter((view) => view.effectiveStatus === query.status);
-    const items = views.slice(0, limit);
+    const items: PassView[] = [];
+    let currentCursor = query.cursor;
+    let nextCursor: string | null = null;
+    const batchSize = Math.max(limit * 2, 50);
+    const maxScan = 500;
+    let totalScanned = 0;
+    let hasMoreInDb = false;
+
+    while (items.length < limit && totalScanned < maxScan) {
+      const takeCount = Math.min(batchSize, maxScan - totalScanned) + 1;
+      const rows = await this.prisma.visitorPass.findMany({
+        where,
+        include: passInclude,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(currentCursor ? { cursor: { id: currentCursor }, skip: 1 } : {}),
+        take: takeCount,
+      });
+
+      if (rows.length === 0) {
+        hasMoreInDb = false;
+        break;
+      }
+
+      hasMoreInDb = rows.length === takeCount;
+      const candidates = hasMoreInDb ? rows.slice(0, -1) : rows;
+      totalScanned += candidates.length;
+
+      let stoppedAtRowId: string | null = null;
+      for (const row of candidates) {
+        const view = this.toView(row);
+        if (!query.status || view.effectiveStatus === query.status) {
+          items.push(view);
+          if (items.length === limit) {
+            stoppedAtRowId = row.id;
+            break;
+          }
+        }
+      }
+
+      if (items.length === limit) {
+        const stoppedIndex = candidates.findIndex((r) => r.id === stoppedAtRowId);
+        const remainingInCandidates = candidates.slice(stoppedIndex + 1);
+        const hasMoreAfterStopped = remainingInCandidates.length > 0 || hasMoreInDb;
+        nextCursor = hasMoreAfterStopped ? stoppedAtRowId : null;
+        break;
+      }
+
+      currentCursor = candidates[candidates.length - 1]?.id;
+      if (!hasMoreInDb) break;
+    }
+
+    if (items.length < limit && hasMoreInDb && currentCursor) {
+      nextCursor = currentCursor;
+    }
+
     return {
       items,
-      nextCursor: rows.length > limit ? rows[limit - 1]?.id ?? null : null,
+      nextCursor,
     };
   }
 

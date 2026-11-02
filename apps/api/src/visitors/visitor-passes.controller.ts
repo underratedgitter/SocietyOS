@@ -55,7 +55,11 @@ export class VisitorPassesController {
     const cached = await this.idempotency.get(key, 'visitor-passes.create', fingerprint);
     if (cached) return cached;
     const result = await this.passes.create(user, dto);
-    await this.idempotency.save(key, 'visitor-passes.create', fingerprint, result);
+    const passHours = dto.validUntil
+      ? Math.ceil((new Date(dto.validUntil).getTime() - Date.now()) / (3600 * 1000))
+      : 24;
+    const ttlHours = Math.max(24, passHours + 24);
+    await this.idempotency.save(key, 'visitor-passes.create', fingerprint, result, ttlHours);
     return result;
   }
 

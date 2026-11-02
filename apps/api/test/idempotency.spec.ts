@@ -99,4 +99,46 @@ describe('IdempotencyService', () => {
       service.save('key', 'visitor-passes.create', 'abc', { ok: true }),
     ).rejects.toThrow('database down');
   });
+
+  it('rejects payload or endpoint mismatch even if record is expired', async () => {
+    const expiredRecord = {
+      endpoint: 'visitor-passes.create',
+      requestHash: 'hash-original',
+      responseBody: {},
+      expiresAt: new Date(Date.now() - 10_000),
+    };
+    const { service } = serviceWith({
+      findUnique: jest.fn().mockResolvedValue(expiredRecord),
+      create: jest.fn(),
+    });
+
+    await expect(
+      service.get('key', 'visitor-passes.create', 'hash-different'),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_PAYLOAD_MISMATCH' });
+
+    await expect(
+      service.get('key', 'other.endpoint', 'hash-original'),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+  });
+
+  it('refreshes expired record on P2002 to prevent repeated duplicate creations', async () => {
+    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
+      code: 'P2002',
+      clientVersion: '6.16.0',
+    });
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const { service } = serviceWith({
+      findUnique: jest.fn(),
+      create: jest.fn().mockRejectedValue(duplicate),
+      updateMany,
+    });
+
+    await service.save('key', 'visitor-passes.create', 'abc', { ok: true });
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ key: 'key' }),
+        data: expect.objectContaining({ requestHash: 'abc' }),
+      }),
+    );
+  });
 });
