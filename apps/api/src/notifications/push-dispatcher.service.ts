@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { getEnv } from '../config';
 import { validateWebPushEndpoint } from './web-push-endpoint';
+import { maskToken } from './redaction';
 
 export interface ExpoPushMessage {
   to: string;
@@ -222,7 +223,7 @@ export class PushDispatcherService {
                 await this.prisma.pushDeviceToken
                   .deleteMany({ where: { token: original.to } })
                   .catch(() => undefined);
-                this.logger.log(`Pruned unregistered device token: ${original.to}`);
+                this.logger.log(`Pruned unregistered device token: ${maskToken(original.to)}`);
               }
             }
           }

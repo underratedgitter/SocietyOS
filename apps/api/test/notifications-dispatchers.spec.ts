@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { SmsDispatcherService } from '../src/notifications/sms-dispatcher.service';
-import { MOCK_STORE_LIMIT } from '../src/notifications/redaction';
+import { MOCK_STORE_LIMIT, maskToken } from '../src/notifications/redaction';
 import { WhatsappDispatcherService } from '../src/notifications/whatsapp-dispatcher.service';
 import { PushDispatcherService } from '../src/notifications/push-dispatcher.service';
 import { NotificationsService } from '../src/notifications/notifications.service';
@@ -570,5 +570,14 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
         ).resolves.toMatchObject({ ok: true });
       }
     });
+  });
+});
+
+describe('maskToken', () => {
+  it('keeps only a short suffix of push tokens for logs', () => {
+    const token = 'ExponentPushToken[abcdefghijklmnopqrstuv]';
+    expect(maskToken(token)).toBe('***rstuv]');
+    expect(maskToken(token)).not.toContain('abcdef');
+    expect(maskToken('short')).toBe('****');
   });
 });

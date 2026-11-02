@@ -8,6 +8,12 @@ export function maskPhone(phone: string): string {
   return `***${digits.slice(-4)}`;
 }
 
+/** Push tokens are bearer-like addresses for a device; logs keep only a short suffix for correlation. */
+export function maskToken(token: string): string {
+  if (token.length <= 8) return '****';
+  return `***${token.slice(-6)}`;
+}
+
 /** Drops the oldest records once the store exceeds MOCK_STORE_LIMIT. */
 export function capMockStore<T>(store: T[]): void {
   if (store.length > MOCK_STORE_LIMIT) store.splice(0, store.length - MOCK_STORE_LIMIT);
