@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { getEnv } from '../config';
+import { capMockStore, maskPhone } from './redaction';
 
 export interface SentSmsRecord {
   to: string;
@@ -112,7 +113,9 @@ export class SmsDispatcherService {
       messageId,
     };
     this.mockSentStore.push(record);
-    this.logger.log(`[SMS-MOCK] Sent to ${normalizedPhone}: "${message}"`);
+    capMockStore(this.mockSentStore);
+    // Message bodies carry gate PINs; never write them or full phone numbers to logs.
+    this.logger.log(`[SMS-MOCK] Sent ${template} to ${maskPhone(normalizedPhone)} (${messageId})`);
     return { success: true, messageId, provider: 'mock' };
   }
 

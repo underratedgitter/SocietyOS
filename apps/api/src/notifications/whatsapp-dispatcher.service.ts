@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { getEnv } from '../config';
+import { capMockStore, maskPhone } from './redaction';
 
 export interface SentWhatsappRecord {
   to: string;
@@ -139,7 +140,9 @@ export class WhatsappDispatcherService {
       payload,
     };
     this.mockSentStore.push(record);
-    this.logger.log(`[WHATSAPP-MOCK] Sent to ${normalizedPhone}: "${message.slice(0, 80)}..."`);
+    capMockStore(this.mockSentStore);
+    // Message bodies carry gate PINs; never write them or full phone numbers to logs.
+    this.logger.log(`[WHATSAPP-MOCK] Sent ${template} to ${maskPhone(normalizedPhone)} (${messageId})`);
     return { success: true, messageId, provider: 'mock' };
   }
 

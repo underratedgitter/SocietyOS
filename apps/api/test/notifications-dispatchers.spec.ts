@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { SmsDispatcherService } from '../src/notifications/sms-dispatcher.service';
+import { MOCK_STORE_LIMIT } from '../src/notifications/redaction';
 import { WhatsappDispatcherService } from '../src/notifications/whatsapp-dispatcher.service';
 import { PushDispatcherService } from '../src/notifications/push-dispatcher.service';
 import { NotificationsService } from '../src/notifications/notifications.service';
@@ -65,6 +67,28 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       expect(store[0].to).toBe('+919876543210');
       expect(store[0].message).toContain('123456');
     });
+
+    test('mock delivery never logs the full phone number or the visitor PIN', async () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      try {
+        await sms.sendSms('9876543210', 'VISITOR_PASS_ISSUED', { flatNumber: '101', pin: '123456' });
+        const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(logged).toContain('***3210');
+        expect(logged).not.toContain('9876543210');
+        expect(logged).not.toContain('123456');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    test('mock store is bounded so the production fallback cannot leak memory', async () => {
+      for (let i = 0; i < MOCK_STORE_LIMIT + 25; i++) {
+        await sms.sendSms('9876543210', 'VISITOR_ARRIVED', { visitorName: `V${i}` });
+      }
+      const store = sms.getMockSentStore();
+      expect(store).toHaveLength(MOCK_STORE_LIMIT);
+      expect(store[store.length - 1].message).toContain(`V${MOCK_STORE_LIMIT + 24}`);
+    });
   });
 
   describe('WhatsappDispatcherService', () => {
@@ -102,6 +126,31 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       expect(store).toHaveLength(1);
       expect(store[0].to).toBe('+919888877777');
       expect(store[0].message).toContain('778899');
+    });
+
+    test('mock delivery never logs the full phone number or the visitor PIN', async () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      try {
+        await whatsapp.sendWhatsapp('+919888877777', 'VISITOR_PASS_ISSUED', {
+          flatNumber: '305',
+          pin: '778899',
+        });
+        const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(logged).toContain('***7777');
+        expect(logged).not.toContain('9888877777');
+        expect(logged).not.toContain('778899');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    test('mock store is bounded so the production fallback cannot leak memory', async () => {
+      for (let i = 0; i < MOCK_STORE_LIMIT + 25; i++) {
+        await whatsapp.sendWhatsapp('+919888877777', 'VISITOR_ARRIVED', { visitorName: `V${i}` });
+      }
+      const store = whatsapp.getMockSentStore();
+      expect(store).toHaveLength(MOCK_STORE_LIMIT);
+      expect(store[store.length - 1].message).toContain(`V${MOCK_STORE_LIMIT + 24}`);
     });
   });
 
