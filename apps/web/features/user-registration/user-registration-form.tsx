@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowRight, Building2, CheckCircle2, Home, Lock, Mail, Phone, ShieldCheck, User } from 'lucide-react';
+import { ArrowRight, CheckCircle2, ShieldCheck } from 'lucide-react';
 import { useSession } from '@/components/session-provider';
 import { Notice, errorMessage } from '@/components/ui';
 import { fetchPublicFlats, fetchPublicSocieties, submitUserRegistration } from './api';

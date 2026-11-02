@@ -126,19 +126,6 @@ export interface Building {
   flats: { id: string; flatNumber: string; residentCount: number }[];
 }
 
-export interface Flat {
-  id: string;
-  flatNumber: string;
-  building: { id: string; name: string };
-  residents: {
-    userId: string;
-    name: string;
-    email?: string;
-    phone?: string | null;
-    relationship: string;
-  }[];
-}
-
 export interface Resident {
   userId: string;
   name: string;

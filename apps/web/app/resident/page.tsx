@@ -26,7 +26,6 @@ import type {
   PassPage,
   PassView,
   PassWithCredentials,
-  Session,
 } from '@/lib/types';
 import {
   categoryLabel,

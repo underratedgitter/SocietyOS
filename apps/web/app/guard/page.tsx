@@ -14,7 +14,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   Ticket,
-  X,
 } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
 import type {
@@ -43,7 +42,6 @@ import {
   Badge,
   DecisionBadge,
   EmptyState,
-  Modal,
   PassBadge,
   ReasonText,
   Toast,

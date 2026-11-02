@@ -258,8 +258,6 @@ function AdminWorkspace() {
     });
   }, [data.passes, passStatus, passQuery]);
 
-  const pendingPasses = data.passes.filter((pass) => pass.effectiveStatus === 'PENDING_APPROVAL');
-
   function finishCreate(info?: CredentialInfo) {
     setCreateModal(null);
     if (info) setCredentials(info);

@@ -2,10 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import {
-  AlertCircle,
-  Bell,
   Calendar,
-  CheckCircle2,
   Clock,
   CreditCard,
   Pin,

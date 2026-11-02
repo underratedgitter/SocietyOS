@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowRight, Car, Check, Clock, KeyRound, MapPin, QrCode, Shield, Sparkles, User, Zap } from 'lucide-react';
+import { KeyRound, QrCode } from 'lucide-react';
 import { Notice, errorMessage } from '@/components/ui';
 import { fetchPublicFlats, fetchPublicSocieties, submitVisitorSelfRegistration } from './api';
 import { VisitorPassModal } from './visitor-pass-modal';
