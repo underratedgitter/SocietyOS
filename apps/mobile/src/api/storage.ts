@@ -15,6 +15,13 @@ try {
 
 const memoryStore = new Map<string, string>();
 
+// Sensitive keys that must NEVER be persisted in unencrypted browser localStorage
+const SENSITIVE_KEYS = new Set<string>([
+  'societyos_mobile_cached_credentials',
+  'societyos_mobile_access_token',
+  'societyos_mobile_refresh_token',
+]);
+
 async function getStorageItem(key: string): Promise<string | null> {
   if (SecureStore && typeof SecureStore.getItemAsync === 'function') {
     try {
@@ -25,7 +32,7 @@ async function getStorageItem(key: string): Promise<string | null> {
     }
   }
 
-  if (typeof window !== 'undefined' && window.localStorage) {
+  if (!SENSITIVE_KEYS.has(key) && typeof window !== 'undefined' && window.localStorage) {
     try {
       return window.localStorage.getItem(key);
     } catch {
@@ -37,23 +44,26 @@ async function getStorageItem(key: string): Promise<string | null> {
 }
 
 async function setStorageItem(key: string, value: string): Promise<void> {
-  let written = false;
+  let writtenInSecureStore = false;
 
   if (SecureStore && typeof SecureStore.setItemAsync === 'function') {
     try {
       await SecureStore.setItemAsync(key, value);
-      written = true;
+      writtenInSecureStore = true;
     } catch {
       // Fallback to web/memory
     }
   }
 
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      window.localStorage.setItem(key, value);
-      written = true;
-    } catch {
-      // Ignore
+  // Sensitive keys (such as visitor credentials PIN/QR or tokens) MUST NEVER be stored in unencrypted browser localStorage.
+  // Non-sensitive cached data only falls back to localStorage if SecureStore is not available.
+  if (!writtenInSecureStore && !SENSITIVE_KEYS.has(key)) {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        window.localStorage.setItem(key, value);
+      } catch {
+        // Ignore
+      }
     }
   }
 
@@ -231,6 +241,13 @@ export const mobileStorage = {
   },
 
   async saveCachedCredentials(credentials: Record<string, { pin: string; qrToken: string }>): Promise<void> {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        window.localStorage.removeItem(KEYS.CACHED_CREDENTIALS);
+      } catch {
+        // Ignore
+      }
+    }
     if (credentials && Object.keys(credentials).length > 0) {
       await setStorageItem(KEYS.CACHED_CREDENTIALS, JSON.stringify(credentials));
     } else {

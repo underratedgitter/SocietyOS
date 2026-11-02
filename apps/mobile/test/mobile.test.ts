@@ -357,6 +357,42 @@ describe('Mobile Local Secure Storage & Persistence', () => {
     assert.equal(await mobileStorage.loadCachedNotices(), null);
     assert.equal(await mobileStorage.loadCachedCredentials(), null);
   });
+
+  test('does not persist visitor PIN/QR credentials into unencrypted localStorage', async () => {
+    const mockStorage = new Map<string, string>();
+    (globalThis as any).window = {
+      localStorage: {
+        getItem: (k: string) => mockStorage.get(k) ?? null,
+        setItem: (k: string, v: string) => mockStorage.set(k, v),
+        removeItem: (k: string) => mockStorage.delete(k),
+      },
+    };
+
+    try {
+      const mockCreds = {
+        'pass-secret-1': { pin: '998877', qrToken: 'secretqr1234567890' },
+      };
+      await mobileStorage.saveCachedCredentials(mockCreds);
+
+      // Verify that credentials were NOT written to window.localStorage
+      assert.equal(
+        mockStorage.get('societyos_mobile_cached_credentials'),
+        undefined,
+        'Visitor credentials must NOT be stored in browser localStorage',
+      );
+
+      // Non-sensitive data like cached notices CAN fall back to localStorage
+      const mockNotices = [{ id: 'n-1', title: 'Annual Meeting' }];
+      await mobileStorage.saveCachedNotices(mockNotices);
+      assert.notEqual(
+        mockStorage.get('societyos_mobile_cached_notices'),
+        undefined,
+        'Non-sensitive notices can use localStorage fallback',
+      );
+    } finally {
+      delete (globalThis as any).window;
+    }
+  });
 });
 
 describe('Mobile Session Refresh Concurrency & Error Clearance', () => {
@@ -483,6 +519,25 @@ describe('Mobile Relatives & Directory Client Methods', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test('relative registration error discrimination: only falls back on DUPLICATE_RELATIVE (Issue 10)', () => {
+    const isDuplicate = (err: any) =>
+      (err instanceof ApiError && (err.code === 'DUPLICATE_RELATIVE' || err.status === 409)) ||
+      err?.code === 'DUPLICATE_RELATIVE';
+
+    const duplicateErr = new ApiError('DUPLICATE_RELATIVE', 'Already registered', 409);
+    assert.equal(isDuplicate(duplicateErr), true);
+
+    const networkErr = new ApiError('NETWORK_ERROR', 'Network connection failed', 0);
+    assert.equal(isDuplicate(networkErr), false);
+
+    const serverErr = new ApiError('INTERNAL_ERROR', 'Database unavailable', 500);
+    assert.equal(isDuplicate(serverErr), false);
+
+    const genericErr = new TypeError('Failed to fetch');
+    assert.equal(isDuplicate(genericErr), false);
+  });
 });
+
 
 

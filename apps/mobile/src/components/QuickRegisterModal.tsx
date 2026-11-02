@@ -173,8 +173,15 @@ export function QuickRegisterModal({
             onClose();
             return;
           }
-        } catch {
-          // If already in directory, proceed to standard createPass
+        } catch (relativeErr: any) {
+          // Fall back to standard createPass ONLY if relative is already registered in directory
+          const isDuplicate =
+            (relativeErr instanceof ApiError &&
+              (relativeErr.code === 'DUPLICATE_RELATIVE' || relativeErr.status === 409)) ||
+            relativeErr?.code === 'DUPLICATE_RELATIVE';
+          if (!isDuplicate) {
+            throw relativeErr;
+          }
         }
       }
 
