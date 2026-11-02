@@ -1,6 +1,10 @@
 import { Prisma } from '@prisma/client';
 import { AppException } from '../src/common/app.exception';
 import { IdempotencyService } from '../src/visitors/idempotency.service';
+import { VisitorPassesController } from '../src/visitors/visitor-passes.controller';
+import { VisitorPassesService } from '../src/visitors/visitor-passes.service';
+import { CreateVisitorPassDto } from '../src/visitors/visitor-passes.dto';
+import { JwtUser } from '../src/auth/jwt-auth.guard';
 
 function serviceWith(record: Record<string, jest.Mock>): {
   service: IdempotencyService;
@@ -142,3 +146,75 @@ describe('IdempotencyService', () => {
     );
   });
 });
+
+describe('VisitorPassesController Idempotency Credential Protection', () => {
+  it('saves responseBody without credentials or pin/qrToken and sets 24h TTL', async () => {
+    const mockPasses = {
+      create: jest.fn().mockResolvedValue({
+        pass: { id: 'pass-999', status: 'ACTIVE' },
+        credentials: { pin: '654321', qrToken: 'qr-secret-123' },
+      }),
+    };
+    const mockIdempotency = {
+      fingerprint: jest.fn().mockReturnValue('mock-fingerprint'),
+      get: jest.fn().mockResolvedValue(null),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+    const controller = new VisitorPassesController(
+      mockPasses as unknown as VisitorPassesService,
+      mockIdempotency as unknown as IdempotencyService,
+    );
+    const user = { sub: 'user-1' } as unknown as JwtUser;
+    const dto = {
+      flatId: 'flat-1',
+      validUntil: new Date(Date.now() + 72 * 3600 * 1000).toISOString(),
+    } as unknown as CreateVisitorPassDto;
+
+    const result = (await controller.create(user, dto, 'idem-key-12345')) as {
+      pass: { id: string; status: string };
+      credentials?: { pin?: string; qrToken?: string };
+    };
+
+    // First call returns credentials to creator
+    expect(result.credentials).toEqual({ pin: '654321', qrToken: 'qr-secret-123' });
+
+    // But idempotency.save must NOT contain pin or qrToken and must have 24h TTL
+    expect(mockIdempotency.save).toHaveBeenCalledTimes(1);
+    const [savedKey, savedEndpoint, savedFingerprint, savedBody, savedTtl] = mockIdempotency.save.mock.calls[0];
+    expect(savedKey).toBe('visitor-passes:user-1:idem-key-12345');
+    expect(savedTtl).toBe(24);
+    expect(savedBody.credentials).toBeUndefined();
+    expect(JSON.stringify(savedBody)).not.toContain('654321');
+    expect(JSON.stringify(savedBody)).not.toContain('qr-secret-123');
+    expect(savedBody.credentialsAlreadyIssued).toBe(true);
+  });
+
+  it('on replay returns pass without credentials and credentialsAlreadyIssued: true', async () => {
+    const mockPasses = { create: jest.fn() };
+    const mockIdempotency = {
+      fingerprint: jest.fn().mockReturnValue('mock-fingerprint'),
+      get: jest.fn().mockResolvedValue({
+        pass: { id: 'pass-999', status: 'ACTIVE' },
+        credentialsAlreadyIssued: true,
+      }),
+      save: jest.fn(),
+    };
+    const controller = new VisitorPassesController(
+      mockPasses as unknown as VisitorPassesService,
+      mockIdempotency as unknown as IdempotencyService,
+    );
+    const user = { sub: 'user-1' } as unknown as JwtUser;
+    const dto = { flatId: 'flat-1' } as unknown as CreateVisitorPassDto;
+
+    const replay = (await controller.create(user, dto, 'idem-key-12345')) as {
+      pass: { id: string };
+      credentials?: unknown;
+      credentialsAlreadyIssued?: boolean;
+    };
+    expect(replay.pass.id).toBe('pass-999');
+    expect(replay.credentials).toBeUndefined();
+    expect(replay.credentialsAlreadyIssued).toBe(true);
+    expect(mockPasses.create).not.toHaveBeenCalled();
+  });
+});
+
