@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
@@ -45,6 +45,16 @@ export default function KioskPage() {
   const [result, setResult] = useState<VerifyResponse | null>(null);
   const [gateVisualState, setGateVisualState] = useState<VisualGateState>('CLOSED');
   const [biometricScanning, setBiometricScanning] = useState(false);
+  const gateTimers = useRef<number[]>([]);
+
+  // Each verification must cancel the previous animation; otherwise a denied credential
+  // presented within ~6s of an allowed one is shown with the barrier swinging OPEN.
+  const clearGateTimers = useCallback(() => {
+    gateTimers.current.forEach((timer) => window.clearTimeout(timer));
+    gateTimers.current = [];
+  }, []);
+
+  useEffect(() => clearGateTimers, [clearGateTimers]);
 
   useEffect(() => {
     if (loading) return;
@@ -116,9 +126,11 @@ export default function KioskPage() {
       setQr('');
       setResult(null);
       setError('');
+      clearGateTimers();
+      setBiometricScanning(false);
       setGateVisualState('CLOSED');
     },
-    [societyId],
+    [societyId, clearGateTimers],
   );
 
   async function verify(credentialType: Mode, credential: string) {
@@ -127,6 +139,7 @@ export default function KioskPage() {
     setBusy(true);
     setError('');
     setResult(null);
+    clearGateTimers();
     try {
       const response = await apiRequest<VerifyResponse>('/api/v1/access/manual-verify', {
         method: 'POST',
@@ -139,9 +152,11 @@ export default function KioskPage() {
       if (response.decision === 'AUTHORIZED') {
         playAuthorizedChime();
         setGateVisualState('OPENING');
-        setTimeout(() => setGateVisualState('OPEN'), 500);
-        setTimeout(() => setGateVisualState('CLOSING'), 4800);
-        setTimeout(() => setGateVisualState('CLOSED'), 6400);
+        gateTimers.current = [
+          window.setTimeout(() => setGateVisualState('OPEN'), 500),
+          window.setTimeout(() => setGateVisualState('CLOSING'), 4800),
+          window.setTimeout(() => setGateVisualState('CLOSED'), 6400),
+        ];
       } else {
         playDeniedBuzzer();
         setGateVisualState('CLOSED');
@@ -169,9 +184,12 @@ export default function KioskPage() {
     playKeypadClick();
     setError('');
     setResult(null);
-    setTimeout(() => {
-      void verify('BIOMETRIC', DEMO_RESIDENT_BIOMETRIC_HASH);
-    }, 1100);
+    clearGateTimers();
+    gateTimers.current = [
+      window.setTimeout(() => {
+        void verify('BIOMETRIC', DEMO_RESIDENT_BIOMETRIC_HASH);
+      }, 1100),
+    ];
   }
 
   function press(key: string) {
@@ -197,7 +215,8 @@ export default function KioskPage() {
     }
   }
 
-  if (loading || !session) {
+  // Hold the loader until the redirect effect runs so a must-change-password session never sees the kiosk.
+  if (loading || !session || session.user.mustChangePassword) {
     return (
       <div className="kiosk-shell">
         <div className="kiosk-body">
@@ -458,6 +477,12 @@ export default function KioskPage() {
                   <div
                     className={`biometric-scanner-ring ${biometricScanning ? 'scanning' : ''}`}
                     onClick={simulateBiometric}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        simulateBiometric();
+                      }
+                    }}
                     role="button"
                     tabIndex={0}
                     aria-label="Tap to scan biometric"
