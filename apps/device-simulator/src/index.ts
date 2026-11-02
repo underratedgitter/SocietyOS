@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -43,6 +42,20 @@ interface VerifyResponse {
   accessEventId: string;
   commandId?: string;
   expiresAt?: string;
+}
+
+// dotenv is not a dependency of this package (the import crashed with MODULE_NOT_FOUND);
+// Node's built-in loader has the same semantics: existing env vars win over .env values.
+try {
+  process.loadEnvFile();
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+}
+
+// The simulator ships demo secrets and seeds a test PIN; it must never run as a production controller.
+if (process.env.NODE_ENV === 'production') {
+  console.error('device-simulator is a development tool and refuses to start with NODE_ENV=production.');
+  process.exit(1);
 }
 
 const env = {
@@ -465,6 +478,7 @@ async function pullEdgeCache(): Promise<void> {
   try {
     const res = await fetch(`${env.apiUrl}/api/v1/device-api/edge-sync`, {
       headers: { authorization: `Bearer ${env.deviceToken}` },
+      signal: AbortSignal.timeout(10_000),
     });
     if (res.ok) {
       const data = (await res.json()) as {
@@ -588,6 +602,7 @@ async function syncOfflineQueue(): Promise<void> {
           'content-type': 'application/json',
         },
         body: JSON.stringify({ events: chunk }),
+        signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) {
         chunk.forEach((ev) => successfullySynced.add(ev.sequence));
@@ -620,6 +635,7 @@ async function syncOfflineQueue(): Promise<void> {
                 bufferedAt: event.timestamp,
               },
             }),
+            signal: AbortSignal.timeout(10_000),
           });
           if (res.ok) {
             successfullySynced.add(event.sequence);
