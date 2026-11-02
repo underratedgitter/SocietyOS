@@ -23,17 +23,52 @@ import type {
 } from './types';
 import { mobileStorage } from './storage';
 
-let currentApiUrl = 'http://localhost:80/api/v1';
+const DEV_FALLBACK_API_URL = 'http://localhost:80/api/v1';
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+// Release builds must never send credentials or bearer tokens over cleartext HTTP.
+function isProductionBuild(): boolean {
+  return (typeof __DEV__ !== 'undefined' && !__DEV__) || process.env.NODE_ENV === 'production';
+}
+
+// RN's URL polyfill does not implement `protocol`/`host` getters, so validate structurally.
+const API_URL_PATTERN = /^(https?):\/\/[^\s/?#@]+(\/[^\s?#]*)?$/i;
+
+export function normalizeApiUrl(raw: string, production: boolean = isProductionBuild()): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  const match = API_URL_PATTERN.exec(trimmed);
+  if (!match) {
+    throw new ApiError('INVALID_API_URL', `Invalid backend API URL "${trimmed}". Use http(s)://host/api/v1.`, 0);
+  }
+  if (production && match[1].toLowerCase() !== 'https') {
+    throw new ApiError('INSECURE_API_URL', 'Backend API URL must use HTTPS in production builds.', 0);
+  }
+  return trimmed;
+}
+
+export function getDefaultApiUrl(): string {
+  // Inlined at build time by babel-preset-expo; set EXPO_PUBLIC_API_URL for release builds.
+  const configured = process.env.EXPO_PUBLIC_API_URL?.trim();
+  return (configured || DEV_FALLBACK_API_URL).replace(/\/+$/, '');
+}
+
+let currentApiUrl = getDefaultApiUrl();
 
 export function setApiUrl(url: string) {
-  currentApiUrl = url.replace(/\/+$/, '');
+  currentApiUrl = normalizeApiUrl(url);
   void mobileStorage.saveApiUrl(currentApiUrl);
 }
 
 export async function initStorage(): Promise<void> {
   const savedUrl = await mobileStorage.loadApiUrl();
   if (savedUrl) {
-    currentApiUrl = savedUrl.replace(/\/+$/, '');
+    try {
+      currentApiUrl = normalizeApiUrl(savedUrl);
+    } catch {
+      // A persisted URL that fails validation (e.g. cleartext from a dev install) is discarded
+      // so the build-time default applies instead of bricking the app.
+      currentApiUrl = getDefaultApiUrl();
+    }
   }
   const loaded = await mobileStorage.loadTokens();
   storedAccessToken = loaded.accessToken;
@@ -136,14 +171,39 @@ function buildCookieHeader(): string {
     .join('; ');
 }
 
+function assertSecureTransport(url: string): void {
+  if (isProductionBuild() && !/^https:\/\//i.test(url)) {
+    throw new ApiError('INSECURE_API_URL', 'Backend API URL must use HTTPS in production builds.', 0);
+  }
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const external = init.signal;
+  const forwardAbort = (): void => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', forwardAbort);
+  }
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    external?.removeEventListener('abort', forwardAbort);
+  }
+}
+
 export interface RequestOptions extends RequestInit {
   skipRefresh?: boolean;
   idempotencyKey?: string;
+  timeoutMs?: number;
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const url = path.startsWith('http') ? path : `${currentApiUrl}${path.startsWith('/') ? '' : '/'}${path}`;
-  const { skipRefresh, idempotencyKey, headers, ...init } = options;
+  const { skipRefresh, idempotencyKey, headers, timeoutMs = REQUEST_TIMEOUT_MS, ...init } = options;
+  assertSecureTransport(url);
 
   const requestHeaders = new Headers(headers);
   if (init.body && !(init.body instanceof FormData) && !requestHeaders.has('content-type')) {
@@ -167,11 +227,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   let response: Response;
   try {
-    response = await fetch(url, {
-      ...init,
-      headers: requestHeaders,
-    });
+    response = await fetchWithTimeout(url, { ...init, headers: requestHeaders }, timeoutMs);
   } catch (err) {
+    // Timeouts keep the NETWORK_ERROR code so callers fall back to offline caches.
     throw new ApiError(
       'NETWORK_ERROR',
       `Cannot reach SocietyOS backend at ${currentApiUrl}. Please ensure server is running.`,
@@ -253,15 +311,21 @@ export async function refreshSession(): Promise<boolean> {
 
   refreshPromise = (async () => {
     try {
-      const res = await fetch(`${currentApiUrl}/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-client-type': 'mobile',
-          ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
+      const refreshUrl = `${currentApiUrl}/auth/refresh`;
+      assertSecureTransport(refreshUrl);
+      const res = await fetchWithTimeout(
+        refreshUrl,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-client-type': 'mobile',
+            ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
+          },
+          body: JSON.stringify({ refreshToken: storedRefreshToken }),
         },
-        body: JSON.stringify({ refreshToken: storedRefreshToken }),
-      });
+        REQUEST_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {

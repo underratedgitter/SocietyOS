@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   setApiUrl,
   getApiUrl,
+  getDefaultApiUrl,
   setAuthTokens,
   getAccessToken,
   getRefreshToken,
@@ -10,7 +11,9 @@ import {
   ApiError,
   api,
   initStorage,
+  normalizeApiUrl,
   refreshSession,
+  request,
 } from '../src/api/client';
 import { mobileStorage } from '../src/api/storage';
 import {
@@ -31,6 +34,64 @@ describe('Mobile API Client & Session Management', () => {
 
     setApiUrl('http://localhost:80/api/v1');
     assert.equal(getApiUrl(), 'http://localhost:80/api/v1');
+  });
+
+  test('rejects malformed API URLs and keeps the previous one', () => {
+    setApiUrl('http://localhost:80/api/v1');
+    for (const bad of ['', 'localhost/api/v1', 'javascript:alert(1)', 'ftp://host/api', 'https://user@evil.example/api']) {
+      assert.throws(() => setApiUrl(bad), (err: unknown) => err instanceof ApiError && err.code === 'INVALID_API_URL');
+    }
+    assert.equal(getApiUrl(), 'http://localhost:80/api/v1');
+  });
+
+  test('requires HTTPS API URLs in production builds', () => {
+    assert.throws(
+      () => normalizeApiUrl('http://api.societyos.example/api/v1', true),
+      (err: unknown) => err instanceof ApiError && err.code === 'INSECURE_API_URL',
+    );
+    assert.equal(normalizeApiUrl('https://api.societyos.example/api/v1/', true), 'https://api.societyos.example/api/v1');
+  });
+
+  test('refuses to send requests over cleartext HTTP when NODE_ENV=production', async () => {
+    setApiUrl('http://localhost:80/api/v1');
+    const originalEnv = process.env.NODE_ENV;
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response('{}', { status: 200 });
+    };
+    process.env.NODE_ENV = 'production';
+    try {
+      await assert.rejects(
+        () => api.getMe(),
+        (err: unknown) => err instanceof ApiError && err.code === 'INSECURE_API_URL',
+      );
+      assert.equal(fetchCalls, 0);
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('aborts hung requests after the timeout and reports NETWORK_ERROR', async () => {
+    setApiUrl('http://localhost:80/api/v1');
+    const originalFetch = globalThis.fetch;
+    let receivedSignal: AbortSignal | undefined;
+    globalThis.fetch = (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        receivedSignal = init?.signal ?? undefined;
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    try {
+      await assert.rejects(
+        () => request('/auth/me', { timeoutMs: 20 }),
+        (err: unknown) => err instanceof ApiError && err.code === 'NETWORK_ERROR',
+      );
+      assert.equal(receivedSignal?.aborted, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test('manages auth tokens in memory', () => {
@@ -317,6 +378,17 @@ describe('Mobile Local Secure Storage & Persistence', () => {
 
     // Clean up
     setAuthTokens(null, null);
+    setApiUrl('http://localhost:80/api/v1');
+  });
+
+  test('initStorage discards a persisted API URL that fails validation', async () => {
+    mobileStorage._clearMemory();
+    setApiUrl('http://10.0.0.9:80/api/v1');
+    await mobileStorage.saveApiUrl('javascript:alert(1)');
+
+    await initStorage();
+
+    assert.equal(getApiUrl(), getDefaultApiUrl());
     setApiUrl('http://localhost:80/api/v1');
   });
 
