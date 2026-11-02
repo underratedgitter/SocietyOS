@@ -1,5 +1,4 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { getEnv } from '../config';
 
@@ -102,28 +101,13 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600 * 1000) } },
       });
 
-      // Remove PIN from notifications older than 24 hours to prevent plaintext PIN storage
+      // Remove PIN from notifications older than 24 hours to prevent plaintext PIN storage.
+      // One set-based statement: a capped, unfiltered batch re-read the same rows every sweep
+      // and never reached older notifications that still held a PIN.
       const notifCutoff = new Date(now.getTime() - 24 * 3600 * 1000);
-      const oldNotifications = await this.prisma.notification.findMany({
-        where: { createdAt: { lt: notifCutoff } },
-        select: { id: true, payload: true },
-        take: 500,
-      });
-      for (const notif of oldNotifications) {
-        if (
-          notif.payload &&
-          typeof notif.payload === 'object' &&
-          !Array.isArray(notif.payload) &&
-          'pin' in notif.payload
-        ) {
-          const updatedPayload = { ...(notif.payload as Record<string, unknown>) };
-          delete updatedPayload.pin;
-          await this.prisma.notification.update({
-            where: { id: notif.id },
-            data: { payload: updatedPayload as Prisma.InputJsonValue },
-          });
-        }
-      }
+      await this.prisma.$executeRaw`
+        UPDATE "Notification" SET payload = payload - 'pin'
+        WHERE "createdAt" < ${notifCutoff} AND jsonb_typeof(payload) = 'object' AND payload ? 'pin'`;
     } catch (error) {
       this.logger.warn(`Maintenance sweep failed: ${String(error)}`);
     } finally {
