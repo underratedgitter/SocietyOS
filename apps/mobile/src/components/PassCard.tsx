@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Linking,
@@ -31,6 +31,13 @@ export interface PassCardProps {
 
 export function PassCard({ passData, timezone, onClose, meta }: PassCardProps) {
   const [copiedPin, setCopiedPin] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
   const { pass, credentials } = passData;
 
   // Extract clean guest name and vehicle
@@ -87,7 +94,8 @@ export function PassCard({ passData, timezone, onClose, meta }: PassCardProps) {
   const handleCopyPin = () => {
     if (credentials?.pin) {
       setCopiedPin(true);
-      setTimeout(() => setCopiedPin(false), 2500);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => setCopiedPin(false), 2500);
       Alert.alert('PIN Copied', `PIN: ${credentials.pin}\nShare this with your guest for gate entry.`);
     } else {
       Alert.alert(

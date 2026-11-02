@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -20,6 +20,9 @@ type NoticeCategoryFilter = 'ALL' | 'EMERGENCY' | 'MAINTENANCE' | 'EVENT' | 'GEN
 export function NoticesScreen() {
   const { selectedSociety, isOffline } = useAuth();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  // Read via ref so the loader isn't recreated (and re-fired) whenever the list length changes.
+  const announcementsCountRef = useRef(0);
+  announcementsCountRef.current = announcements.length;
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +50,7 @@ export function NoticesScreen() {
       void mobileStorage.saveCachedNotices(items);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
-        if (announcements.length === 0) {
+        if (announcementsCountRef.current === 0) {
           const cached = await mobileStorage.loadCachedNotices<Announcement[]>();
           if (cached && cached.length > 0) {
             setAnnouncements(cached);
@@ -63,7 +66,7 @@ export function NoticesScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [societyId, announcements.length]);
+  }, [societyId]);
 
   useEffect(() => {
     void loadNotices();

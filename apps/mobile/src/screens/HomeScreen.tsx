@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -34,6 +34,9 @@ export function HomeScreen({
 }: HomeScreenProps) {
   const { session, selectedFlat, selectedSociety, isOffline } = useAuth();
   const [passes, setPasses] = useState<PassView[]>([]);
+  // Read via ref so the loader isn't recreated (and re-fired) whenever the list length changes.
+  const passesCountRef = useRef(0);
+  passesCountRef.current = passes.length;
   const [accessPoints, setAccessPoints] = useState<AccessPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -86,7 +89,7 @@ export function HomeScreen({
     } catch (err) {
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
         // If passes already exist from local cache, keep showing them gracefully
-        if (passes.length === 0) {
+        if (passesCountRef.current === 0) {
           const cached = await mobileStorage.loadCachedPasses<PassView[]>();
           if (cached && cached.length > 0) {
             setPasses(cached);
@@ -102,7 +105,7 @@ export function HomeScreen({
       setLoading(false);
       setRefreshing(false);
     }
-  }, [societyId, flatId, passes.length]);
+  }, [societyId, flatId]);
 
   useEffect(() => {
     void loadData();
