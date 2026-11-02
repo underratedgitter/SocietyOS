@@ -12,14 +12,24 @@ import { BiometricIngestService } from './vendor/biometric-ingest.service';
 import { DeviceSyncService } from './vendor/device-sync.service';
 import { BiometricIdentityController, VendorDeviceApiController } from './vendor/vendor-device.controller';
 import { ZktecoAdmsController } from './vendor/zkteco/zkteco-adms.controller';
+import { VendorPushController } from './vendor/vendor-push.controller';
+import { PushDeviceGuard } from './vendor/push-device.guard';
 
 @Module({
   imports: [AuthModule],
-  controllers: [DevicesController, DeviceApiController, VendorDeviceApiController, BiometricIdentityController, ZktecoAdmsController],
+  controllers: [
+    DevicesController,
+    DeviceApiController,
+    VendorDeviceApiController,
+    VendorPushController,
+    BiometricIdentityController,
+    ZktecoAdmsController,
+  ],
   providers: [
     DevicesService,
     MqttService,
     DeviceAuthGuard,
+    PushDeviceGuard,
     GateAdapterFactory,
     BiometricsService,
     BiometricIdentityService,
