@@ -45,6 +45,7 @@ export interface AppEnv {
   stripeSecretKey?: string;
   stripePublishableKey?: string;
   stripeWebhookSecret?: string;
+  credentialRetentionDays: number;
 }
 
 const logger = new Logger('Config');
@@ -62,8 +63,9 @@ function str(name: string, fallback?: string): string {
 }
 
 function int(name: string, fallback: number): number {
-  const raw = process.env[name];
+  const raw = process.env[name]?.trim();
   if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) fail(`${name} must be a positive integer`);
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) fail(`${name} must be a positive integer`);
   return parsed;
@@ -198,6 +200,7 @@ export function loadEnv(): AppEnv {
     stripeSecretKey: process.env.STRIPE_SECRET_KEY?.trim() || undefined,
     stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY?.trim() || undefined,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET?.trim() || undefined,
+    credentialRetentionDays: int('CREDENTIAL_RETENTION_DAYS', 30),
   };
 
   if (!isProduction && jwtAccessSecret.includes('dev-only')) {
