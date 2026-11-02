@@ -1,0 +1,28 @@
+{
+  "_note": "ZKBioTime / ZKBioSecurity. Table iclock_transaction and columns emp_code, punch_time, verify_type are as named in the SocietyOS integration brief; re-check them against the installed version. Every VERIFY_ON_SITE value must be confirmed on site before the connector will start.",
+  "cloud": { "baseUrl": "https://api.example-society.in", "requestTimeoutSec": 15 },
+  "stateDir": "./state",
+  "sources": [
+    {
+      "name": "zkbiotime",
+      "type": "sql",
+      "deviceTokenEnv": "ZK_DEVICE_TOKEN",
+      "dialect": "VERIFY_ON_SITE",
+      "connectionStringEnv": "ZK_DB_URL",
+      "query": "SELECT TOP (@limit) emp_code, punch_time, verify_type FROM iclock_transaction WHERE punch_time > @cursor ORDER BY punch_time",
+      "cursorColumn": "punch_time",
+      "cursorType": "datetime",
+      "pollIntervalSec": 10,
+      "batchSize": 200,
+      "timezone": "Asia/Kolkata",
+      "columns": {
+        "deviceUserId": "emp_code",
+        "occurredAt": "punch_time",
+        "method": "verify_type",
+        "matched": true
+      },
+      "methodMap": { "_verifyTypeCodes": "VERIFY_ON_SITE" },
+      "defaultMethod": "UNKNOWN"
+    }
+  ]
+}

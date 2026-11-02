@@ -1,0 +1,28 @@
+{
+  "_note": "BioStar 2 read straight from its database. The event-log table is believed to be t_lg but that and every column are VERIFY_ON_SITE: inspect the schema with the read-only login first. Prefer examples/biostar2-api.json, which uses the documented REST API.",
+  "cloud": { "baseUrl": "https://api.example-society.in", "requestTimeoutSec": 15 },
+  "stateDir": "./state",
+  "sources": [
+    {
+      "name": "biostar2-db",
+      "type": "sql",
+      "deviceTokenEnv": "BIOSTAR_DEVICE_TOKEN",
+      "dialect": "VERIFY_ON_SITE",
+      "connectionStringEnv": "BIOSTAR_DB_URL",
+      "query": "VERIFY_ON_SITE",
+      "cursorColumn": "VERIFY_ON_SITE",
+      "cursorType": "VERIFY_ON_SITE",
+      "pollIntervalSec": 10,
+      "batchSize": 200,
+      "timezone": "VERIFY_ON_SITE",
+      "columns": {
+        "deviceUserId": "VERIFY_ON_SITE",
+        "occurredAt": "VERIFY_ON_SITE",
+        "method": "VERIFY_ON_SITE",
+        "matched": "VERIFY_ON_SITE"
+      },
+      "methodMap": { "_eventCodes": "VERIFY_ON_SITE" },
+      "defaultMethod": "UNKNOWN"
+    }
+  ]
+}

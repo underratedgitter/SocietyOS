@@ -1,0 +1,28 @@
+{
+  "_note": "eSSL eTimeTrackLite. Columns UserId, LogDate, VerificationMode are as named in the SocietyOS integration brief. The log table is monthly (DeviceLogs_<month>_<year>); the exact naming is VERIFY_ON_SITE. Ask the site DBA to create the read-only view vw_SocietyOS_DeviceLogs (UNION ALL of the current and previous month tables, recreated each month, see README) and point the query at it.",
+  "cloud": { "baseUrl": "https://api.example-society.in", "requestTimeoutSec": 15 },
+  "stateDir": "./state",
+  "sources": [
+    {
+      "name": "etimetracklite",
+      "type": "sql",
+      "deviceTokenEnv": "ESSL_DEVICE_TOKEN",
+      "dialect": "mssql",
+      "connectionStringEnv": "ESSL_DB_URL",
+      "query": "SELECT TOP (@limit) UserId, LogDate, VerificationMode FROM vw_SocietyOS_DeviceLogs WHERE LogDate > @cursor ORDER BY LogDate",
+      "cursorColumn": "LogDate",
+      "cursorType": "datetime",
+      "pollIntervalSec": 10,
+      "batchSize": 200,
+      "timezone": "Asia/Kolkata",
+      "columns": {
+        "deviceUserId": "UserId",
+        "occurredAt": "LogDate",
+        "method": "VerificationMode",
+        "matched": true
+      },
+      "methodMap": { "_verificationModeCodes": "VERIFY_ON_SITE" },
+      "defaultMethod": "UNKNOWN"
+    }
+  ]
+}
