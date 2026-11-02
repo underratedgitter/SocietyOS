@@ -1,4 +1,8 @@
 import { ZktecoAdmsController } from '../src/devices/vendor/zkteco/zkteco-adms.controller';
+import { DevicesService } from '../src/devices/devices.service';
+import { AuthzService } from '../src/common/authz.service';
+import { AuditService } from '../src/common/audit.service';
+import { PrismaService } from '../src/common/prisma.service';
 import {
   buildHandshake,
   deviceLocalTimeToUtc,
@@ -110,7 +114,7 @@ describe('ZktecoAdmsController', () => {
     societyId: 'soc-1',
     protocol: 'ZKTECO_ADMS',
     status: 'ACTIVE',
-    pushAllowedIps: [] as string[],
+    pushAllowedIps: ['10.0.0.5'] as string[],
     society: { timezone: 'Asia/Kolkata' },
   };
 
@@ -184,6 +188,11 @@ describe('ZktecoAdmsController', () => {
       expect((await call((r, q) => controller.getRequest('SN1', q, r))).statusCode).toBe(401);
     });
 
+    it('fails closed when no source IP is pinned, since ADMS carries no secret', async () => {
+      prisma.device.findUnique.mockResolvedValue({ ...DEVICE, pushAllowedIps: [] });
+      expect((await call((r, q) => controller.getRequest('SN1', q, r))).statusCode).toBe(401);
+    });
+
     it('rejects a disabled device', async () => {
       prisma.device.findUnique.mockResolvedValue({ ...DEVICE, status: 'DISABLED' });
       expect((await call((r, q) => controller.getRequest('SN1', q, r))).statusCode).toBe(401);
@@ -199,7 +208,7 @@ describe('ZktecoAdmsController', () => {
       rateLimit.hit.mockResolvedValue({ allowed: false, count: 121, limit: 120 });
       const res = await call((r, q) => controller.getRequest('SN1', q, r));
       expect(res.statusCode).toBe(429);
-      expect(rateLimit.hit).toHaveBeenCalledWith('iclock:SN1', 120, 60);
+      expect(rateLimit.hit).toHaveBeenCalledWith('iclock:SN1:10.0.0.5', 120, 60);
       expect(prisma.device.findUnique).not.toHaveBeenCalled();
     });
 
@@ -275,5 +284,28 @@ describe('ZktecoAdmsController', () => {
       expect(sync.acknowledge).toHaveBeenNthCalledWith(1, 'dev-1', 'c1', true, undefined);
       expect(sync.acknowledge).toHaveBeenNthCalledWith(2, 'dev-1', 'c2', false, 'Device returned -3');
     });
+  });
+});
+
+describe('ZKTeco ADMS provisioning', () => {
+  it('refuses to provision an ADMS terminal without a pinned source IP', async () => {
+    const prisma = { device: { findUnique: jest.fn() } };
+    const authz = { society: jest.fn().mockResolvedValue(undefined) };
+    const service = new DevicesService(
+      prisma as unknown as PrismaService,
+      authz as unknown as AuthzService,
+      { record: jest.fn() } as unknown as AuditService,
+    );
+    const caller = { sub: 'admin', email: 'a@x.io', name: 'A', isPlatformAdmin: false, mustChangePassword: false };
+
+    await expect(
+      service.provisionDevice(caller, 'SOCIETY_ADMIN', 'soc', {
+        name: 'Gate ZK',
+        deviceUid: 'SN1',
+        accessPointIds: ['ap'],
+        protocol: 'ZKTECO_ADMS',
+      }),
+    ).rejects.toMatchObject({ code: 'PUSH_ALLOWED_IPS_REQUIRED' });
+    expect(prisma.device.findUnique).not.toHaveBeenCalled();
   });
 });

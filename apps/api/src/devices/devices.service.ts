@@ -65,6 +65,12 @@ export class DevicesService {
 
   async provisionDevice(caller: JwtUser, actorRole: string, societyId: string, dto: ProvisionDeviceDto) {
     await this.authz.society(caller.sub, societyId, ['SOCIETY_ADMIN']);
+    if (dto.protocol === 'ZKTECO_ADMS' && !dto.pushAllowedIps?.length) {
+      throw AppException.unprocessable(
+        'PUSH_ALLOWED_IPS_REQUIRED',
+        'ZKTeco ADMS cannot authenticate requests; set the site\'s static public IP in pushAllowedIps',
+      );
+    }
     const deviceUid = dto.deviceUid.trim();
     const existing = await this.prisma.device.findUnique({ where: { deviceUid } });
     if (existing) throw AppException.conflict('DEVICE_UID_TAKEN', 'This device UID is already provisioned');

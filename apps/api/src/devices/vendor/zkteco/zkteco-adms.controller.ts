@@ -133,7 +133,8 @@ export class ZktecoAdmsController {
     try {
       const serial = typeof sn === 'string' && SERIAL_PATTERN.test(sn) ? sn : null;
       if (!serial) throw new AdmsRejection(401, 'ERROR: unknown device');
-      const hit = await this.rateLimit.hit(`iclock:${serial}`, RATE_LIMIT_PER_MINUTE, 60);
+      // Keyed on serial AND source IP: a spoofer elsewhere cannot exhaust a real terminal's bucket.
+      const hit = await this.rateLimit.hit(`iclock:${serial}:${req.ip ?? 'unknown'}`, RATE_LIMIT_PER_MINUTE, 60);
       if (!hit.allowed) throw new AdmsRejection(429, 'ERROR: rate limited');
       const device = await this.authenticate(serial, req.ip);
       res.status(200).send(await handler(device, serial));
@@ -164,7 +165,9 @@ export class ZktecoAdmsController {
     if (!device || device.protocol !== 'ZKTECO_ADMS' || device.status !== 'ACTIVE') {
       throw new AdmsRejection(401, 'ERROR: unknown device');
     }
-    if (device.pushAllowedIps.length > 0 && (!ip || !device.pushAllowedIps.includes(normalizeIp(ip)))) {
+    // ADMS carries no secret, so the source IP is the only proof of identity: fail closed when
+    // none is pinned rather than accept anyone who knows (or guesses) a serial number.
+    if (device.pushAllowedIps.length === 0 || !ip || !device.pushAllowedIps.includes(normalizeIp(ip))) {
       this.logger.warn(`Device ${device.id}: push from non-allowlisted IP rejected`);
       throw new AdmsRejection(401, 'ERROR: unknown device');
     }
