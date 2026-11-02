@@ -285,6 +285,10 @@ export class BiometricsService implements OnModuleInit {
 
     // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
     const deviceIdBio = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
+    let gateCommand:
+      | { status: 'ISSUED'; id: string }
+      | { status: 'FAILED'; error: string };
+
     if (deviceIdBio) {
       const commandIdBio = crypto.randomUUID();
       const nowBio = new Date();
@@ -303,9 +307,17 @@ export class BiometricsService implements OnModuleInit {
           },
         });
         await this.mqtt.publishCommand(commandIdBio);
+        gateCommand = { status: 'ISSUED', id: commandIdBio };
       } catch (cmdErr: unknown) {
-        this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${String(cmdErr)}`);
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${errorMsg}`);
+        gateCommand = { status: 'FAILED', error: errorMsg };
       }
+    } else {
+      gateCommand = {
+        status: 'FAILED',
+        error: 'No active device configured for access point',
+      };
     }
 
     const accessEvent = await this.prisma.accessEvent.create({
@@ -321,6 +333,7 @@ export class BiometricsService implements OnModuleInit {
           flatNumber: resident.flatMemberships[0].flat.flatNumber,
           type: dto.type,
           algorithm: enrollment.algorithm,
+          gateCommand,
         },
       },
     });
@@ -334,6 +347,7 @@ export class BiometricsService implements OnModuleInit {
         name: resident.name,
         flatNumber: resident.flatMemberships[0].flat.flatNumber,
       },
+      gateCommand,
     };
   }
 
@@ -358,9 +372,6 @@ export class BiometricsService implements OnModuleInit {
       accessPoint.name,
       accessPoint.type,
     );
-
-    // Immediately trigger emergency override on the gate controller
-    await adapter.emergencyOverride(reason);
 
     // Actuate real hardware on Emergency: insert GateCommand into PostgreSQL and publish via MQTT
     const deviceIdsEmerg = Array.from(
@@ -393,18 +404,59 @@ export class BiometricsService implements OnModuleInit {
         await this.mqtt.publishCommand(commandIdEmerg);
         deviceResults.push({ deviceId: devId, commandId: commandIdEmerg, status: 'ISSUED' });
       } catch (cmdErr: unknown) {
-        this.logger.warn(`Emergency GateCommand insertion/publish failed for device ${devId}: ${String(cmdErr)}`);
-        deviceResults.push({ deviceId: devId, status: 'FAILED', error: String(cmdErr) });
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Emergency GateCommand insertion/publish failed for device ${devId}: ${errorMsg}`);
+        deviceResults.push({ deviceId: devId, status: 'FAILED', error: errorMsg });
       }
     }
 
     const successfulDispatches = deviceResults.filter((r) => r.status === 'ISSUED');
     if (deviceIdsEmerg.length === 0 || successfulDispatches.length === 0) {
+      let failedAccessEventId: string | undefined;
+      try {
+        const failedAccessEvent = await this.prisma.accessEvent.create({
+          data: {
+            societyId,
+            accessPointId,
+            decision: 'DENIED',
+            reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+            source: 'MANUAL_OVERRIDE',
+            meta: {
+              actorUserId,
+              actorRole,
+              reason,
+              deviceResults,
+            },
+          },
+        });
+        failedAccessEventId = failedAccessEvent?.id;
+      } catch (evtErr: unknown) {
+        this.logger.error(`Failed to record accessEvent on emergency dispatch failure: ${String(evtErr)}`);
+      }
+
+      await this.audit.record({
+        societyId,
+        actorUserId,
+        actorRole,
+        action: 'GATE_EMERGENCY_OVERRIDE',
+        entityType: 'AccessPoint',
+        entityId: accessPointId,
+        meta: {
+          reason,
+          ...(failedAccessEventId ? { accessEventId: failedAccessEventId } : {}),
+          status: 'FAILED',
+          deviceResults,
+        },
+      });
+
       throw AppException.badGateway(
         'COMMAND_DISPATCH_FAILED',
         'No active gate controller device received the emergency override command',
       );
     }
+
+    // Trigger emergency override on the gate controller only after hardware dispatch succeeds
+    await adapter.emergencyOverride(reason);
 
     const accessEvent = await this.prisma.accessEvent.create({
       data: {
@@ -465,12 +517,6 @@ export class BiometricsService implements OnModuleInit {
       accessPoint.type,
     );
 
-    // Clear emergency state on physical controller and close gate
-    if (typeof (adapter as any).clearEmergency === 'function') {
-      (adapter as any).clearEmergency();
-    }
-    await adapter.close();
-
     // Actuate real hardware on Reset: insert GateCommand into PostgreSQL and publish via MQTT
     const deviceIdsReset = Array.from(
       new Set(
@@ -502,18 +548,60 @@ export class BiometricsService implements OnModuleInit {
         await this.mqtt.publishCommand(commandIdReset);
         deviceResultsReset.push({ deviceId: devId, commandId: commandIdReset, status: 'ISSUED' });
       } catch (cmdErr: unknown) {
-        this.logger.warn(`Reset Emergency GateCommand insertion/publish failed for device ${devId}: ${String(cmdErr)}`);
-        deviceResultsReset.push({ deviceId: devId, status: 'FAILED', error: String(cmdErr) });
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Reset Emergency GateCommand insertion/publish failed for device ${devId}: ${errorMsg}`);
+        deviceResultsReset.push({ deviceId: devId, status: 'FAILED', error: errorMsg });
       }
     }
 
     const successfulResets = deviceResultsReset.filter((r) => r.status === 'ISSUED');
     if (deviceIdsReset.length === 0 || successfulResets.length === 0) {
+      let failedAccessEventId: string | undefined;
+      try {
+        const failedAccessEvent = await this.prisma.accessEvent.create({
+          data: {
+            societyId,
+            accessPointId,
+            decision: 'DENIED',
+            reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+            source: 'MANUAL_OVERRIDE',
+            meta: {
+              actorUserId,
+              actorRole,
+              reason: reason || 'Emergency hold released. Normal access restored.',
+              deviceResults: deviceResultsReset,
+            },
+          },
+        });
+        failedAccessEventId = failedAccessEvent?.id;
+      } catch (evtErr: unknown) {
+        this.logger.error(`Failed to record accessEvent on emergency reset dispatch failure: ${String(evtErr)}`);
+      }
+
+      await this.audit.record({
+        societyId,
+        actorUserId,
+        actorRole,
+        action: 'GATE_EMERGENCY_RESET',
+        entityType: 'AccessPoint',
+        entityId: accessPointId,
+        meta: {
+          reason: reason || 'Emergency hold released. Normal access restored.',
+          ...(failedAccessEventId ? { accessEventId: failedAccessEventId } : {}),
+          status: 'FAILED',
+          deviceResults: deviceResultsReset,
+        },
+      });
+
       throw AppException.badGateway(
         'COMMAND_DISPATCH_FAILED',
         'No active gate controller device received the emergency reset command',
       );
     }
+
+    // Clear emergency state on physical controller and close gate only after hardware dispatch succeeds
+    adapter.clearEmergency?.();
+    await adapter.close();
 
     const accessEvent = await this.prisma.accessEvent.create({
       data: {
