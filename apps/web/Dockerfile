@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22-alpine AS base
+# Builder and runtime share one pinned image so native modules match at
+# runtime. Bump the patch tag deliberately.
+ARG NODE_IMAGE=node:22.23.4-alpine3.24
+
+FROM ${NODE_IMAGE} AS base
 RUN corepack enable && corepack prepare pnpm@12.15.0 --activate
 WORKDIR /app
 
@@ -17,7 +21,7 @@ ENV API_INTERNAL_URL=$API_INTERNAL_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm --filter @societyos/web build
 
-FROM node:22-alpine AS runner
+FROM ${NODE_IMAGE} AS runner
 RUN addgroup -S nextjs && adduser -S nextjs -G nextjs
 WORKDIR /app
 ENV NODE_ENV=production \
