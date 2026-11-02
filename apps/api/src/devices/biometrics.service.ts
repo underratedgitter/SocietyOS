@@ -285,6 +285,10 @@ export class BiometricsService implements OnModuleInit {
 
     // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
     const deviceIdBio = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
+    let gateCommand:
+      | { status: 'ISSUED'; id: string }
+      | { status: 'FAILED'; error: string };
+
     if (deviceIdBio) {
       const commandIdBio = crypto.randomUUID();
       const nowBio = new Date();
@@ -303,9 +307,17 @@ export class BiometricsService implements OnModuleInit {
           },
         });
         await this.mqtt.publishCommand(commandIdBio);
+        gateCommand = { status: 'ISSUED', id: commandIdBio };
       } catch (cmdErr: unknown) {
-        this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${String(cmdErr)}`);
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${errorMsg}`);
+        gateCommand = { status: 'FAILED', error: errorMsg };
       }
+    } else {
+      gateCommand = {
+        status: 'FAILED',
+        error: 'No active device configured for access point',
+      };
     }
 
     const accessEvent = await this.prisma.accessEvent.create({
@@ -321,6 +333,7 @@ export class BiometricsService implements OnModuleInit {
           flatNumber: resident.flatMemberships[0].flat.flatNumber,
           type: dto.type,
           algorithm: enrollment.algorithm,
+          gateCommand,
         },
       },
     });
@@ -334,6 +347,7 @@ export class BiometricsService implements OnModuleInit {
         name: resident.name,
         flatNumber: resident.flatMemberships[0].flat.flatNumber,
       },
+      gateCommand,
     };
   }
 

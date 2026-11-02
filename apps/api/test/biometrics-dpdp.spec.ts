@@ -125,6 +125,10 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     expect(verifyResult.decision).toBe('AUTHORIZED');
     expect(verifyResult.reasonCode).toBe('VALID_RESIDENT_BIOMETRIC');
     expect((verifyResult as any).resident.name).toBe('Aarav Patel');
+    expect('gateCommand' in verifyResult && verifyResult.gateCommand).toEqual({
+      status: 'ISSUED',
+      id: expect.any(String),
+    });
 
     const adapter = adapterFactory.get('ap-gate-1');
     expect(await adapter?.getState()).toBe('OPEN');
@@ -138,6 +142,153 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       }),
     );
     expect(mockMqtt.publishCommand).toHaveBeenCalled();
+  });
+
+  it('returns gateCommand status FAILED with error when GateCommand insertion fails during biometric verify', async () => {
+    mockPrisma.societyMembership.findUnique.mockResolvedValue({
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+    });
+    await biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+      userId: 'user-1',
+      type: 'FINGERPRINT',
+      templateHash: 'finger_hash_hardware_fail_111',
+      algorithm: 'ZKFINGER_V10',
+    });
+
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Tower A Entrance',
+      type: 'DOOR_LOCK',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+
+    mockPrisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      name: 'Aarav Patel',
+      flatMemberships: [
+        {
+          flat: { flatNumber: 'A-101' },
+          endedAt: null,
+        },
+      ],
+    });
+
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('PostgreSQL command write failed'));
+
+    const verifyResult = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-1',
+      type: 'FINGERPRINT',
+      templateHash: 'finger_hash_hardware_fail_111',
+    });
+
+    expect(verifyResult.decision).toBe('AUTHORIZED');
+    expect(verifyResult.reasonCode).toBe('VALID_RESIDENT_BIOMETRIC');
+    expect('gateCommand' in verifyResult && verifyResult.gateCommand).toEqual({
+      status: 'FAILED',
+      error: 'PostgreSQL command write failed',
+    });
+    expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
+  });
+
+  it('returns gateCommand status FAILED with error when MQTT publish fails during biometric verify', async () => {
+    mockPrisma.societyMembership.findUnique.mockResolvedValue({
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+    });
+    await biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+      userId: 'user-1',
+      type: 'FACE',
+      templateHash: 'face_hash_mqtt_fail_222',
+      algorithm: 'SUPREMA_FACE_V3',
+    });
+
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Tower A Entrance',
+      type: 'DOOR_LOCK',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+
+    mockPrisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      name: 'Aarav Patel',
+      flatMemberships: [
+        {
+          flat: { flatNumber: 'A-101' },
+          endedAt: null,
+        },
+      ],
+    });
+
+    mockMqtt.publishCommand.mockRejectedValueOnce(new Error('MQTT broker connection refused'));
+
+    const verifyResult = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-1',
+      type: 'FACE',
+      templateHash: 'face_hash_mqtt_fail_222',
+    });
+
+    expect(verifyResult.decision).toBe('AUTHORIZED');
+    expect(verifyResult.reasonCode).toBe('VALID_RESIDENT_BIOMETRIC');
+    expect('gateCommand' in verifyResult && verifyResult.gateCommand).toEqual({
+      status: 'FAILED',
+      error: 'MQTT broker connection refused',
+    });
+  });
+
+  it('returns gateCommand status FAILED when access point has no devices assigned during biometric verify', async () => {
+    mockPrisma.societyMembership.findUnique.mockResolvedValue({
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+    });
+    await biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+      userId: 'user-1',
+      type: 'FINGERPRINT',
+      templateHash: 'finger_hash_nodevice_333',
+      algorithm: 'ZKFINGER_V10',
+    });
+
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-standalone',
+      name: 'Gate Without Hardware Controller',
+      type: 'DOOR_LOCK',
+      societyId: 'soc-1',
+      devices: [],
+    });
+
+    mockPrisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      name: 'Aarav Patel',
+      flatMemberships: [
+        {
+          flat: { flatNumber: 'A-101' },
+          endedAt: null,
+        },
+      ],
+    });
+
+    const verifyResult = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-standalone',
+      type: 'FINGERPRINT',
+      templateHash: 'finger_hash_nodevice_333',
+    });
+
+    expect(verifyResult.decision).toBe('AUTHORIZED');
+    expect(verifyResult.reasonCode).toBe('VALID_RESIDENT_BIOMETRIC');
+    expect('gateCommand' in verifyResult && verifyResult.gateCommand).toEqual({
+      status: 'FAILED',
+      error: 'No active device configured for access point',
+    });
+    expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
   });
 
   it('denies unknown biometric templates with audit record', async () => {
