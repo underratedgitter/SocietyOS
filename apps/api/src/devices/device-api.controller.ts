@@ -155,20 +155,49 @@ export class DeviceApiController {
       });
       if (!link) throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point is not assigned to this device');
     }
-    const event = await this.prisma.deviceEvent.create({
-      data: {
-        deviceId: req.device!.id,
-        accessPointId: dto.accessPointId,
-        type: dto.type,
-        sequence: dto.sequence,
-        payload: dto.payload as never,
-      },
-    });
-    await this.prisma.device.update({
-      where: { id: req.device!.id },
-      data: { lastSeenAt: new Date() },
-    });
-    return { ok: true, eventId: event.id };
+    if (dto.sequence != null && typeof this.prisma.deviceEvent.findFirst === 'function') {
+      const existing = await this.prisma.deviceEvent.findFirst({
+        where: { deviceId: req.device!.id, sequence: dto.sequence },
+        select: { id: true },
+      });
+      if (existing) {
+        await this.prisma.device.update({
+          where: { id: req.device!.id },
+          data: { lastSeenAt: new Date() },
+        }).catch(() => undefined);
+        return { ok: true, eventId: existing.id, duplicate: true };
+      }
+    }
+
+    try {
+      const event = await this.prisma.deviceEvent.create({
+        data: {
+          deviceId: req.device!.id,
+          accessPointId: dto.accessPointId,
+          type: dto.type,
+          sequence: dto.sequence,
+          payload: dto.payload as never,
+        },
+      });
+      await this.prisma.device.update({
+        where: { id: req.device!.id },
+        data: { lastSeenAt: new Date() },
+      });
+      return { ok: true, eventId: event.id };
+    } catch (err: any) {
+      if (
+        (err?.code === 'P2002' || String(err).includes('sequence')) &&
+        dto.sequence != null &&
+        typeof this.prisma.deviceEvent.findFirst === 'function'
+      ) {
+        const existing = await this.prisma.deviceEvent.findFirst({
+          where: { deviceId: req.device!.id, sequence: dto.sequence },
+          select: { id: true },
+        });
+        return { ok: true, eventId: existing?.id, duplicate: true };
+      }
+      throw err;
+    }
   }
 
   @Post('sync-offline')
@@ -185,7 +214,11 @@ export class DeviceApiController {
 
     const apIds = Array.from(new Set(dto.events.map((e) => e.accessPointId)));
     const validAps = await this.prisma.accessPoint.findMany({
-      where: { id: { in: apIds }, societyId },
+      where: {
+        id: { in: apIds },
+        societyId,
+        devices: { some: { deviceId } },
+      },
       select: { id: true },
     });
     const validApSet = new Set(validAps.map((ap) => ap.id));
@@ -193,13 +226,43 @@ export class DeviceApiController {
     let syncedCount = 0;
     let duplicateCount = 0;
     const now = new Date();
+    const seenSequencesInBatch = new Set<number>();
 
     await this.prisma.$transaction(async (tx) => {
+      // Serialize offline event ingestion for this device using advisory lock
+      if (typeof (tx as any).$executeRawUnsafe === 'function') {
+        await (tx as any)
+          .$executeRawUnsafe(
+            `SELECT pg_advisory_xact_lock(hashtext('device-sync'), hashtext($1))`,
+            deviceId,
+          )
+          .catch(() => undefined);
+      }
+
+      const batchSeqs = dto.events.map((e) => e.sequence).filter((s): s is number => s != null);
+      const existingInDb =
+        batchSeqs.length > 0 && typeof tx.deviceEvent.findMany === 'function'
+          ? await tx.deviceEvent.findMany({
+              where: { deviceId, sequence: { in: batchSeqs } },
+              select: { sequence: true },
+            })
+          : [];
+      const dbSeqSet = new Set(existingInDb.map((e) => e.sequence));
+
       for (const ev of dto.events) {
         if (!validApSet.has(ev.accessPointId)) continue;
 
-        // Replay / duplicate prevention by sequence
-        if (typeof tx.deviceEvent.findFirst === 'function') {
+        // Replay / duplicate prevention by sequence within batch and database
+        if (ev.sequence != null) {
+          if (seenSequencesInBatch.has(ev.sequence) || dbSeqSet.has(ev.sequence)) {
+            duplicateCount++;
+            continue;
+          }
+          seenSequencesInBatch.add(ev.sequence);
+        }
+
+        // Additional sequence check if sequence exists
+        if (ev.sequence != null && typeof tx.deviceEvent.findFirst === 'function') {
           const existing = await tx.deviceEvent.findFirst({
             where: {
               deviceId,
@@ -231,16 +294,62 @@ export class DeviceApiController {
           }
         }
 
+        // Atomically reserve the device event sequence BEFORE creating access events or updating pass usage
+        if (typeof (tx as any).$executeRawUnsafe === 'function') {
+          await (tx as any).$executeRawUnsafe('SAVEPOINT dev_ev_ins').catch(() => undefined);
+        }
+        try {
+          await tx.deviceEvent.create({
+            data: {
+              deviceId,
+              accessPointId: ev.accessPointId,
+              type: 'ACK',
+              sequence: ev.sequence,
+              payload: {
+                offlineSequence: ev.sequence,
+                decision: ev.decision,
+                reasonCode: ev.reasonCode,
+                source: 'OFFLINE_CONTROLLER_SYNC',
+                clockDriftDetected,
+              } as never,
+            },
+          });
+          if (typeof (tx as any).$executeRawUnsafe === 'function') {
+            await (tx as any).$executeRawUnsafe('RELEASE SAVEPOINT dev_ev_ins').catch(() => undefined);
+          }
+        } catch (err: any) {
+          if (typeof (tx as any).$executeRawUnsafe === 'function') {
+            await (tx as any).$executeRawUnsafe('ROLLBACK TO SAVEPOINT dev_ev_ins').catch(() => undefined);
+          }
+          if (err?.code === 'P2002' || String(err).includes('sequence') || String(err).includes('unique')) {
+            duplicateCount++;
+            continue;
+          }
+          throw err;
+        }
+
         const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         let passId = ev.passId;
         if (!passId && ev.credentialHash && typeof (tx as any).visitorPassCredential?.findFirst === 'function') {
           const cred = await (tx as any).visitorPassCredential.findFirst({
-            where: { credentialHash: ev.credentialHash },
+            where: { credentialHash: ev.credentialHash, pass: { societyId } },
             select: { passId: true },
           });
           if (cred) passId = cred.passId;
         }
-        const validPassId = passId && UUID_REGEX.test(passId) ? passId : undefined;
+        const candidatePassId = passId && UUID_REGEX.test(passId) ? passId : undefined;
+
+        // passId is device-supplied: only accept passes owned by the device's own society,
+        // otherwise a device could consume or exhaust another tenant's passes.
+        let ownedPass: { id: string; usedCount: number; maxUses: number; status: string } | null = null;
+        if (candidatePassId && typeof (tx as any).visitorPass?.findUnique === 'function') {
+          const pass = await (tx as any).visitorPass.findUnique({
+            where: { id: candidatePassId },
+            select: { id: true, societyId: true, usedCount: true, maxUses: true, status: true },
+          });
+          if (pass && pass.societyId === societyId) ownedPass = pass;
+        }
+        const validPassId = ownedPass?.id;
 
         await tx.accessEvent.create({
           data: {
@@ -264,42 +373,19 @@ export class DeviceApiController {
           },
         });
 
-        if (ev.decision === 'AUTHORIZED' && validPassId) {
-          if (typeof (tx as any).visitorPass?.findUnique === 'function' && typeof (tx as any).visitorPass?.update === 'function') {
-            const pass = await (tx as any).visitorPass.findUnique({
-              where: { id: validPassId },
-              select: { id: true, usedCount: true, maxUses: true, status: true },
-            });
-            if (pass) {
-              const nextCount = pass.usedCount + 1;
-              await (tx as any).visitorPass.update({
-                where: { id: pass.id },
-                data: {
-                  usedCount: nextCount,
-                  ...(nextCount >= pass.maxUses && pass.status === 'ACTIVE'
-                    ? { status: 'EXHAUSTED' }
-                    : {}),
-                },
-              });
-            }
-          }
+        if (ev.decision === 'AUTHORIZED' && ownedPass && typeof (tx as any).visitorPass?.update === 'function') {
+          const nextCount = ownedPass.usedCount + 1;
+          await (tx as any).visitorPass.update({
+            where: { id: ownedPass.id },
+            data: {
+              usedCount: nextCount,
+              ...(nextCount >= ownedPass.maxUses && ownedPass.status === 'ACTIVE'
+                ? { status: 'EXHAUSTED' }
+                : {}),
+            },
+          });
         }
 
-        await tx.deviceEvent.create({
-          data: {
-            deviceId,
-            accessPointId: ev.accessPointId,
-            type: 'ACK',
-            sequence: ev.sequence,
-            payload: {
-              offlineSequence: ev.sequence,
-              decision: ev.decision,
-              reasonCode: ev.reasonCode,
-              source: 'OFFLINE_CONTROLLER_SYNC',
-              clockDriftDetected,
-            } as never,
-          },
-        });
         syncedCount++;
       }
 
@@ -385,6 +471,28 @@ export class DeviceApiController {
       usedCount: 0,
     }));
 
+    const revokedPasses = await this.prisma.visitorPass.findMany({
+      where: {
+        societyId,
+        OR: [{ status: 'REVOKED' }, { revokedAt: { not: null } }],
+      },
+      include: {
+        credentials: { select: { credentialHash: true } },
+      },
+    }).catch(() => []);
+    const revokedPassHashes = (revokedPasses || []).flatMap((p) => p.credentials.map((c) => c.credentialHash));
+
+    const endedResidents = await this.prisma.residentFlatMembership.findMany({
+      where: {
+        flat: { building: { societyId } },
+        endedAt: { not: null },
+      },
+      select: { userId: true },
+    }).catch(() => []);
+    const endedResidentHashes = (endedResidents || []).map((r) => `BIO_RESIDENT_${r.userId}`);
+
+    const allRevokedHashes = [...revokedPassHashes, ...endedResidentHashes];
+
     return {
       ok: true,
       serverTime: now.toISOString(),
@@ -397,6 +505,7 @@ export class DeviceApiController {
         syncIntervalSeconds: 300,
       },
       credentials: [...residentCredentials, ...credentialsList],
+      revokedHashes: Array.from(new Set(allRevokedHashes)),
     };
   }
 }

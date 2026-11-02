@@ -439,6 +439,7 @@ model DeviceEvent {
 
   device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
+  @@unique([deviceId, sequence])
   @@index([deviceId, occurredAt])
 }
 

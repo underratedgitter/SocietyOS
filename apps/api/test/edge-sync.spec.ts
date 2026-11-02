@@ -133,6 +133,31 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       const res = await controller.edgeSync(mockDeviceReq);
       expect(res.credentials.length).toBe(0);
     });
+
+    it('returns revoked pass credential hashes and ended resident hashes in revokedHashes', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany
+        .mockResolvedValueOnce([]) // active passes
+        .mockResolvedValueOnce([  // revoked passes
+          {
+            id: 'pass-revoked-1',
+            credentials: [{ credentialHash: 'hash-revoked-pin' }],
+          },
+        ]);
+
+      mockPrisma.residentFlatMembership.findMany
+        .mockResolvedValueOnce([]) // active residents
+        .mockResolvedValueOnce([{ userId: 'ex-resident-99' }]); // ended residents
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+      expect(res.revokedHashes).toContain('hash-revoked-pin');
+      expect(res.revokedHashes).toContain('BIO_RESIDENT_ex-resident-99');
+    });
   });
 
   describe('POST /device-api/sync-offline', () => {
@@ -283,7 +308,7 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
       mockPrisma.visitorPass = {
         ...mockPrisma.visitorPass,
-        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
+        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, societyId: SOCIETY_ID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
         update: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 2 }),
       };
 
@@ -314,5 +339,162 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         data: expect.objectContaining({ usedCount: 2 }),
       });
     });
+
+    it('ignores passIds owned by another society and never mutates them', async () => {
+      const FOREIGN_PASS_UUID = 'e0000000-0000-4000-a000-000000000002';
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.visitorPass = {
+        ...mockPrisma.visitorPass,
+        findUnique: jest.fn().mockResolvedValue({
+          id: FOREIGN_PASS_UUID,
+          societyId: 'soc-other-tenant',
+          usedCount: 0,
+          maxUses: 1,
+          status: 'ACTIVE',
+        }),
+        update: jest.fn(),
+      };
+
+      const events: any[] = [
+        {
+          sequence: 102,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+          passId: FOREIGN_PASS_UUID,
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.syncedCount).toBe(1);
+      expect(mockPrisma.visitorPass.update).not.toHaveBeenCalled();
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ passId: undefined, societyId: SOCIETY_ID }),
+        }),
+      );
+    });
+
+    it('verifies device-to-access-point assignment in query to prevent forging events for unassigned gates (Issue 4)', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([]); // Device is not assigned to this AP
+
+      const events: any[] = [
+        {
+          sequence: 50,
+          accessPointId: 'unassigned-gate',
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'FORGED_GATE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.syncedCount).toBe(0);
+      expect(mockPrisma.accessPoint.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            devices: { some: { deviceId: DEVICE_ID } },
+          }),
+        }),
+      );
+    });
+
+    it('handles unique constraint violation gracefully on concurrent sequence replay (Issue 8)', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.deviceEvent.findFirst.mockResolvedValue(null); // Passed initial check
+      mockPrisma.deviceEvent.create.mockRejectedValueOnce({
+        code: 'P2002',
+        message: 'Unique constraint failed on DeviceEvent(deviceId, sequence)',
+      });
+
+      const events: any[] = [
+        {
+          sequence: 99,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(res.syncedCount).toBe(0);
+      expect(res.duplicateCount).toBe(1);
+      expect(mockPrisma.accessEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects duplicate sequences within the same batch payload to prevent repeated pass consumption', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.deviceEvent.findFirst.mockResolvedValue(null);
+
+      const events: any[] = [
+        {
+          sequence: 15,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+        {
+          sequence: 15,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(res.syncedCount).toBe(1);
+      expect(res.duplicateCount).toBe(1);
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('POST /device-api/events retry handling', () => {
+    it('returns existing event on duplicate sequence retry rather than throwing 500', async () => {
+      mockPrisma.deviceEvent.findFirst.mockResolvedValueOnce({ id: 'existing-event-99' });
+
+      const res = await controller.events(mockDeviceReq, {
+        type: 'ACK',
+        sequence: 42,
+        payload: { commandId: 'cmd-1' },
+      });
+
+      expect(res.ok).toBe(true);
+      expect(res.eventId).toBe('existing-event-99');
+      expect(res.duplicate).toBe(true);
+      expect(mockPrisma.deviceEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('gracefully handles P2002 race condition on concurrent sequence retry', async () => {
+      mockPrisma.deviceEvent.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'existing-event-100' });
+
+      mockPrisma.deviceEvent.create.mockRejectedValueOnce({
+        code: 'P2002',
+        message: 'Unique constraint failed on DeviceEvent(deviceId, sequence)',
+      });
+
+      const res = await controller.events(mockDeviceReq, {
+        type: 'ACK',
+        sequence: 43,
+        payload: { commandId: 'cmd-2' },
+      });
+
+      expect(res.ok).toBe(true);
+      expect(res.eventId).toBe('existing-event-100');
+      expect(res.duplicate).toBe(true);
+    });
   });
 });
+
