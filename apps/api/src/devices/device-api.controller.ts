@@ -363,16 +363,20 @@ export class DeviceApiController {
         });
 
         if (ev.decision === 'AUTHORIZED' && ownedPass) {
-          const nextCount = ownedPass.usedCount + 1;
-          await tx.visitorPass.update({
+          // Atomic increment: the advisory lock only serializes this device, so other devices'
+          // syncs and online redemptions can bump the same pass concurrently. Writing back a
+          // value read earlier would silently drop their uses and re-open an exhausted pass.
+          const counted = await tx.visitorPass.update({
             where: { id: ownedPass.id },
-            data: {
-              usedCount: nextCount,
-              ...(nextCount >= ownedPass.maxUses && ownedPass.status === 'ACTIVE'
-                ? { status: 'EXHAUSTED' }
-                : {}),
-            },
+            data: { usedCount: { increment: 1 } },
+            select: { usedCount: true, maxUses: true },
           });
+          if (counted.usedCount >= counted.maxUses) {
+            await tx.visitorPass.updateMany({
+              where: { id: ownedPass.id, status: 'ACTIVE' },
+              data: { status: 'EXHAUSTED' },
+            });
+          }
         }
 
         syncedCount++;

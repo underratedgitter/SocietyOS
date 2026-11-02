@@ -441,7 +441,8 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       mockPrisma.visitorPass = {
         ...mockPrisma.visitorPass,
         findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, societyId: SOCIETY_ID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
-        update: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 2 }),
+        update: jest.fn().mockResolvedValue({ usedCount: 2, maxUses: 3 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       };
 
       const events: any[] = [
@@ -468,7 +469,44 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       );
       expect(mockPrisma.visitorPass.update).toHaveBeenCalledWith({
         where: { id: PASS_UUID },
-        data: expect.objectContaining({ usedCount: 2 }),
+        data: { usedCount: { increment: 1 } },
+        select: { usedCount: true, maxUses: true },
+      });
+      expect(mockPrisma.visitorPass.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('increments atomically so concurrent redemptions of the same pass are never lost', async () => {
+      const PASS_UUID = 'e0000000-0000-4000-a000-000000000003';
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      // This sync read usedCount=1, but another gate redeemed the pass online in the meantime:
+      // the row is already at 2, so this offline use makes it 3 of 3.
+      mockPrisma.visitorPass = {
+        ...mockPrisma.visitorPass,
+        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, societyId: SOCIETY_ID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
+        update: jest.fn().mockResolvedValue({ usedCount: 3, maxUses: 3 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      };
+
+      await controller.syncOffline(mockDeviceReq, {
+        events: [
+          {
+            sequence: 103,
+            accessPointId: AP_GATE_1,
+            credentialType: 'PIN',
+            decision: 'AUTHORIZED',
+            reasonCode: 'VALID_OFFLINE_CACHE',
+            timestamp: new Date().toISOString(),
+            passId: PASS_UUID,
+          },
+        ],
+      });
+
+      const updateArgs = mockPrisma.visitorPass.update.mock.calls[0][0];
+      expect(updateArgs.data.usedCount).toEqual({ increment: 1 });
+      expect(updateArgs.data.usedCount).not.toBe(2);
+      expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith({
+        where: { id: PASS_UUID, status: 'ACTIVE' },
+        data: { status: 'EXHAUSTED' },
       });
     });
 
