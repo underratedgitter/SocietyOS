@@ -22,6 +22,7 @@ export interface RelativeMember {
   createdAt: string;
   lastVisitAt?: string | null;
   activePassCount: number;
+  activePassId?: string;
 }
 
 export interface RegisterRelativeRequest {
@@ -36,6 +37,5 @@ export interface RegisterRelativeRequest {
 export interface QuickPassRequest {
   validHours?: number;
   maxUses?: number;
-  gateIds?: string[];
   vehicle?: string;
 }

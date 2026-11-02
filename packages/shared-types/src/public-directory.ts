@@ -2,7 +2,7 @@ export interface PublicSocietySummary {
   id: string;
   name: string;
   slug: string;
-  city?: string | null;
+  timezone: string;
 }
 
 export interface PublicFlatSummary {
