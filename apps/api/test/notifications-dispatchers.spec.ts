@@ -345,5 +345,53 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
         },
       });
     });
+
+    test('rejects push token registration with invalid or SSRF web push endpoints (Issue 9)', async () => {
+      const disallowedEndpoints = [
+        'http://fcm.googleapis.com/send', // Not HTTPS
+        'http://127.0.0.1:4000/api', // Localhost IPv4
+        'https://localhost:4000/api', // Localhost hostname
+        'https://169.254.169.254/latest/meta-data', // AWS/cloud metadata service
+        'https://10.0.0.5:8443/push', // RFC 1918 private network
+        'https://192.168.1.100:443/endpoint', // RFC 1918 private network
+        'https://172.16.0.10:443/endpoint', // RFC 1918 private network
+        'https://[::ffff:169.254.169.254]/latest/meta-data', // IPv6-mapped cloud metadata
+        'https://[::ffff:127.0.0.1]/push', // IPv6-mapped localhost
+        'https://[::]/push', // IPv6 unspecified address
+        'https://100.64.0.1:8443/push', // CGNAT
+        'https://api:4000/internal', // Internal docker container name
+        'not-a-url', // Malformed URL
+      ];
+
+      for (const endpoint of disallowedEndpoints) {
+        await expect(
+          controller.registerToken(testUser, {
+            token: `token-web-${Math.random()}`,
+            platform: 'web',
+            endpoint,
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({
+            code: expect.stringMatching(/INVALID_PUSH_ENDPOINT|DISALLOWED_PUSH_ENDPOINT/),
+          }),
+        });
+      }
+    });
+
+    test('accepts valid public HTTPS web push endpoint', async () => {
+      mockPrisma.pushDeviceToken.upsert.mockResolvedValue({
+        id: 'token-rec-web',
+        platform: 'web',
+      });
+
+      const res = await controller.registerToken(testUser, {
+        token: 'token-web-valid-999',
+        platform: 'web',
+        endpoint: 'https://fcm.googleapis.com/fcm/send/token-web-valid-999',
+      });
+
+      expect(res.ok).toBe(true);
+      expect(mockPrisma.pushDeviceToken.upsert).toHaveBeenCalled();
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { getEnv } from '../config';
+import { validateWebPushEndpoint } from './push-token.controller';
 
 export interface ExpoPushMessage {
   to: string;
@@ -263,6 +264,7 @@ export class PushDispatcherService {
     }
 
     // Direct Web Push RFC 8291
+    validateWebPushEndpoint(endpoint);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
