@@ -215,12 +215,18 @@ in-process limiter, then reconnects automatically.
   ```
 
 - Redis data is disposable; `redis_data` can be recreated if corrupted.
+- `redis: degraded` with `NOAUTH`/`WRONGPASS` in `sos logs api` means the
+  password in `REDIS_URL` does not match `infrastructure/docker/redis/password`.
+  To rotate, write a new password to the file, update `REDIS_URL` to match, then
+  `sos up -d --force-recreate redis api`.
 
 ## Restore and disaster recovery
 
 1. Provision the host and check out the same revision.
-2. Restore `.env.production` and the Mosquitto `passwd`/`acl` files from the
-   secret manager.
+2. Restore `.env.production`, `infrastructure/docker/redis/password` and the
+   Mosquitto `passwd`/`acl` files from the secret manager. The Mosquitto files
+   must be owned by uid 1883 with mode 600; regenerate them with
+   `generate-mqtt-credentials.sh` if ownership was lost in transit.
 3. Start PostgreSQL only, restore the dump, then start the rest:
 
    ```bash
@@ -229,6 +235,8 @@ in-process limiter, then reconnects automatically.
    sos up -d
    ```
 
+   The restore runs in one transaction: on error it rolls back, prints the
+   failure and leaves `api`/`web` stopped.
 4. Verify `/healthz`, `/api/v1/readyz`, sign-in, one pass issuance and one
    guard verification.
 5. Reissue device credentials if `DEVICE_SECRET_ENC_KEY` was lost; stored device
