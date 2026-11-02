@@ -1271,8 +1271,9 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
               </p>
             </div>
             <div className="field">
-              <label className="label">Payment Reference / UPI Transaction ID</label>
+              <label className="label" htmlFor="payment-ref">Payment Reference / UPI Transaction ID</label>
               <input
+                id="payment-ref"
                 className="input"
                 type="text"
                 placeholder="e.g. UPI-987654-SBI"
@@ -1525,9 +1526,9 @@ export function AdminInvoicesManager({
         <Modal title="Generate Maintenance Invoice" onClose={() => setModalOpen(false)}>
           <form onSubmit={handleCreate} className="stack">
             <div className="field">
-              <label className="label">Billed Flat</label>
+              <label className="label" htmlFor="invoice-flat">Billed Flat</label>
               {flats && flats.length > 0 ? (
-                <select className="input" value={flatId} onChange={(e) => setFlatId(e.target.value)} required>
+                <select id="invoice-flat" className="input" value={flatId} onChange={(e) => setFlatId(e.target.value)} required>
                   <option value="">Select flat...</option>
                   {flats.map((f) => (
                     <option key={f.id} value={f.id}>
@@ -1537,6 +1538,7 @@ export function AdminInvoicesManager({
                 </select>
               ) : (
                 <input
+                  id="invoice-flat"
                   className="input"
                   placeholder="Flat UUID"
                   value={flatId}
@@ -1546,8 +1548,9 @@ export function AdminInvoicesManager({
               )}
             </div>
             <div className="field">
-              <label className="label">Invoice Title</label>
+              <label className="label" htmlFor="invoice-title">Invoice Title</label>
               <input
+                id="invoice-title"
                 className="input"
                 type="text"
                 placeholder="e.g. Monthly Maintenance - November 2026"
@@ -1557,8 +1560,9 @@ export function AdminInvoicesManager({
               />
             </div>
             <div className="field">
-              <label className="label">Amount (₹)</label>
+              <label className="label" htmlFor="invoice-amount">Amount (₹)</label>
               <input
+                id="invoice-amount"
                 className="input"
                 type="number"
                 min="1"
@@ -1570,8 +1574,9 @@ export function AdminInvoicesManager({
               />
             </div>
             <div className="field">
-              <label className="label">Due Date</label>
+              <label className="label" htmlFor="invoice-due-date">Due Date</label>
               <input
+                id="invoice-due-date"
                 className="input"
                 type="date"
                 value={dueDate}
@@ -1580,8 +1585,9 @@ export function AdminInvoicesManager({
               />
             </div>
             <div className="field">
-              <label className="label">Description / Notes (Optional)</label>
+              <label className="label" htmlFor="invoice-description">Description / Notes (Optional)</label>
               <textarea
+                id="invoice-description"
                 className="input"
                 rows={2}
                 placeholder="Breakdown of charges..."
