@@ -26,6 +26,7 @@ describe('Registration & Relatives Service Modules', () => {
     process.env.CREDENTIAL_HMAC_KEY_ID = 'v1';
 
     mockPrisma = {
+      $executeRaw: jest.fn().mockResolvedValue(1),
       society: {
         findMany: jest.fn().mockResolvedValue([
           { id: SOCIETY_ID, name: 'Palm Grove', slug: 'palm-grove', timezone: 'Asia/Kolkata' },
@@ -772,6 +773,28 @@ describe('Registration & Relatives Service Modules', () => {
       expect(result.credentials.pin).toHaveLength(6);
       expect(result.credentials.qrToken).toBeTruthy();
       expect(mockPrisma.visitorPass.create).toHaveBeenCalled();
+    });
+
+    it('scopes relative-pass credentials to the society so PIN collisions hit the unique index', async () => {
+      await relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 });
+
+      const created = mockPrisma.visitorPass.create.mock.calls.at(-1)[0].data.credentials.create;
+      expect(created).toHaveLength(2);
+      for (const credential of created) {
+        expect(credential.societyId).toEqual(expect.any(String));
+      }
+    });
+
+    it('re-checks the cap under the per-flat lock at insert time (parallel quick-pass race)', async () => {
+      // First count (pre-check) sees room; the locked re-count sees the cap already reached.
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(19).mockResolvedValueOnce(20);
+      mockPrisma.visitorPass.create.mockClear();
+
+      await expect(
+        relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
+      expect(mockPrisma.$executeRaw).toHaveBeenCalled();
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
     });
 
     it('rejects quick pass once the flat has reached the society daily pass cap', async () => {

@@ -149,11 +149,13 @@ async function ensurePass(input: {
       type: 'PIN' as const,
       credentialHash: credentialHash(input.pin),
       keyId: env.credentialHmacKeyId,
+      societyId: input.societyId,
     },
     {
       type: 'QR' as const,
       credentialHash: credentialHash(input.qrToken),
       keyId: env.credentialHmacKeyId,
+      societyId: input.societyId,
     },
   ];
 
