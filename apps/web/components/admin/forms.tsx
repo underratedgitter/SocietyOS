@@ -1,21 +1,25 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { apiRequest } from '@/lib/api';
 import type {
   AccessPoint,
   Building,
+  DeviceProtocol,
   DeviceProvisionResult,
   FlatOption,
   PassWithCredentials,
 } from '@/lib/types';
 import { Modal, Notice, errorMessage } from '../ui';
 import { PassForm } from '../pass-form';
+import { DeviceSetupInstructions, PROTOCOL_OPTIONS, parseAllowedIps } from './device-protocols';
 
 export interface CredentialInfo {
   title: string;
   rows: { label: string; value: string }[];
   note?: string;
+  /** Rendered under the one-time values, e.g. per-protocol setup steps. */
+  extra?: ReactNode;
 }
 
 type Done = (credentials?: CredentialInfo) => void;
@@ -436,6 +440,9 @@ export function ProvisionDeviceModal({
     firmware: '',
     accessPointIds: accessPoints[0] ? [accessPoints[0].id] : [],
   });
+  const [protocol, setProtocol] = useState<DeviceProtocol>('NATIVE');
+  const [allowedIps, setAllowedIps] = useState('');
+  const ipCheck = parseAllowedIps(allowedIps);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -450,6 +457,10 @@ export function ProvisionDeviceModal({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (ipCheck.error) {
+      setError(ipCheck.error);
+      return;
+    }
     setSubmitting(true);
     setError('');
     try {
@@ -460,6 +471,8 @@ export function ProvisionDeviceModal({
           deviceUid: form.deviceUid,
           ...(form.firmware ? { firmware: form.firmware } : {}),
           accessPointIds: form.accessPointIds,
+          protocol,
+          ...(ipCheck.ips.length ? { pushAllowedIps: ipCheck.ips } : {}),
         }),
       });
       onDone({
@@ -468,7 +481,8 @@ export function ProvisionDeviceModal({
           { label: 'Device token', value: result.credentials.deviceToken },
           { label: 'Command secret', value: result.credentials.commandSecret },
         ],
-        note: 'Store these on the controller now. The token is hashed server-side and the command secret is encrypted at rest; neither can be shown again.',
+        note: 'Shown only once. Store these now. The token is hashed server-side and the command secret is encrypted at rest; neither can be shown again.',
+        extra: <DeviceSetupInstructions protocol={protocol} token={result.credentials.deviceToken} host={window.location.host} />,
       });
     } catch (caught) {
       setError(errorMessage(caught));
@@ -510,6 +524,29 @@ export function ProvisionDeviceModal({
           <div className="field">
             <label className="label" htmlFor="device-firmware">Firmware (optional)</label>
             <input className="input" id="device-firmware" maxLength={40} value={form.firmware} onChange={(event) => setForm({ ...form, firmware: event.target.value })} placeholder="sim-1.0.0" />
+          </div>
+          <div className="field">
+            <label className="label" htmlFor="device-protocol">Terminal brand / protocol</label>
+            <select className="input" id="device-protocol" value={protocol} onChange={(event) => setProtocol(event.target.value as DeviceProtocol)}>
+              {PROTOCOL_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label className="label" htmlFor="device-allowed-ips">Allowed source IPs (optional)</label>
+            <input
+              className="input"
+              id="device-allowed-ips"
+              value={allowedIps}
+              onChange={(event) => setAllowedIps(event.target.value)}
+              placeholder="203.0.113.10, 203.0.113.11"
+              aria-invalid={ipCheck.error ? true : undefined}
+              aria-describedby="device-allowed-ips-hint"
+            />
+            <p className="hint" id="device-allowed-ips-hint" role={ipCheck.error ? 'alert' : undefined}>
+              {ipCheck.error || 'Comma-separated IPv4/IPv6 addresses. Recommended for ZKTeco ADMS, which cannot authenticate each request; leave empty to accept any source.'}
+            </p>
           </div>
           <div className="field span-2">
             <span className="label">Assigned access points</span>

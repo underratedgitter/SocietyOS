@@ -135,6 +135,28 @@ test('admin console loads the command view and society settings', async ({ page 
   await expect(page.getByText('Visitor approval policy')).toBeVisible();
 });
 
+test('admin provisioning form offers vendor protocols and validates allowed IPs', async ({ page }) => {
+  await login(page, ADMIN);
+  await expect(page).toHaveURL(/\/admin$/);
+  await page.getByRole('button', { name: 'Gates & devices' }).click();
+  await page.getByRole('button', { name: /Provision controller/ }).click();
+
+  const protocol = page.getByLabel('Terminal brand / protocol');
+  await expect(protocol.locator('option')).toHaveCount(7);
+  await protocol.selectOption({ label: 'ZKTeco / eSSL / Realtime (ADMS push)' });
+
+  await page.getByLabel('Allowed source IPs (optional)').fill('not-an-ip');
+  await expect(page.getByRole('alert').filter({ hasText: 'not a valid IPv4 or IPv6' })).toBeVisible();
+  await page.getByLabel('Allowed source IPs (optional)').fill('203.0.113.10');
+
+  await page.getByLabel('Display name').fill(`ADMS gate ${Date.now()}`);
+  await page.getByLabel('Device UID').fill(`ADMS${Date.now()}`);
+  await page.getByRole('button', { name: 'Provision controller' }).last().click();
+
+  await expect(page.getByTestId('device-setup-instructions')).toContainText('port 443');
+  await expect(page.getByText(/Shown only once/)).toBeVisible();
+});
+
 test('guard console gate controls and kiosk biometric resident mode', async ({ page }) => {
   await login(page, GUARD);
   await expect(page).toHaveURL(/\/guard$/);

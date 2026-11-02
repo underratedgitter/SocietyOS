@@ -228,6 +228,24 @@ export interface DeviceCredentials {
   note: string;
 }
 
+export type DeviceProtocol =
+  | 'NATIVE'
+  | 'GENERIC_WEBHOOK'
+  | 'ZKTECO_ADMS'
+  | 'HIKVISION_ISAPI'
+  | 'DAHUA_HTTP'
+  | 'SUPREMA_BIOSTAR2'
+  | 'MATRIX_COSEC';
+
+export interface BiometricIdentity {
+  id: string;
+  societyId: string;
+  userId: string;
+  deviceUserId: string;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
 export interface DeviceProvisionResult {
   device: Device;
   credentials: DeviceCredentials;
