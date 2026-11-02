@@ -237,6 +237,74 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     );
   });
 
+  it('does not publish MQTT command when GateCommand insertion fails in triggerEmergencyOverride and fails the request', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Database write failure'));
+
+    await expect(
+      biometricsService.triggerEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Fire alarm trigger',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency override command');
+
+    expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
+  });
+
+  it('does not publish MQTT command when GateCommand insertion fails in resetEmergencyOverride and fails the request', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+    mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Database write failure'));
+
+    await expect(
+      biometricsService.resetEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Fire alarm cleared',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency reset command');
+
+    expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
+  });
+
+  it('fails emergency override request when no devices are assigned to the access point', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Standalone Gate Without Devices',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [],
+    });
+
+    await expect(
+      biometricsService.triggerEmergencyOverride(
+        'soc-1',
+        'guard-user-1',
+        'GUARD',
+        'ap-gate-1',
+        'Ambulance arrival',
+      ),
+    ).rejects.toThrow('No active gate controller device received the emergency override command');
+
+    expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
+  });
+
   it('loads persisted biometric template from database on cache miss', async () => {
     mockPrisma.biometricTemplate.findFirst.mockResolvedValueOnce({
       id: 'bt-persisted-1',
@@ -338,6 +406,28 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     });
     expect(resultFinger.decision).toBe('DENIED');
     expect(resultFinger.reasonCode).toBe('BIOMETRIC_NOT_RECOGNIZED');
+  });
+
+  it('fails biometric enrollment and propagates error if BiometricTemplate persistence fails', async () => {
+    mockPrisma.societyMembership.findUnique.mockResolvedValue({
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+      user: { id: 'user-1', name: 'Aarav Patel' },
+    });
+    mockPrisma.biometricTemplate.upsert.mockRejectedValueOnce(
+      new Error('BiometricTemplate table constraint failure'),
+    );
+
+    await expect(
+      biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+        userId: 'user-1',
+        type: 'FINGERPRINT',
+        templateHash: 'sha256_mock_fail',
+        algorithm: 'ZKFINGER_V10',
+      }),
+    ).rejects.toThrow('BiometricTemplate table constraint failure');
   });
 });
 

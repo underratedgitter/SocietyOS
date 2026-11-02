@@ -156,14 +156,21 @@ export default function KioskPage() {
     }
   }
 
+  const DEMO_RESIDENT_BIOMETRIC_HASH = '6988d91038b8bdf0c0c39ee90cff9457c5beeb8d6d24c5a1ae01f0b81aeb7772';
+  const IS_DEV = process.env.NODE_ENV !== 'production';
+
   function simulateBiometric() {
     if (busy || biometricScanning) return;
+    if (!IS_DEV) {
+      setError('Biometric simulator is disabled in production. Use physical reader.');
+      return;
+    }
     setBiometricScanning(true);
     playKeypadClick();
     setError('');
     setResult(null);
     setTimeout(() => {
-      void verify('BIOMETRIC', 'FINGERPRINT_RESIDENT_101');
+      void verify('BIOMETRIC', DEMO_RESIDENT_BIOMETRIC_HASH);
     }, 1100);
   }
 
@@ -464,15 +471,17 @@ export default function KioskPage() {
                   <div className="biometric-sub">
                     Suprema / ZKTeco Edge Reader with Local Template Matching & Liveness Check
                   </div>
-                  <button
-                    type="button"
-                    className="btn btn-small"
-                    onClick={simulateBiometric}
-                    disabled={biometricScanning || busy || !gateId}
-                    style={{ marginTop: 16, borderColor: 'rgba(255,255,255,0.25)', background: 'rgba(255,255,255,0.08)', color: '#fff' }}
-                  >
-                    {biometricScanning ? 'Processing…' : 'Simulate Resident Touch ID Scan'}
-                  </button>
+                  {IS_DEV && (
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      onClick={simulateBiometric}
+                      disabled={biometricScanning || busy || !gateId}
+                      style={{ marginTop: 16, borderColor: 'rgba(255,255,255,0.25)', background: 'rgba(255,255,255,0.08)', color: '#fff' }}
+                    >
+                      {biometricScanning ? 'Processing…' : 'Simulate Resident Touch ID Scan'}
+                    </button>
+                  )}
                 </div>
               )}
             </>

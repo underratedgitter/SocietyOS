@@ -446,18 +446,6 @@ function populateInitialCache(): void {
     return;
   }
 
-  // Fresh setup fallback seed:
-  // Seed cached resident biometric templates (Suprema/ZKTeco edge cache)
-  credentialCache.set('FINGERPRINT_RESIDENT_101', {
-    credentialHash: 'FINGERPRINT_RESIDENT_101',
-    kind: 'BIOMETRIC',
-    visitorName: 'Ananya Rao (Resident)',
-    flatNumber: '101',
-    validFrom: 0,
-    validUntil: Date.now() + 365 * 86400_000,
-    maxUses: 999999,
-    usedCount: 0,
-  });
   // Sample offline-usable PIN (HMAC hashed)
   const pinHash = hashCredential('888999');
   credentialCache.set(pinHash, {
@@ -492,7 +480,7 @@ async function pullEdgeCache(): Promise<void> {
 
         // Evict revoked credentials or stale entries no longer returned as active
         for (const [key] of credentialCache.entries()) {
-          if (revokedHashes.has(key) || (!activeHashes.has(key) && key !== 'FINGERPRINT_RESIDENT_101')) {
+          if (revokedHashes.has(key) || !activeHashes.has(key)) {
             credentialCache.delete(key);
           }
         }
