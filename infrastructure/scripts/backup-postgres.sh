@@ -45,6 +45,13 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUTPUT="$BACKUP_DIR/$POSTGRES_DB-$STAMP.dump"
 
+case "$RETENTION_DAYS" in
+  ''|*[!0-9]*)
+    echo "RETENTION_DAYS must be a non-negative integer, got '$RETENTION_DAYS'" >&2
+    exit 1
+    ;;
+esac
+
 if [ "${DRY_RUN:-}" = "true" ] || [ "${DRY_RUN:-}" = "1" ]; then
   echo "[DRY-RUN] Target backup directory: $BACKUP_DIR"
   echo "[DRY-RUN] Target compose file: $COMPOSE_FILE"
@@ -54,14 +61,30 @@ if [ "${DRY_RUN:-}" = "true" ] || [ "${DRY_RUN:-}" = "1" ]; then
   exit 0
 fi
 
+# Dumps hold every resident's data: never let them be group/world readable,
+# not even between creation and a later chmod.
+umask 077
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
+# Write to a temp name and publish only a verified dump. A failed pg_dump
+# would otherwise leave a truncated file that looks like a valid backup, and
+# retention below could prune the last good one in its favour.
+PARTIAL="$OUTPUT.partial"
+trap 'rm -f "$PARTIAL"' EXIT
+trap 'exit 1' HUP INT TERM
+
 docker compose -f "$COMPOSE_FILE" exec -T postgres \
-  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner > "$OUTPUT"
+  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner > "$PARTIAL"
+if [ ! -s "$PARTIAL" ]; then
+  echo "pg_dump produced an empty file; keeping existing backups" >&2
+  exit 1
+fi
+docker compose -f "$COMPOSE_FILE" exec -T postgres pg_restore --list < "$PARTIAL" > /dev/null
+mv "$PARTIAL" "$OUTPUT"
 chmod 600 "$OUTPUT"
 
 find "$BACKUP_DIR" -maxdepth 1 \( -name "$POSTGRES_DB-*.dump" -o -name 'societyos-*.dump' \) -type f -mtime "+$RETENTION_DAYS" -delete
 
 echo "Backup written: $OUTPUT"
-echo "Verify it with: pg_restore --list '$OUTPUT'"
+echo "Archive verified with pg_restore --list. Copy it off this host."
