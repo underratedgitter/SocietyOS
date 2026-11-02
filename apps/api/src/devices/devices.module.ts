@@ -11,10 +11,11 @@ import { BiometricIdentityService } from './vendor/biometric-identity.service';
 import { BiometricIngestService } from './vendor/biometric-ingest.service';
 import { DeviceSyncService } from './vendor/device-sync.service';
 import { BiometricIdentityController, VendorDeviceApiController } from './vendor/vendor-device.controller';
+import { ZktecoAdmsController } from './vendor/zkteco/zkteco-adms.controller';
 
 @Module({
   imports: [AuthModule],
-  controllers: [DevicesController, DeviceApiController, VendorDeviceApiController, BiometricIdentityController],
+  controllers: [DevicesController, DeviceApiController, VendorDeviceApiController, BiometricIdentityController, ZktecoAdmsController],
   providers: [
     DevicesService,
     MqttService,
