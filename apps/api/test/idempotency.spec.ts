@@ -104,7 +104,7 @@ describe('IdempotencyService', () => {
     ).rejects.toThrow('database down');
   });
 
-  it('rejects payload or endpoint mismatch even if record is expired', async () => {
+  it('treats expired record as absent even if payload or endpoint differs', async () => {
     const expiredRecord = {
       endpoint: 'visitor-passes.create',
       requestHash: 'hash-original',
@@ -118,11 +118,11 @@ describe('IdempotencyService', () => {
 
     await expect(
       service.get('key', 'visitor-passes.create', 'hash-different'),
-    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_PAYLOAD_MISMATCH' });
+    ).resolves.toBeNull();
 
     await expect(
       service.get('key', 'other.endpoint', 'hash-original'),
-    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+    ).resolves.toBeNull();
   });
 
   it('refreshes expired record on P2002 to prevent repeated duplicate creations', async () => {

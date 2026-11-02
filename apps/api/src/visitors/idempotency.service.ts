@@ -13,6 +13,7 @@ export class IdempotencyService {
   async get<T>(key: string, endpoint: string, fingerprint: string): Promise<T | null> {
     const record = await this.prisma.idempotencyRecord.findUnique({ where: { key } });
     if (!record) return null;
+    if (record.expiresAt && record.expiresAt <= new Date()) return null;
     if (record.endpoint !== endpoint) {
       throw AppException.conflict('IDEMPOTENCY_KEY_REUSED', 'This idempotency key belongs to another operation');
     }
@@ -22,7 +23,6 @@ export class IdempotencyService {
         'This idempotency key was already used with different request content',
       );
     }
-    if (record.expiresAt && record.expiresAt <= new Date()) return null;
     return record.responseBody as T;
   }
 
