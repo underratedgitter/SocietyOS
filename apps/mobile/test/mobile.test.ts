@@ -453,6 +453,20 @@ describe('Mobile Local Secure Storage & Persistence', () => {
         'Visitor credentials must NOT be stored in browser localStorage',
       );
 
+      await mobileStorage.saveTokens({
+        accessToken: 'at-secret',
+        refreshToken: 'rt-secret',
+        cookies: { so_access: 'at-secret', so_refresh: 'rt-secret' },
+      });
+      for (const key of [
+        'societyos_mobile_access_token',
+        'societyos_mobile_refresh_token',
+        'societyos_mobile_cookies',
+      ]) {
+        assert.equal(mockStorage.get(key), undefined, `${key} must NOT be stored in browser localStorage`);
+      }
+      await mobileStorage.clearTokens();
+
       // Non-sensitive data like cached notices CAN fall back to localStorage
       const mockNotices = [{ id: 'n-1', title: 'Annual Meeting' }];
       await mobileStorage.saveCachedNotices(mockNotices);

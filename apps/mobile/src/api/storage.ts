@@ -20,6 +20,8 @@ const SENSITIVE_KEYS = new Set<string>([
   'societyos_mobile_cached_credentials',
   'societyos_mobile_access_token',
   'societyos_mobile_refresh_token',
+  // The cookie jar holds so_access / so_refresh, i.e. the same tokens as above.
+  'societyos_mobile_cookies',
 ]);
 
 async function getStorageItem(key: string): Promise<string | null> {
