@@ -74,6 +74,20 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
+      // Delete credentials of passes expired or revoked more than N days ago (default 30)
+      const retentionDays = Number.parseInt(process.env.CREDENTIAL_RETENTION_DAYS || '30', 10);
+      const credCutoff = new Date(now.getTime() - retentionDays * 24 * 3600 * 1000);
+      await this.prisma.visitorPassCredential.deleteMany({
+        where: {
+          pass: {
+            OR: [
+              { status: 'EXPIRED', validUntil: { lt: credCutoff } },
+              { status: 'REVOKED', revokedAt: { lt: credCutoff } },
+            ],
+          },
+        },
+      });
+
       await this.prisma.idempotencyRecord.deleteMany({ where: { expiresAt: { lt: now } } });
       await this.prisma.session.deleteMany({
         where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600 * 1000) } },

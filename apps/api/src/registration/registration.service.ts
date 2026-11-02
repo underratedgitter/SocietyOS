@@ -287,6 +287,7 @@ export class RegistrationService {
                     type: pin.type,
                     credentialHash: this.credentials.hash(pin.plaintext),
                     keyId: this.credentials.keyVersion,
+                    societyId: dto.societyId,
                   },
                   {
                     type: qr.type,

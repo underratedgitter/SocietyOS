@@ -162,6 +162,7 @@ export class VisitorPassesService {
                     type: pin.type,
                     credentialHash: this.credentials.hash(pin.plaintext),
                     keyId: this.credentials.keyVersion,
+                    societyId: context.societyId,
                   },
                   {
                     type: qr.type,
@@ -373,6 +374,7 @@ export class VisitorPassesService {
               type: pin.type,
               credentialHash: this.credentials.hash(pin.plaintext),
               keyId: this.credentials.keyVersion,
+              societyId: pass.societyId,
             },
             {
               passId,
