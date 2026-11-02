@@ -90,6 +90,9 @@ describe('RateLimitService memory fallback', () => {
 });
 
 describe('RateLimitService without a usable Redis', () => {
+  // Startup may legitimately wait out the service's 5s Redis guard, Jest's default budget too.
+  jest.setTimeout(15_000);
+
   const keys = [
     'NODE_ENV',
     'WEB_URL',
