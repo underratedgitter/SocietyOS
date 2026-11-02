@@ -120,11 +120,12 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
     });
 
     test('verifies valid Razorpay payment signature and marks invoice PAID', async () => {
+      const invoiceWithOrder = { ...pendingInvoice, gatewayOrderId: 'order_mock_123' };
       mockPrisma.maintenanceInvoice.findUnique
-        .mockResolvedValueOnce(pendingInvoice) // for initial lookup
-        .mockResolvedValueOnce(pendingInvoice); // inside transaction fresh lookup
+        .mockResolvedValueOnce(invoiceWithOrder) // for initial lookup
+        .mockResolvedValueOnce(invoiceWithOrder); // inside transaction fresh lookup
       mockPrisma.maintenanceInvoice.update.mockResolvedValue({
-        ...pendingInvoice,
+        ...invoiceWithOrder,
         status: 'PAID',
         paidAt: new Date(),
         paidById: residentUser.sub,
@@ -141,8 +142,40 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       expect(mockNotifications.enqueue).toHaveBeenCalled();
     });
 
-    test('rejects Razorpay payment with invalid signature', async () => {
+    test('rejects Razorpay payment verification if invoice has no gateway order', async () => {
       mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+
+      await expect(
+        service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          razorpayOrderId: 'order_unrelated_123',
+          razorpayPaymentId: 'pay_rzp_999',
+          razorpaySignature: 'mock_sig_ok',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'NO_GATEWAY_ORDER' }),
+      });
+    });
+
+    test('rejects Razorpay payment verification if order ID does not match invoice order', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        gatewayOrderId: 'order_expected_456',
+      });
+
+      await expect(
+        service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          razorpayOrderId: 'order_different_789',
+          razorpayPaymentId: 'pay_rzp_999',
+          razorpaySignature: 'mock_sig_ok',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'ORDER_ID_MISMATCH' }),
+      });
+    });
+
+    test('rejects Razorpay payment with invalid signature', async () => {
+      const invoiceWithOrder = { ...pendingInvoice, gatewayOrderId: 'order_mock_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithOrder);
 
       await expect(
         service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
@@ -182,12 +215,25 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       expect(res.paymentIntentId).toBeDefined();
     });
 
+    test('rejects Stripe payment intent creation for non-INR currency', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+
+      await expect(
+        service.createStripePaymentIntent(residentUser, SOCIETY_ID, INVOICE_ID, {
+          currency: 'usd',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'INVALID_CURRENCY' }),
+      });
+    });
+
     test('verifies Stripe payment and settles invoice idempotently', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_mock_complete' };
       mockPrisma.maintenanceInvoice.findUnique
-        .mockResolvedValueOnce(pendingInvoice)
-        .mockResolvedValueOnce(pendingInvoice);
+        .mockResolvedValueOnce(invoiceWithIntent)
+        .mockResolvedValueOnce(invoiceWithIntent);
       mockPrisma.maintenanceInvoice.update.mockResolvedValue({
-        ...pendingInvoice,
+        ...invoiceWithIntent,
         status: 'PAID',
       });
 
@@ -196,6 +242,33 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       });
 
       expect(res.status).toBe('PAID');
+    });
+
+    test('rejects Stripe payment verification if invoice has no gateway order', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+
+      await expect(
+        service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          paymentIntentId: 'pi_unrelated_999',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'NO_GATEWAY_ORDER' }),
+      });
+    });
+
+    test('rejects Stripe payment verification if payment intent does not match invoice order', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        gatewayOrderId: 'pi_expected_111',
+      });
+
+      await expect(
+        service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          paymentIntentId: 'pi_different_222',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'PAYMENT_INTENT_MISMATCH' }),
+      });
     });
   });
 
@@ -373,6 +446,89 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       const result = await service.handleStripeWebhook(JSON.stringify(payload));
       expect(result.received).toBe(true);
       expect(result.status).toBe('order_mismatch');
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
+    });
+
+    test('rejects Razorpay webhook if order ID does not match invoice gatewayOrderId', async () => {
+      const payload = {
+        event: 'order.paid',
+        payload: {
+          order: {
+            entity: {
+              id: 'order_rzp_wrong_999',
+              notes: { invoiceId: INVOICE_ID },
+            },
+          },
+          payment: {
+            entity: { id: 'pay_rzp_wrong' },
+          },
+        },
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        gatewayOrderId: 'order_rzp_expected_111',
+      });
+
+      const result = await service.handleRazorpayWebhook(JSON.stringify(payload));
+      expect(result.received).toBe(true);
+      expect(result.status).toBe('order_mismatch');
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
+    });
+
+    test('rejects Razorpay webhook if amount is less than invoice amount', async () => {
+      const payload = {
+        event: 'payment.captured',
+        payload: {
+          payment: {
+            entity: {
+              id: 'pay_underpaid',
+              order_id: 'order_rzp_expected_111',
+              amount: 1000, // 10 INR (invoice is 5000 INR = 500000 paise)
+              currency: 'INR',
+              notes: { invoiceId: INVOICE_ID },
+            },
+          },
+        },
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        amount: 5000,
+        gatewayOrderId: 'order_rzp_expected_111',
+      });
+
+      const result = await service.handleRazorpayWebhook(JSON.stringify(payload));
+      expect(result.received).toBe(true);
+      expect(result.status).toBe('amount_mismatch');
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
+    });
+
+    test('rejects Razorpay webhook if currency is not INR', async () => {
+      const payload = {
+        event: 'payment.captured',
+        payload: {
+          payment: {
+            entity: {
+              id: 'pay_foreign_currency',
+              order_id: 'order_rzp_expected_111',
+              amount: 500000,
+              currency: 'USD',
+              notes: { invoiceId: INVOICE_ID },
+            },
+          },
+        },
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        amount: 5000,
+        gatewayOrderId: 'order_rzp_expected_111',
+      });
+
+      const result = await service.handleRazorpayWebhook(JSON.stringify(payload));
+      expect(result.received).toBe(true);
+      expect(result.status).toBe('currency_mismatch');
       expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
     });
   });

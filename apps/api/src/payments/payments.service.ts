@@ -159,7 +159,10 @@ export class PaymentsService {
     // Authorize caller
     await this.authz.flat(user.sub, invoice.flatId, ['SOCIETY_ADMIN', 'RESIDENT']);
 
-    if (invoice.gatewayOrderId && invoice.gatewayOrderId !== dto.razorpayOrderId) {
+    if (!invoice.gatewayOrderId) {
+      throw AppException.badRequest('NO_GATEWAY_ORDER', 'No gateway order exists for this invoice. Create an order first.');
+    }
+    if (invoice.gatewayOrderId !== dto.razorpayOrderId) {
       throw AppException.badRequest('ORDER_ID_MISMATCH', 'Payment order ID does not match invoice order');
     }
 
@@ -232,6 +235,9 @@ export class PaymentsService {
       const invoiceId = paymentEntity?.notes?.invoiceId || orderEntity?.notes?.invoiceId;
       const userId = paymentEntity?.notes?.userId || orderEntity?.notes?.userId;
 
+      const amount = paymentEntity?.amount || orderEntity?.amount;
+      const currency = (paymentEntity?.currency || orderEntity?.currency)?.toLowerCase();
+
       // Find invoice
       let invoice: any = null;
       if (invoiceId) {
@@ -251,6 +257,15 @@ export class PaymentsService {
         if (invoice.gatewayOrderId && orderId && invoice.gatewayOrderId !== orderId) {
           this.logger.warn(`Razorpay order ID ${orderId} does not match invoice gatewayOrderId ${invoice.gatewayOrderId}`);
           return { received: true, status: 'order_mismatch' };
+        }
+        const expectedAmountInPaise = Math.round(invoice.amount * 100);
+        if (currency && currency !== 'inr') {
+          this.logger.warn(`Razorpay payment currency ${currency} is not INR for invoice ${invoice.id}`);
+          return { received: true, status: 'currency_mismatch' };
+        }
+        if (typeof amount === 'number' && amount < expectedAmountInPaise) {
+          this.logger.warn(`Razorpay payment amount ${amount} is less than required ${expectedAmountInPaise} for invoice ${invoice.id}`);
+          return { received: true, status: 'amount_mismatch' };
         }
         await this.settleInvoice({
           invoiceId: invoice.id,
@@ -297,6 +312,9 @@ export class PaymentsService {
     await this.authz.flat(user.sub, invoice.flatId, ['SOCIETY_ADMIN', 'RESIDENT']);
 
     const currency = (dto?.currency || 'inr').toLowerCase();
+    if (currency !== 'inr') {
+      throw AppException.badRequest('INVALID_CURRENCY', 'Only INR currency is supported for maintenance invoices');
+    }
     const amountInCents = Math.round(invoice.amount * 100);
     const env = getEnv();
 
@@ -381,9 +399,14 @@ export class PaymentsService {
 
     await this.authz.flat(user.sub, invoice.flatId, ['SOCIETY_ADMIN', 'RESIDENT']);
 
-    if (invoice.gatewayOrderId && invoice.gatewayOrderId !== dto.paymentIntentId) {
+    if (!invoice.gatewayOrderId) {
+      throw AppException.badRequest('NO_GATEWAY_ORDER', 'No gateway order exists for this invoice. Create a payment intent first.');
+    }
+    if (invoice.gatewayOrderId !== dto.paymentIntentId) {
       throw AppException.badRequest('PAYMENT_INTENT_MISMATCH', 'PaymentIntent does not match invoice');
     }
+
+    const expectedAmountInCents = Math.round(invoice.amount * 100);
 
     const env = getEnv();
     if (env.stripeSecretKey) {
@@ -397,9 +420,15 @@ export class PaymentsService {
         if (!response.ok) {
           throw new Error(`Stripe check returned HTTP ${response.status}`);
         }
-        const data = (await response.json()) as { status: string };
+        const data = (await response.json()) as { status: string; amount?: number; currency?: string };
         if (data.status !== 'succeeded') {
           throw AppException.badRequest('PAYMENT_NOT_COMPLETED', `Stripe PaymentIntent is in state: ${data.status}`);
+        }
+        if (data.currency && data.currency.toLowerCase() !== 'inr') {
+          throw AppException.badRequest('INVALID_CURRENCY', 'PaymentIntent currency must be INR');
+        }
+        if (typeof data.amount === 'number' && data.amount < expectedAmountInCents) {
+          throw AppException.badRequest('INSUFFICIENT_AMOUNT', `Payment amount (${data.amount}) is less than invoice (${expectedAmountInCents})`);
         }
       } finally {
         clearTimeout(timeout);
@@ -479,6 +508,8 @@ export class PaymentsService {
       const invoiceId = obj?.metadata?.invoiceId;
       const userId = obj?.metadata?.userId;
       const paymentIntentId = obj?.id;
+      const amount = obj?.amount;
+      const currency = obj?.currency?.toLowerCase();
 
       let invoice: any = null;
       if (invoiceId) {
@@ -498,6 +529,15 @@ export class PaymentsService {
         if (invoice.gatewayOrderId && paymentIntentId && invoice.gatewayOrderId !== paymentIntentId) {
           this.logger.warn(`Stripe paymentIntentId ${paymentIntentId} does not match invoice gatewayOrderId ${invoice.gatewayOrderId}`);
           return { received: true, status: 'order_mismatch' };
+        }
+        const expectedAmountInCents = Math.round(invoice.amount * 100);
+        if (currency && currency !== 'inr') {
+          this.logger.warn(`Stripe payment currency ${currency} is not INR for invoice ${invoice.id}`);
+          return { received: true, status: 'currency_mismatch' };
+        }
+        if (typeof amount === 'number' && amount < expectedAmountInCents) {
+          this.logger.warn(`Stripe payment amount ${amount} is less than required ${expectedAmountInCents} for invoice ${invoice.id}`);
+          return { received: true, status: 'amount_mismatch' };
         }
         await this.settleInvoice({
           invoiceId: invoice.id,
