@@ -320,7 +320,8 @@ describe('Registration & Relatives Service Modules', () => {
 
       expect(result.passId).toBe('pass-uuid-1');
       expect(result.status).toBe('PENDING_APPROVAL');
-      expect(result.credentials).toBeNull();
+      expect(result.credentials?.pin).toHaveLength(6);
+      expect(result.credentials?.qrToken).toBeTruthy();
       expect(result.requiresHostApproval).toBe(true);
       expect(mockPrisma.notification.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -330,6 +331,51 @@ describe('Registration & Relatives Service Modules', () => {
         }),
       );
     });
+
+    it('requires host approval when self-registering for FRIEND or OTHER categories even if not in society approvalCategories', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValueOnce({
+        id: FLAT_ID,
+        buildingId: BUILDING_ID,
+        flatNumber: '101',
+        building: {
+          id: BUILDING_ID,
+          name: 'Tower A',
+          societyId: SOCIETY_ID,
+          society: {
+            id: SOCIETY_ID,
+            name: 'Palm Grove',
+            settings: { approvalCategories: ['DELIVERY'], maxPassDurationHours: 24, maxUsesPerPass: 5, maxPassesPerFlatPerDay: 20 },
+          },
+        },
+      });
+
+      mockPrisma.visitorPass.create.mockResolvedValueOnce({
+        id: 'pass-friend-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        visitorId: VISITOR_ID,
+        category: 'FRIEND',
+        status: 'PENDING_APPROVAL',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 4 * 3600 * 1000),
+        maxUses: 1,
+        usedCount: 0,
+        visitor: { id: VISITOR_ID, name: 'Close Friend', phone: '+91 98765 33333' },
+      });
+
+      const result = await registrationService.selfRegisterVisitor({
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        visitorName: 'Close Friend',
+        category: 'FRIEND',
+      });
+
+      expect(result.status).toBe('PENDING_APPROVAL');
+      expect(result.requiresHostApproval).toBe(true);
+      expect(result.credentials?.pin).toHaveLength(6);
+    });
+
 
     it('auto-approves and returns credentials when category is excluded from approval policy', async () => {
       mockPrisma.flat.findUnique.mockResolvedValueOnce({

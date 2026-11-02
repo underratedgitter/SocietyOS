@@ -232,7 +232,10 @@ export class RegistrationService {
       throw AppException.unprocessable('NO_GATES_CONFIGURED', 'No active gates configured for this society');
     }
 
-    const requiresApproval = policy.approvalCategories.includes(dto.category as VisitorCategory);
+    const publicMandatoryApprovalCategories: VisitorCategory[] = ['FRIEND', 'OTHER'];
+    const requiresApproval =
+      publicMandatoryApprovalCategories.includes(dto.category as VisitorCategory) ||
+      policy.approvalCategories.includes(dto.category as VisitorCategory);
     const status = requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE';
 
     const trimmedName = dto.visitorName.trim();
@@ -352,12 +355,10 @@ export class RegistrationService {
       validFrom: pass.validFrom.toISOString(),
       validUntil: pass.validUntil.toISOString(),
       maxUses: pass.maxUses,
-      credentials: requiresApproval || pass.status === 'PENDING_APPROVAL'
-        ? null
-        : {
-            pin: pin.plaintext,
-            qrToken: qr.plaintext,
-          },
+      credentials: {
+        pin: pin.plaintext,
+        qrToken: qr.plaintext,
+      },
       accessPoints,
       requiresHostApproval: requiresApproval,
       message: requiresApproval
