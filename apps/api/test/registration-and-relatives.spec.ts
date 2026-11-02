@@ -778,6 +778,28 @@ describe('Registration & Relatives Service Modules', () => {
       expect(mockPrisma.visitorPass.create).toHaveBeenCalled();
     });
 
+    it('rejects quick pass once the flat has reached the society daily pass cap', async () => {
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(20); // policy maxPassesPerFlatPerDay = 20
+
+      await expect(
+        relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
+      expect(mockPrisma.visitorPass.count).toHaveBeenCalledWith({
+        where: { flatId: FLAT_ID, createdAt: { gte: expect.any(Date) } },
+      });
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects relative registration once the flat has reached the daily pass cap without creating a visitor', async () => {
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(20);
+
+      await expect(
+        relativesService.registerRelative(USER_ID, FLAT_ID, { name: 'Late Cousin', relation: 'Cousin' }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
+      expect(mockPrisma.visitor.create).not.toHaveBeenCalled();
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
+    });
+
     it('rejects quick pass if visitor does not belong to the flat (IDOR protection)', async () => {
       mockPrisma.visitorPass.findFirst.mockResolvedValueOnce(null);
 
