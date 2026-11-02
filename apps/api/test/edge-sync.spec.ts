@@ -203,6 +203,85 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         expect(cred.credentialHash).not.toMatch(/^BIO_RESIDENT_/);
       }
     });
+
+    it('bounds revoked passes to validity window (validUntil > now - 1 day) and memberships to last 30 days with limit', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany
+        .mockResolvedValueOnce([]) // active passes
+        .mockResolvedValueOnce([]); // revoked passes
+
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+
+      // Verify revoked passes queried with validUntil > now - 1 day and take limit
+      expect(mockPrisma.visitorPass.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            societyId: SOCIETY_ID,
+            validUntil: { gt: expect.any(Date) },
+          }),
+          take: 1000,
+        }),
+      );
+
+      // Verify ended residents queried with endedAt >= 30 days ago and take limit
+      expect(mockPrisma.residentFlatMembership.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            endedAt: expect.objectContaining({ gte: expect.any(Date) }),
+          }),
+          take: 1000,
+        }),
+      );
+    });
+
+    it('does not include active resident biometric template in revokedHashes even if an older flat membership ended in the last 30 days', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany
+        .mockResolvedValueOnce([]) // active passes
+        .mockResolvedValueOnce([]); // revoked passes
+
+      // Active resident template
+      mockPrisma.biometricTemplate.findMany
+        .mockResolvedValueOnce([
+          {
+            templateHash: 'active-resident-template-hash',
+            user: {
+              id: 'res-user-moving',
+              name: 'Moving Resident',
+              flatMemberships: [
+                { flat: { flatNumber: '202', building: { name: 'Tower B' } } },
+              ],
+            },
+          },
+        ])
+        // Ended templates query returns the same template hash
+        .mockResolvedValueOnce([
+          { templateHash: 'active-resident-template-hash' },
+        ]);
+
+      // Previous flat membership ended 5 days ago
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValueOnce([
+        { userId: 'res-user-moving' },
+      ]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+      const activeBio = res.credentials.find((c: any) => c.credentialHash === 'active-resident-template-hash');
+      expect(activeBio).toBeDefined();
+      expect(res.revokedHashes).not.toContain('active-resident-template-hash');
+    });
   });
 
   describe('POST /device-api/sync-offline', () => {

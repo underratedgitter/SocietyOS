@@ -499,23 +499,30 @@ export class DeviceApiController {
       };
     });
 
+    const oneDayAgo = new Date(now.getTime() - 24 * 3600 * 1000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+    const MAX_REVOKED_HASHES = 1000;
+
     const revokedPasses = await this.prisma.visitorPass.findMany({
       where: {
         societyId,
         OR: [{ status: 'REVOKED' }, { revokedAt: { not: null } }],
+        validUntil: { gt: oneDayAgo },
       },
       include: {
         credentials: { select: { credentialHash: true } },
       },
+      take: MAX_REVOKED_HASHES,
     });
     const revokedPassHashes = (revokedPasses || []).flatMap((p) => p.credentials.map((c) => c.credentialHash));
 
     const endedResidents = await this.prisma.residentFlatMembership.findMany({
       where: {
         flat: { building: { societyId } },
-        endedAt: { not: null },
+        endedAt: { not: null, gte: thirtyDaysAgo },
       },
       select: { userId: true },
+      take: MAX_REVOKED_HASHES,
     });
     const endedUserIds = Array.from(new Set((endedResidents || []).map((r) => r.userId)));
     const endedTemplates = endedUserIds.length > 0
@@ -525,6 +532,7 @@ export class DeviceApiController {
             userId: { in: endedUserIds },
           },
           select: { templateHash: true },
+          take: MAX_REVOKED_HASHES,
         })
       : [];
     const activeResidentHashes = new Set(residentCredentials.map((c) => c.credentialHash));
@@ -546,7 +554,7 @@ export class DeviceApiController {
         syncIntervalSeconds: 300,
       },
       credentials: [...residentCredentials, ...credentialsList],
-      revokedHashes: Array.from(new Set(allRevokedHashes)),
+      revokedHashes: Array.from(new Set(allRevokedHashes)).slice(0, MAX_REVOKED_HASHES),
     };
   }
 }
