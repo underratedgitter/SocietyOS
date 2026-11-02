@@ -494,11 +494,13 @@ export class VisitorPassesService {
     const pass = await this.loadPassOr404(passId);
     const context = await this.assertCanManage(caller, pass);
     if (pass.status === 'REVOKED') return this.viewPass(passId);
-    await this.prisma.$transaction(async (tx) => {
-      await tx.visitorPass.update({
-        where: { id: passId },
+    const revokedNow = await this.prisma.$transaction(async (tx) => {
+      // Conditional so a concurrent revoke cannot overwrite the first revoker or double-audit/notify.
+      const changed = await tx.visitorPass.updateMany({
+        where: { id: passId, status: { not: 'REVOKED' } },
         data: { status: 'REVOKED', revokedAt: new Date(), revokedBy: caller.sub },
       });
+      if (changed.count !== 1) return false;
       await tx.auditLog.create({
         data: {
           societyId: pass.societyId,
@@ -510,11 +512,12 @@ export class VisitorPassesService {
           meta: { reason: reason?.trim() || null },
         },
       });
+      return true;
     });
 
     const view = await this.viewPass(passId);
 
-    if (this.notifications) {
+    if (revokedNow && this.notifications) {
       this.notifications
         .notifyPassRevoked({
           societyId: view.societyId,

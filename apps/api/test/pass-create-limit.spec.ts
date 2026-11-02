@@ -4,8 +4,9 @@ import { PrismaService } from '../src/common/prisma.service';
 import { AuthzService } from '../src/common/authz.service';
 import { AuditService } from '../src/common/audit.service';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import { NotificationsService } from '../src/notifications/notifications.service';
 
-describe('Visitor pass daily invitation cap', () => {
+describe('Visitor pass concurrency guards', () => {
   const SOCIETY = '11111111-1111-4111-8111-111111111111';
   const FLAT = '22222222-2222-4222-8222-222222222222';
   const AP = '33333333-3333-4333-8333-333333333333';
@@ -78,5 +79,74 @@ describe('Visitor pass daily invitation cap', () => {
     expect(lockSql.join('?')).toContain('pg_advisory_xact_lock');
     expect(lockFlat).toBe(FLAT);
     expect(prisma.visitorPass.create).not.toHaveBeenCalled();
+  });
+
+  describe('revoke', () => {
+    const PASS = '55555555-5555-4555-8555-555555555555';
+    const passRow = {
+      id: PASS,
+      societyId: SOCIETY,
+      flatId: FLAT,
+      hostUserId: caller.sub,
+      status: 'ACTIVE',
+      category: 'FRIEND',
+      validFrom: new Date(Date.now() - 60_000),
+      validUntil: new Date(Date.now() + 3_600_000),
+      maxUses: 1,
+      usedCount: 0,
+      createdAt: new Date(),
+      revokedAt: null,
+      visitor: { id: 'v-1', name: 'Guest', phone: null },
+      flat: { id: FLAT, flatNumber: '101', building: { name: 'A' } },
+      host: { id: caller.sub, name: 'Resident' },
+      accessPoints: [],
+    };
+
+    function buildRevoke(updatedRows: number) {
+      const prisma = {
+        visitorPass: {
+          findUnique: jest.fn().mockResolvedValue(passRow),
+          update: jest.fn(),
+          updateMany: jest.fn().mockResolvedValue({ count: updatedRows }),
+        },
+        auditLog: { create: jest.fn().mockResolvedValue({}) },
+        $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(prisma)),
+      };
+      const authz = { society: jest.fn().mockResolvedValue({ role: 'SOCIETY_ADMIN', societyId: SOCIETY }) };
+      const notifications = { notifyPassRevoked: jest.fn().mockResolvedValue(undefined) };
+      const service = new VisitorPassesService(
+        prisma as unknown as PrismaService,
+        authz as unknown as AuthzService,
+        new CredentialsService(),
+        {} as AuditService,
+        notifications as unknown as NotificationsService,
+      );
+      return { service, prisma, notifications };
+    }
+
+    it('revokes only a not-yet-revoked pass and audits/notifies once', async () => {
+      const { service, prisma, notifications } = buildRevoke(1);
+
+      await service.revoke(caller, PASS, 'no longer expected');
+
+      expect(prisma.visitorPass.update).not.toHaveBeenCalled();
+      expect(prisma.visitorPass.updateMany).toHaveBeenCalledWith({
+        where: { id: PASS, status: { not: 'REVOKED' } },
+        data: expect.objectContaining({ status: 'REVOKED', revokedBy: caller.sub }),
+      });
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+      expect(notifications.notifyPassRevoked).toHaveBeenCalledTimes(1);
+    });
+
+    it('loses a concurrent revoke race without a second audit entry or notification', async () => {
+      // Read as ACTIVE, but another revoke committed first: the conditional update matches nothing.
+      const { service, prisma, notifications } = buildRevoke(0);
+
+      const view = await service.revoke(caller, PASS, 'duplicate click');
+
+      expect(view.id).toBe(PASS);
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+      expect(notifications.notifyPassRevoked).not.toHaveBeenCalled();
+    });
   });
 });
