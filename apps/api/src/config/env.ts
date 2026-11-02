@@ -85,6 +85,21 @@ function secret(name: string, devFallback: string, minLength = 32): string {
   return value;
 }
 
+function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  const match = allowed.find((value) => value === raw);
+  if (!match) return fail(`${name} must be one of ${allowed.join(', ')}`);
+  return match;
+}
+
+/** A selected real provider must have its credentials at boot, not at first send. */
+function requireInProduction(isProduction: boolean, reason: string, names: string[]): void {
+  if (!isProduction) return;
+  const missing = names.filter((name) => !process.env[name]?.trim());
+  if (missing.length > 0) fail(`${missing.join(', ')} required in production when ${reason}`);
+}
+
 function httpUrl(name: string, fallback: string): string {
   const value = str(name, fallback);
   let parsed: URL;
@@ -144,6 +159,30 @@ export function loadEnv(): AppEnv {
       .digest();
   }
 
+  const smsProvider = oneOf('SMS_PROVIDER', ['twilio', 'msg91', 'mock'] as const, 'mock');
+  if (smsProvider === 'twilio') {
+    requireInProduction(isProduction, 'SMS_PROVIDER=twilio', [
+      'TWILIO_ACCOUNT_SID',
+      'TWILIO_AUTH_TOKEN',
+      'TWILIO_FROM_PHONE',
+    ]);
+  } else if (smsProvider === 'msg91') {
+    requireInProduction(isProduction, 'SMS_PROVIDER=msg91', ['MSG91_AUTH_KEY', 'MSG91_SENDER_ID']);
+  }
+  const whatsappProvider = oneOf('WHATSAPP_PROVIDER', ['meta', 'twilio', 'mock'] as const, 'mock');
+  if (whatsappProvider === 'meta') {
+    requireInProduction(isProduction, 'WHATSAPP_PROVIDER=meta', [
+      'WHATSAPP_API_TOKEN',
+      'WHATSAPP_PHONE_NUMBER_ID',
+    ]);
+  } else if (whatsappProvider === 'twilio') {
+    requireInProduction(isProduction, 'WHATSAPP_PROVIDER=twilio', [
+      'TWILIO_ACCOUNT_SID',
+      'TWILIO_AUTH_TOKEN',
+      'TWILIO_WHATSAPP_FROM',
+    ]);
+  }
+
   const corsOrigins = new Set<string>([webUrl]);
   for (const origin of (process.env.CORS_ORIGINS || '').split(',')) {
     const trimmed = origin.trim();
@@ -180,13 +219,13 @@ export function loadEnv(): AppEnv {
     rateLimitEnabled: bool('RATE_LIMIT_ENABLED', true),
     notificationWebhookUrl: process.env.NOTIFICATION_WEBHOOK_URL?.trim() || undefined,
     notificationWebhookSecret: process.env.NOTIFICATION_WEBHOOK_SECRET?.trim() || undefined,
-    smsProvider: (process.env.SMS_PROVIDER?.trim().toLowerCase() as AppEnv['smsProvider']) || 'mock',
+    smsProvider,
     twilioAccountSid: process.env.TWILIO_ACCOUNT_SID?.trim() || undefined,
     twilioAuthToken: process.env.TWILIO_AUTH_TOKEN?.trim() || undefined,
     twilioFromPhone: process.env.TWILIO_FROM_PHONE?.trim() || undefined,
     msg91AuthKey: process.env.MSG91_AUTH_KEY?.trim() || undefined,
     msg91SenderId: process.env.MSG91_SENDER_ID?.trim() || undefined,
-    whatsappProvider: (process.env.WHATSAPP_PROVIDER?.trim().toLowerCase() as AppEnv['whatsappProvider']) || 'mock',
+    whatsappProvider,
     whatsappApiToken: process.env.WHATSAPP_API_TOKEN?.trim() || undefined,
     whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() || undefined,
     twilioWhatsappFrom: process.env.TWILIO_WHATSAPP_FROM?.trim() || undefined,
