@@ -429,11 +429,20 @@ export const api = {
       idempotencyKey ??
       `pass-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const endpoint = '/visitor-passes';
-    return request<PassWithCredentials>(endpoint, {
+    const result = await request<PassWithCredentials | { pass: PassView; credentialsAlreadyIssued: true }>(endpoint, {
       method: 'POST',
       idempotencyKey: key,
       body: JSON.stringify(input),
     });
+    // A retry with the same key replays the pass without credentials (they are only returned once).
+    if (!('credentials' in result)) {
+      throw new ApiError(
+        'CREDENTIALS_ALREADY_ISSUED',
+        'This pass was already created and its PIN was shown once. If you did not save it, revoke the pass and create a new one.',
+        409,
+      );
+    }
+    return result;
   },
 
   async createSocietyPass(

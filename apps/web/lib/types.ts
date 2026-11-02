@@ -104,6 +104,12 @@ export interface PassWithCredentials {
   credentials: { pin: string; qrToken: string };
 }
 
+/**
+ * A retried create (same Idempotency-Key) replays the pass without credentials: they are only
+ * ever returned once and are stored hashed, so they cannot be shown again.
+ */
+export type CreatePassResponse = PassWithCredentials | { pass: PassView; credentialsAlreadyIssued: true };
+
 export interface HouseholdMember {
   userId: string;
   name: string;

@@ -51,6 +51,36 @@ describe('Mobile API Client & Session Management', () => {
     assert.equal(normalizeApiUrl('https://api.societyos.example/api/v1/', true), 'https://api.societyos.example/api/v1');
   });
 
+  test('reports a replayed pass create (credentials already issued) instead of returning a pass without a PIN', async () => {
+    setApiUrl('http://localhost:80/api/v1');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ pass: { id: 'p1' }, credentialsAlreadyIssued: true }), {
+        status: 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    try {
+      await assert.rejects(
+        () =>
+          api.createPass(
+            {
+              flatId: 'f1',
+              visitor: { name: 'Guest' },
+              category: 'FRIEND',
+              validFrom: new Date().toISOString(),
+              validUntil: new Date(Date.now() + 3600_000).toISOString(),
+              maxUses: 1,
+              accessPointIds: ['ap1'],
+            },
+            'replayed-key-123',
+          ),
+        (err: unknown) => err instanceof ApiError && err.code === 'CREDENTIALS_ALREADY_ISSUED',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('refuses to send requests over cleartext HTTP when NODE_ENV=production', async () => {
     setApiUrl('http://localhost:80/api/v1');
     const originalEnv = process.env.NODE_ENV;

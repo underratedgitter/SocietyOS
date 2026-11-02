@@ -3,7 +3,7 @@
 import { useMemo, useState, type FormEvent } from 'react';
 import { KeyRound, QrCode, Zap } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
-import type { AccessPoint, FlatOption, PassWithCredentials, VisitorCategory } from '@/lib/types';
+import type { AccessPoint, CreatePassResponse, FlatOption, PassWithCredentials, VisitorCategory } from '@/lib/types';
 import { Notice, errorMessage } from './ui';
 
 const CATEGORIES: { value: VisitorCategory; label: string }[] = [
@@ -100,7 +100,7 @@ export function PassForm({
 
     setSubmitting(true);
     try {
-      const result = await apiRequest<PassWithCredentials>('/api/v1/visitor-passes', {
+      const result = await apiRequest<CreatePassResponse>('/api/v1/visitor-passes', {
         method: 'POST',
         idempotencyKey,
         body: JSON.stringify({
@@ -113,6 +113,12 @@ export function PassForm({
           accessPointIds: gateIds,
         }),
       });
+      if (!('credentials' in result)) {
+        setError(
+          'This pass was already created and its PIN was shown once. If you did not save it, revoke the pass and create a new one.',
+        );
+        return;
+      }
       onCreated(result, { vehicle: trimmedVehicle, purpose: trimmedPurpose });
     } catch (caught) {
       setError(errorMessage(caught));
