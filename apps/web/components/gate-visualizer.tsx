@@ -34,7 +34,7 @@ export function GateVisualizer({
   const [pulseSeconds, setPulseSeconds] = useState<number | null>(null);
 
   useEffect(() => {
-    if (state === 'OPEN') {
+    if (state === 'OPEN' && !emergencyActive) {
       setPulseSeconds(6);
       const timer = window.setInterval(() => {
         setPulseSeconds((prev) => {
@@ -49,7 +49,7 @@ export function GateVisualizer({
     } else {
       setPulseSeconds(null);
     }
-  }, [state]);
+  }, [state, emergencyActive]);
 
   const isBarrier = type === 'BOOM_BARRIER';
   const isSliding = type === 'SLIDING_GATE';

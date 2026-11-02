@@ -34,4 +34,5 @@ export interface GateController {
   getTelemetry(): Promise<GateTelemetry>;
   simulateObstruction?(obstructed: boolean): void;
   simulateFault?(fault: boolean): void;
+  clearEmergency?(): void;
 }

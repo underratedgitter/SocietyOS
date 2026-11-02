@@ -104,6 +104,17 @@ export class BiometricsService implements OnModuleInit {
       );
     }
 
+    if (
+      !dto.templateHash ||
+      dto.templateHash.startsWith('BIO_RESIDENT_') ||
+      dto.templateHash.startsWith('FINGERPRINT_RESIDENT_')
+    ) {
+      throw AppException.badRequest(
+        'INVALID_BIOMETRIC_TEMPLATE',
+        'Synthetic biometric identifiers cannot be enrolled as biometric proof.',
+      );
+    }
+
     const key = `${societyId}:${dto.templateHash}`;
     const enrollment = {
       userId: dto.userId,
@@ -181,10 +192,15 @@ export class BiometricsService implements OnModuleInit {
     societyId: string,
     dto: BiometricVerifyDto,
   ) {
-    const key = `${societyId}:${dto.templateHash}`;
-    let enrollment = this.templateRegistry.get(key);
+    const isSynthetic =
+      !dto.templateHash ||
+      dto.templateHash.startsWith('BIO_RESIDENT_') ||
+      dto.templateHash.startsWith('FINGERPRINT_RESIDENT_');
 
-    if (!enrollment && typeof (this.prisma as any).biometricTemplate?.findFirst === 'function') {
+    const key = `${societyId}:${dto.templateHash}`;
+    let enrollment = !isSynthetic ? this.templateRegistry.get(key) : undefined;
+
+    if (!enrollment && !isSynthetic && typeof (this.prisma as any).biometricTemplate?.findFirst === 'function') {
       const persisted = await (this.prisma as any).biometricTemplate.findFirst({
         where: { societyId, templateHash: dto.templateHash },
       });
@@ -202,57 +218,8 @@ export class BiometricsService implements OnModuleInit {
       }
     }
 
-    if (!enrollment) {
-      // Dynamic fallback: resolve resident by flat number or user ID within this society
-      const flatMatch = dto.templateHash.match(/FINGERPRINT_RESIDENT_([A-Za-z0-9_-]+)/i);
-      if (flatMatch) {
-        const flatNumber = flatMatch[1];
-        const rfm = await this.prisma.residentFlatMembership.findFirst({
-          where: {
-            flat: {
-              flatNumber: { equals: flatNumber, mode: 'insensitive' },
-              building: { societyId },
-            },
-            endedAt: null,
-          },
-          include: { user: true, flat: true },
-        });
-        if (rfm) {
-          enrollment = {
-            userId: rfm.userId,
-            societyId,
-            type: dto.type,
-            templateHash: dto.templateHash,
-            algorithm: 'DEFAULT_EDGE_HASH_V1',
-            consentGivenAt: new Date(),
-            lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
-          };
-          this.templateRegistry.set(key, enrollment);
-        }
-      } else if (dto.templateHash.startsWith('BIO_RESIDENT_')) {
-        const userId = dto.templateHash.replace('BIO_RESIDENT_', '');
-        const rfm = await this.prisma.residentFlatMembership.findFirst({
-          where: {
-            userId,
-            flat: { building: { societyId } },
-            endedAt: null,
-          },
-          include: { user: true, flat: true },
-        });
-        if (rfm) {
-          enrollment = {
-            userId: rfm.userId,
-            societyId,
-            type: dto.type,
-            templateHash: dto.templateHash,
-            algorithm: 'DEFAULT_EDGE_HASH_V1',
-            consentGivenAt: new Date(),
-            lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
-          };
-          this.templateRegistry.set(key, enrollment);
-        }
-      }
-    }
+    // Synthetic/placeholder biometric identifiers (e.g. FINGERPRINT_RESIDENT_*, BIO_RESIDENT_*)
+    // are explicitly rejected. Biometric verification must use real enrolled templates only.
 
     const accessPoint = await this.prisma.accessPoint.findFirst({
       where: { id: dto.accessPointId, societyId },
@@ -406,8 +373,14 @@ export class BiometricsService implements OnModuleInit {
     await adapter.emergencyOverride(reason);
 
     // Actuate real hardware on Emergency: insert GateCommand into PostgreSQL and publish via MQTT
-    const deviceIdEmerg = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
-    if (deviceIdEmerg) {
+    const deviceIdsEmerg = Array.from(
+      new Set(
+        (accessPoint.devices || [])
+          .map((d: any) => d.deviceId || d.device?.id)
+          .filter(Boolean),
+      ),
+    );
+    for (const devId of deviceIdsEmerg) {
       const commandIdEmerg = crypto.randomUUID();
       const nowEmerg = new Date();
       const expiresAtEmerg = new Date(nowEmerg.getTime() + 15 * 1000);
@@ -415,7 +388,7 @@ export class BiometricsService implements OnModuleInit {
         await (this.prisma as any).gateCommand.create({
           data: {
             id: commandIdEmerg,
-            deviceId: deviceIdEmerg,
+            deviceId: devId,
             accessPointId: accessPoint.id,
             type: 'OPEN',
             status: 'ISSUED',
@@ -467,6 +440,107 @@ export class BiometricsService implements OnModuleInit {
       accessEventId: accessEvent.id,
       gateState: await adapter.getState(),
       message: 'Emergency override activated: gate held open',
+    };
+  }
+
+  async resetEmergencyOverride(
+    societyId: string,
+    actorUserId: string,
+    actorRole: string,
+    accessPointId: string,
+    reason?: string,
+  ) {
+    const accessPoint = await this.prisma.accessPoint.findFirst({
+      where: { id: accessPointId, societyId },
+      include: { devices: { include: { device: true } } },
+    });
+
+    if (!accessPoint) {
+      throw AppException.notFound('ACCESS_POINT_NOT_FOUND', 'Access point not found in this society');
+    }
+
+    const adapter = this.adapterFactory.getOrCreate(
+      accessPoint.id,
+      accessPoint.name,
+      accessPoint.type,
+    );
+
+    // Clear emergency state on physical controller and close gate
+    if (typeof (adapter as any).clearEmergency === 'function') {
+      (adapter as any).clearEmergency();
+    }
+    await adapter.close().catch(() => undefined);
+
+    // Actuate real hardware on Reset: insert GateCommand into PostgreSQL and publish via MQTT
+    const deviceIdsReset = Array.from(
+       new Set(
+         (accessPoint.devices || [])
+           .map((d: any) => d.deviceId || d.device?.id)
+           .filter(Boolean),
+       ),
+    );
+    for (const devId of deviceIdsReset) {
+      const commandIdReset = crypto.randomUUID();
+      const nowReset = new Date();
+      const expiresAtReset = new Date(nowReset.getTime() + 15 * 1000);
+      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
+        await (this.prisma as any).gateCommand
+          .create({
+            data: {
+              id: commandIdReset,
+              deviceId: devId,
+              accessPointId: accessPoint.id,
+              type: 'CLOSE',
+              status: 'ISSUED',
+              nonce: crypto.randomBytes(16).toString('hex'),
+              issuedAt: nowReset,
+              expiresAt: expiresAtReset,
+            },
+          })
+          .catch((cmdErr: unknown) => {
+            this.logger.warn(`Reset Emergency GateCommand insertion failed: ${String(cmdErr)}`);
+          });
+      }
+      if (typeof this.mqtt?.publishCommand === 'function') {
+        await this.mqtt.publishCommand(commandIdReset).catch((mqttErr: unknown) => {
+          this.logger.warn(`Reset Emergency MQTT command publish failed: ${String(mqttErr)}`);
+        });
+      }
+    }
+
+    const accessEvent = await this.prisma.accessEvent.create({
+      data: {
+        societyId,
+        accessPointId,
+        decision: 'AUTHORIZED',
+        reasonCode: 'EMERGENCY_RESET',
+        source: 'MANUAL_OVERRIDE',
+        meta: {
+          actorUserId,
+          actorRole,
+          reason: reason || 'Emergency hold released. Normal access restored.',
+          gateState: 'CLOSED',
+        },
+      },
+    });
+
+    await this.audit.record({
+      societyId,
+      actorUserId,
+      actorRole,
+      action: 'GATE_EMERGENCY_RESET',
+      entityType: 'AccessPoint',
+      entityId: accessPointId,
+      meta: { reason, accessEventId: accessEvent.id },
+    });
+
+    return {
+      success: true,
+      decision: 'AUTHORIZED',
+      reasonCode: 'EMERGENCY_RESET',
+      accessEventId: accessEvent.id,
+      gateState: await adapter.getState(),
+      message: 'Emergency override reset: gate closed and normal access restored',
     };
   }
 

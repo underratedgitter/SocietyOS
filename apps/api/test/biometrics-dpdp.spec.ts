@@ -198,6 +198,45 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     );
   });
 
+  it('resets emergency override, sets gate to CLOSED and records reset audit log', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Main Perimeter Boom Barrier',
+      type: 'BOOM_BARRIER',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+
+    const resetResult = await biometricsService.resetEmergencyOverride(
+      'soc-1',
+      'guard-user-1',
+      'GUARD',
+      'ap-gate-1',
+      'Emergency hold released by security',
+    );
+
+    expect(resetResult.success).toBe(true);
+    expect(resetResult.decision).toBe('AUTHORIZED');
+    expect(resetResult.reasonCode).toBe('EMERGENCY_RESET');
+    expect(resetResult.gateState).toBe('CLOSED');
+    expect(mockPrisma.gateCommand.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: 'CLOSE',
+          deviceId: 'dev-controller-1',
+          accessPointId: 'ap-gate-1',
+        }),
+      }),
+    );
+    expect(mockMqtt.publishCommand).toHaveBeenCalled();
+    expect(mockAudit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GATE_EMERGENCY_RESET',
+        societyId: 'soc-1',
+      }),
+    );
+  });
+
   it('loads persisted biometric template from database on cache miss', async () => {
     mockPrisma.biometricTemplate.findFirst.mockResolvedValueOnce({
       id: 'bt-persisted-1',
@@ -274,4 +313,31 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       }),
     );
   });
+
+  it('explicitly rejects synthetic biometric values (BIO_RESIDENT_*, FINGERPRINT_RESIDENT_*) when not enrolled', async () => {
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({
+      id: 'ap-gate-1',
+      name: 'Tower A Entrance',
+      type: 'DOOR_LOCK',
+      societyId: 'soc-1',
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+    });
+
+    const resultBio = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-1',
+      type: 'FINGERPRINT',
+      templateHash: 'BIO_RESIDENT_user-123',
+    });
+    expect(resultBio.decision).toBe('DENIED');
+    expect(resultBio.reasonCode).toBe('BIOMETRIC_NOT_RECOGNIZED');
+
+    const resultFinger = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-1',
+      type: 'FINGERPRINT',
+      templateHash: 'FINGERPRINT_RESIDENT_101',
+    });
+    expect(resultFinger.decision).toBe('DENIED');
+    expect(resultFinger.reasonCode).toBe('BIOMETRIC_NOT_RECOGNIZED');
+  });
 });
+

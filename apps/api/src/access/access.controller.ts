@@ -1,7 +1,7 @@
 import { Body, Controller, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import * as crypto from 'crypto';
-import { IsIn, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AuthedRequest } from '../auth/jwt-auth.guard';
 import { DeviceAuthGuard } from '../devices/device-auth.guard';
@@ -49,6 +49,10 @@ export class EmergencyOverrideDto {
   @MinLength(3)
   @MaxLength(250)
   reason!: string;
+
+  @IsOptional()
+  @IsBoolean()
+  reset?: boolean;
 }
 
 @ApiTags('access')
@@ -130,7 +134,38 @@ export class AccessController {
       throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point not found');
     }
     const context = await this.authz.society(req.user!.sub, accessPoint.societyId, ['SOCIETY_ADMIN', 'GUARD']);
+    if (dto.reset) {
+      return this.biometrics.resetEmergencyOverride(
+        accessPoint.societyId,
+        req.user!.sub,
+        context.role,
+        dto.accessPointId,
+        dto.reason,
+      );
+    }
     return this.biometrics.triggerEmergencyOverride(
+      accessPoint.societyId,
+      req.user!.sub,
+      context.role,
+      dto.accessPointId,
+      dto.reason,
+    );
+  }
+
+  @Post('emergency-reset')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  @ApiBearerAuth()
+  async emergencyReset(@Req() req: AuthedRequest, @Body() dto: EmergencyOverrideDto) {
+    const accessPoint = await this.prisma.accessPoint.findUnique({
+      where: { id: dto.accessPointId },
+      select: { id: true, societyId: true },
+    });
+    if (!accessPoint) {
+      throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point not found');
+    }
+    const context = await this.authz.society(req.user!.sub, accessPoint.societyId, ['SOCIETY_ADMIN', 'GUARD']);
+    return this.biometrics.resetEmergencyOverride(
       accessPoint.societyId,
       req.user!.sub,
       context.role,
