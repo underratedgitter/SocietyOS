@@ -103,13 +103,6 @@ export class VisitorPassesService {
       );
     }
 
-    const recent = await this.prisma.visitorPass.count({
-      where: { flatId: dto.flatId, createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) } },
-    });
-    if (recent >= policy.maxPassesPerFlatPerDay) {
-      throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
-    }
-
     const accessPoints = await this.prisma.accessPoint.findMany({
       where: { id: { in: dto.accessPointIds }, societyId: context.societyId },
       select: { id: true },
@@ -131,6 +124,16 @@ export class VisitorPassesService {
       const qr = this.credentials.generateQrToken();
       try {
         const pass = await this.prisma.$transaction(async (tx) => {
+          // Count and insert under a per-flat lock: checked outside the transaction, parallel
+          // requests all saw the same count and together blew through the daily invitation cap.
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('visitor-pass-create'), hashtext(${dto.flatId}))`;
+          const recent = await tx.visitorPass.count({
+            where: { flatId: dto.flatId, createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) } },
+          });
+          if (recent >= policy.maxPassesPerFlatPerDay) {
+            throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
+          }
+
           let visitor = await tx.visitor.findFirst({
             where: {
               societyId: context.societyId,
