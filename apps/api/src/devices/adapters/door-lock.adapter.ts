@@ -5,7 +5,6 @@ export class DoorLockAdapter implements GateController {
   private state: GateState = 'CLOSED';
   private fireAlarmTriggered = false;
   private doorHeldOpen = false;
-  private auxiliaryRelease = false;
   private cycles = 0;
   private lastChange = new Date();
 

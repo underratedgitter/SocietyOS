@@ -9,8 +9,6 @@ export type GateState =
   | 'FAULT'
   | 'UNKNOWN';
 
-export type GateCommandType = 'OPEN' | 'CLOSE' | 'STOP' | 'EMERGENCY_OVERRIDE';
-
 export interface GateTelemetry {
   state: GateState;
   obstructionDetected: boolean;
