@@ -5,7 +5,7 @@ import { AuthzService } from '../common/authz.service';
 import { AppException } from '../common/app.exception';
 import { AuditService } from '../common/audit.service';
 import { JwtUser } from '../auth/jwt-auth.guard';
-import { CredentialsService } from './credentials.service';
+import { CredentialsService, GeneratedCredential } from './credentials.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { visitorPolicy } from '../societies/policy';
 import { CreateVisitorPassDto, ListPassesQueryDto } from './visitor-passes.dto';
@@ -346,6 +346,13 @@ export class VisitorPassesService {
       throw AppException.conflict('NOT_PENDING', 'Pass is not awaiting approval');
     }
     const nextStatus = dto.decision === 'APPROVED' ? 'ACTIVE' : 'REVOKED';
+    let pin: GeneratedCredential | null = null;
+    let qr: GeneratedCredential | null = null;
+    if (dto.decision === 'APPROVED') {
+      pin = this.credentials.generatePin();
+      qr = this.credentials.generateQrToken();
+    }
+
     const updated = await this.prisma.$transaction(async (tx) => {
       const changed = await tx.visitorPass.updateMany({
         where: { id: passId, status: 'PENDING_APPROVAL' },
@@ -356,6 +363,25 @@ export class VisitorPassesService {
       });
       if (changed.count !== 1) {
         throw AppException.conflict('NOT_PENDING', 'Pass is no longer awaiting approval');
+      }
+      if (pin && qr) {
+        await tx.visitorPassCredential.deleteMany({ where: { passId } });
+        await tx.visitorPassCredential.createMany({
+          data: [
+            {
+              passId,
+              type: pin.type,
+              credentialHash: this.credentials.hash(pin.plaintext),
+              keyId: this.credentials.keyVersion,
+            },
+            {
+              passId,
+              type: qr.type,
+              credentialHash: this.credentials.hash(qr.plaintext),
+              keyId: this.credentials.keyVersion,
+            },
+          ],
+        });
       }
       await tx.visitorApproval.create({
         data: {
@@ -390,6 +416,7 @@ export class VisitorPassesService {
             visitorName: view.visitor.name,
             visitorPhone: view.visitor.phone,
             hostUserId: pass.hostUserId,
+            pin: pin?.plaintext,
             validFrom: view.validFrom,
             validUntil: view.validUntil,
             passId: view.id,
