@@ -759,6 +759,41 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
       });
     });
 
+    it('AuthController keeps strict login/refresh IP limits for loopback and unknown IPs in production', async () => {
+      const saved = { ...process.env };
+      Object.assign(process.env, {
+        NODE_ENV: 'production',
+        WEB_URL: 'https://society.example.com',
+        JWT_ACCESS_SECRET: 'prod-access-secret-0123456789abcdef0123456789',
+        CREDENTIAL_HMAC_KEY: 'prod-credential-key-0123456789abcdef0123456789',
+        REDIS_URL: 'redis://:secret@redis:6379',
+      });
+      resetEnvCacheForTests();
+      try {
+        const hit = jest.fn().mockResolvedValue({ allowed: false, count: 0, limit: 0 });
+        const controller = new AuthController({} as any, { hit } as unknown as RateLimitService);
+        const res: any = { cookie: jest.fn() };
+
+        for (const ip of [undefined, '127.0.0.1', '::1']) {
+          hit.mockClear();
+          const req: any = { ip, headers: {}, cookies: {} };
+          await expect(
+            controller.login({ email: 'a@societyos.local', password: 'Password#123' }, req, res),
+          ).rejects.toMatchObject({ status: 429 });
+          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:login:ip:/), 20, 900);
+
+          hit.mockClear();
+          await expect(controller.refresh({ refreshToken: 'x' } as any, req, res)).rejects.toMatchObject({
+            status: 429,
+          });
+          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:refresh:ip:/), 60, 900);
+        }
+      } finally {
+        process.env = saved;
+        resetEnvCacheForTests();
+      }
+    });
+
     it('AccessEngineService triggers RATE_LIMIT_EXCEEDED and emits CREDENTIAL_BRUTE_FORCE alert', async () => {
       const mockPrisma: any = {
         idempotencyRecord: {

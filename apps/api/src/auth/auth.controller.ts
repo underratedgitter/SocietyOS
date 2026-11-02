@@ -73,7 +73,10 @@ export class AuthController {
       ip === '::ffff:127.0.0.1' ||
       ip === 'localhost' ||
       ip === 'unknown';
-    const ipLimitCount = isLoopback ? 1000 : 20;
+    // In production every request may arrive as loopback/'unknown' behind a same-host
+    // proxy, so relaxing the limit there would disable brute-force protection.
+    const relaxed = isLoopback && !getEnv().isProduction;
+    const ipLimitCount = relaxed ? 1000 : 20;
 
     const [ipLimit, accountLimit] = await Promise.all([
       this.rateLimit.hit(`auth:login:ip:${ip}`, ipLimitCount, 15 * 60),
@@ -118,7 +121,8 @@ export class AuthController {
       ip === '::ffff:127.0.0.1' ||
       ip === 'localhost' ||
       ip === 'unknown';
-    const limit = await this.rateLimit.hit(`auth:refresh:ip:${ip}`, isLoopback ? 1000 : 60, 15 * 60);
+    const relaxed = isLoopback && !getEnv().isProduction;
+    const limit = await this.rateLimit.hit(`auth:refresh:ip:${ip}`, relaxed ? 1000 : 60, 15 * 60);
     if (!limit.allowed) throw AppException.tooMany();
     const token = dto.refreshToken || this.cookie(req, REFRESH_COOKIE);
     if (!token) throw AppException.unauthorized('INVALID_SESSION', 'Session is invalid or expired');
