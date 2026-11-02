@@ -673,6 +673,7 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
     });
 
     it('swallows concurrent duplicate insertion (race condition P2002) gracefully', async () => {
+      mockPrisma.idempotencyRecord.updateMany = jest.fn().mockResolvedValue({ count: 1 });
       const duplicateError = new Prisma.PrismaClientKnownRequestError('duplicate', {
         code: 'P2002',
         clientVersion: '6.16.0',

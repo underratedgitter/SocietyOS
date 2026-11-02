@@ -10,8 +10,12 @@ function serviceWith(record: Record<string, jest.Mock>): {
   service: IdempotencyService;
   record: Record<string, jest.Mock>;
 } {
-  const prisma = { idempotencyRecord: record };
-  return { service: new IdempotencyService(prisma as never), record };
+  const fullRecord = {
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    ...record,
+  };
+  const prisma = { idempotencyRecord: fullRecord };
+  return { service: new IdempotencyService(prisma as never), record: fullRecord };
 }
 
 describe('IdempotencyService', () => {
@@ -161,6 +165,30 @@ describe('IdempotencyService', () => {
     await expect(
       service.save('key', 'visitor-passes.create', 'abc', { ok: true }),
     ).rejects.toThrow('updateMany failed');
+  });
+
+  it('calls updateMany directly on idempotencyRecord without delegate guard', async () => {
+    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
+      code: 'P2002',
+      clientVersion: '6.16.0',
+    });
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const { service } = serviceWith({
+      findUnique: jest.fn(),
+      create: jest.fn().mockRejectedValue(duplicate),
+      updateMany,
+    });
+
+    await service.save('key-regression', 'visitor-passes.create', 'fingerprint-123', { ok: true });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { key: 'key-regression', expiresAt: { lte: expect.any(Date) } },
+      data: {
+        endpoint: 'visitor-passes.create',
+        requestHash: 'fingerprint-123',
+        responseBody: { ok: true },
+        expiresAt: expect.any(Date),
+      },
+    });
   });
 });
 
