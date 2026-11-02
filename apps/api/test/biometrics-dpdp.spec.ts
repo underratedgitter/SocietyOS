@@ -339,5 +339,27 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     expect(resultFinger.decision).toBe('DENIED');
     expect(resultFinger.reasonCode).toBe('BIOMETRIC_NOT_RECOGNIZED');
   });
+
+  it('fails biometric enrollment and propagates error if BiometricTemplate persistence fails', async () => {
+    mockPrisma.societyMembership.findUnique.mockResolvedValue({
+      id: 'mem-1',
+      societyId: 'soc-1',
+      userId: 'user-1',
+      status: 'ACTIVE',
+      user: { id: 'user-1', name: 'Aarav Patel' },
+    });
+    mockPrisma.biometricTemplate.upsert.mockRejectedValueOnce(
+      new Error('BiometricTemplate table constraint failure'),
+    );
+
+    await expect(
+      biometricsService.enrollResidentBiometric('admin-1', 'soc-1', {
+        userId: 'user-1',
+        type: 'FINGERPRINT',
+        templateHash: 'sha256_mock_fail',
+        algorithm: 'ZKFINGER_V10',
+      }),
+    ).rejects.toThrow('BiometricTemplate table constraint failure');
+  });
 });
 

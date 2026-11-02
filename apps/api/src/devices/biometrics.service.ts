@@ -54,21 +54,19 @@ export class BiometricsService implements OnModuleInit {
       // DPDP Act 2023 Compliance:
       // Only preload explicitly consented and persisted biometric records.
       // Automatic boot-time consent synthesis is removed to prevent unlawful data processing.
-      if (typeof (this.prisma as any).biometricTemplate?.findMany === 'function') {
-        const persistedTemplates = await (this.prisma as any).biometricTemplate.findMany();
-        for (const tmpl of persistedTemplates) {
-          this.templateRegistry.set(`${tmpl.societyId}:${tmpl.templateHash}`, {
-            userId: tmpl.userId,
-            societyId: tmpl.societyId,
-            type: tmpl.type as 'FINGERPRINT' | 'FACE',
-            templateHash: tmpl.templateHash,
-            algorithm: tmpl.algorithm,
-            consentGivenAt: tmpl.consentGivenAt,
-            lawfulBasis: tmpl.lawfulBasis,
-          });
-        }
-        this.logger.log(`Preloaded ${persistedTemplates.length} explicitly consented resident biometric templates`);
+      const persistedTemplates = await this.prisma.biometricTemplate.findMany();
+      for (const tmpl of persistedTemplates) {
+        this.templateRegistry.set(`${tmpl.societyId}:${tmpl.templateHash}`, {
+          userId: tmpl.userId,
+          societyId: tmpl.societyId,
+          type: tmpl.type as 'FINGERPRINT' | 'FACE',
+          templateHash: tmpl.templateHash,
+          algorithm: tmpl.algorithm,
+          consentGivenAt: tmpl.consentGivenAt,
+          lawfulBasis: tmpl.lawfulBasis,
+        });
       }
+      this.logger.log(`Preloaded ${persistedTemplates.length} explicitly consented resident biometric templates`);
     } catch (err) {
       this.logger.warn(`Could not preload resident biometric templates: ${String(err)}`);
     }
@@ -130,36 +128,32 @@ export class BiometricsService implements OnModuleInit {
 
     // Encrypt template payload with AES-256-GCM and store in PostgreSQL
     const encryptedTemplate = encryptDeviceSecret(dto.rawTemplate || dto.templateHash);
-    if (typeof (this.prisma as any).biometricTemplate?.upsert === 'function') {
-      await (this.prisma as any).biometricTemplate.upsert({
-        where: { templateHash: dto.templateHash },
-        update: {
-          societyId,
-          userId: dto.userId,
-          type: dto.type,
-          encryptedTemplate,
-          algorithm: enrollment.algorithm,
-          consentGivenAt: enrollment.consentGivenAt,
-          lawfulBasis: enrollment.lawfulBasis,
-          consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
-          enrolledBy: actorUserId,
-        },
-        create: {
-          societyId,
-          userId: dto.userId,
-          type: dto.type,
-          templateHash: dto.templateHash,
-          encryptedTemplate,
-          algorithm: enrollment.algorithm,
-          consentGivenAt: enrollment.consentGivenAt,
-          lawfulBasis: enrollment.lawfulBasis,
-          consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
-          enrolledBy: actorUserId,
-        },
-      }).catch((err: unknown) => {
-        this.logger.warn(`Failed to persist encrypted biometric template: ${String(err)}`);
-      });
-    }
+    await this.prisma.biometricTemplate.upsert({
+      where: { templateHash: dto.templateHash },
+      update: {
+        societyId,
+        userId: dto.userId,
+        type: dto.type,
+        encryptedTemplate,
+        algorithm: enrollment.algorithm,
+        consentGivenAt: enrollment.consentGivenAt,
+        lawfulBasis: enrollment.lawfulBasis,
+        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+        enrolledBy: actorUserId,
+      },
+      create: {
+        societyId,
+        userId: dto.userId,
+        type: dto.type,
+        templateHash: dto.templateHash,
+        encryptedTemplate,
+        algorithm: enrollment.algorithm,
+        consentGivenAt: enrollment.consentGivenAt,
+        lawfulBasis: enrollment.lawfulBasis,
+        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+        enrolledBy: actorUserId,
+      },
+    });
 
     await this.audit.record({
       societyId,
@@ -200,8 +194,8 @@ export class BiometricsService implements OnModuleInit {
     const key = `${societyId}:${dto.templateHash}`;
     let enrollment = !isSynthetic ? this.templateRegistry.get(key) : undefined;
 
-    if (!enrollment && !isSynthetic && typeof (this.prisma as any).biometricTemplate?.findFirst === 'function') {
-      const persisted = await (this.prisma as any).biometricTemplate.findFirst({
+    if (!enrollment && !isSynthetic) {
+      const persisted = await this.prisma.biometricTemplate.findFirst({
         where: { societyId, templateHash: dto.templateHash },
       });
       if (persisted) {
@@ -290,13 +284,13 @@ export class BiometricsService implements OnModuleInit {
     await adapter.open();
 
     // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
-    const deviceIdBio = (accessPoint as any).devices?.[0]?.deviceId || (accessPoint as any).devices?.[0]?.device?.id;
+    const deviceIdBio = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
     if (deviceIdBio) {
       const commandIdBio = crypto.randomUUID();
       const nowBio = new Date();
       const expiresAtBio = new Date(nowBio.getTime() + 15 * 1000);
-      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
-        await (this.prisma as any).gateCommand.create({
+      try {
+        await this.prisma.gateCommand.create({
           data: {
             id: commandIdBio,
             deviceId: deviceIdBio,
@@ -307,14 +301,10 @@ export class BiometricsService implements OnModuleInit {
             issuedAt: nowBio,
             expiresAt: expiresAtBio,
           },
-        }).catch((cmdErr: unknown) => {
-          this.logger.warn(`Biometric GateCommand insertion failed: ${String(cmdErr)}`);
         });
-      }
-      if (typeof this.mqtt?.publishCommand === 'function') {
-        await this.mqtt.publishCommand(commandIdBio).catch((mqttErr: unknown) => {
-          this.logger.warn(`Biometric MQTT command publish failed: ${String(mqttErr)}`);
-        });
+        await this.mqtt.publishCommand(commandIdBio);
+      } catch (cmdErr: unknown) {
+        this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${String(cmdErr)}`);
       }
     }
 

@@ -19,10 +19,10 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         update: jest.fn().mockResolvedValue({}),
       },
       visitorPass: {
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       residentFlatMembership: {
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       accessPoint: {
         findMany: jest.fn(),
@@ -36,6 +36,9 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       },
       deviceAccessPoint: {
         findUnique: jest.fn(),
+      },
+      biometricTemplate: {
+        findMany: jest.fn().mockResolvedValue([]),
       },
       $transaction: jest.fn().mockImplementation((cb) => {
         if (typeof cb === 'function') {
@@ -79,11 +82,16 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         },
       ]);
 
-      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([
         {
-          userId: 'res-user-1',
-          user: { id: 'res-user-1', name: 'Rohan Sharma' },
-          flat: { flatNumber: '202', building: { name: 'Tower B' } },
+          templateHash: 'real_enrolled_template_hash_1',
+          user: {
+            id: 'res-user-1',
+            name: 'Rohan Sharma',
+            flatMemberships: [
+              { flat: { flatNumber: '202', building: { name: 'Tower B' } } },
+            ],
+          },
         },
       ]);
 
@@ -96,11 +104,12 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       expect(res.policy.offlineValidityWindowHours).toBe(24);
       expect(res.policy.maxOfflineEvents).toBe(500);
 
-      // Verify credentials contain both resident biometric template and visitor PIN
+      // Verify credentials contain real enrolled resident biometric template (not synthetic BIO_RESIDENT_)
       const resBiometric = res.credentials.find((c: any) => c.kind === 'BIOMETRIC');
       expect(resBiometric).toBeDefined();
-      expect(resBiometric!.credentialHash).toBe('BIO_RESIDENT_res-user-1');
+      expect(resBiometric!.credentialHash).toBe('real_enrolled_template_hash_1');
       expect(resBiometric!.visitorName).toContain('Rohan Sharma (Resident)');
+      expect(resBiometric!.flatNumber).toBe('Tower B · 202');
 
       const visitorCred = res.credentials.find((c: any) => c.kind === 'PIN');
       expect(visitorCred).toBeDefined();
@@ -128,13 +137,13 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         },
       ]);
 
-      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
 
       const res = await controller.edgeSync(mockDeviceReq);
       expect(res.credentials.length).toBe(0);
     });
 
-    it('returns revoked pass credential hashes and ended resident hashes in revokedHashes', async () => {
+    it('returns revoked pass credential hashes and ended resident template hashes in revokedHashes', async () => {
       mockPrisma.device.findUnique.mockResolvedValue({
         id: DEVICE_ID,
         accessPoints: [{ accessPointId: AP_GATE_1 }],
@@ -149,14 +158,50 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
           },
         ]);
 
-      mockPrisma.residentFlatMembership.findMany
-        .mockResolvedValueOnce([]) // active residents
-        .mockResolvedValueOnce([{ userId: 'ex-resident-99' }]); // ended residents
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValueOnce([{ userId: 'ex-resident-99' }]); // ended residents
+      mockPrisma.biometricTemplate.findMany
+        .mockResolvedValueOnce([]) // active resident templates
+        .mockResolvedValueOnce([{ templateHash: 'revoked-bio-template-hash-99' }]); // ended resident templates
 
       const res = await controller.edgeSync(mockDeviceReq);
       expect(res.ok).toBe(true);
       expect(res.revokedHashes).toContain('hash-revoked-pin');
-      expect(res.revokedHashes).toContain('BIO_RESIDENT_ex-resident-99');
+      expect(res.revokedHashes).toContain('revoked-bio-template-hash-99');
+      expect(res.revokedHashes).not.toContain('BIO_RESIDENT_ex-resident-99');
+    });
+
+    it('edgeSync queries only enrolled templates with consent and never outputs synthetic BIO_RESIDENT_ IDs', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany.mockResolvedValue([]);
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+      expect(mockPrisma.biometricTemplate.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            societyId: SOCIETY_ID,
+            consentGivenAt: expect.any(Object),
+            user: expect.objectContaining({
+              memberships: { some: { societyId: SOCIETY_ID, status: 'ACTIVE' } },
+              flatMemberships: {
+                some: {
+                  flat: { building: { societyId: SOCIETY_ID } },
+                  endedAt: null,
+                },
+              },
+            }),
+          }),
+        }),
+      );
+      for (const cred of res.credentials) {
+        expect(cred.credentialHash).not.toMatch(/^BIO_RESIDENT_/);
+      }
     });
   });
 

@@ -449,27 +449,55 @@ export class DeviceApiController {
         })),
       );
 
-    const residents = await this.prisma.residentFlatMembership.findMany({
+    const biometricTemplates = await this.prisma.biometricTemplate.findMany({
       where: {
-        flat: { building: { societyId } },
-        endedAt: null,
+        societyId,
+        consentGivenAt: { lte: now },
+        user: {
+          memberships: { some: { societyId, status: 'ACTIVE' } },
+          flatMemberships: {
+            some: {
+              flat: { building: { societyId } },
+              endedAt: null,
+            },
+          },
+        },
       },
       include: {
-        user: { select: { id: true, name: true } },
-        flat: { select: { flatNumber: true, building: { select: { name: true } } } },
+        user: {
+          select: {
+            id: true,
+            name: true,
+            flatMemberships: {
+              where: {
+                flat: { building: { societyId } },
+                endedAt: null,
+              },
+              include: {
+                flat: { select: { flatNumber: true, building: { select: { name: true } } } },
+              },
+            },
+          },
+        },
       },
     });
 
-    const residentCredentials = residents.map((r) => ({
-      credentialHash: `BIO_RESIDENT_${r.userId}`,
-      kind: 'BIOMETRIC' as const,
-      visitorName: `${r.user.name} (Resident)`,
-      flatNumber: `${r.flat.building.name} · ${r.flat.flatNumber}`,
-      validFrom: 0,
-      validUntil: now.getTime() + 365 * 86400_000,
-      maxUses: 999999,
-      usedCount: 0,
-    }));
+    const residentCredentials = biometricTemplates.map((t) => {
+      const primaryFlat = t.user.flatMemberships[0]?.flat;
+      const flatNumber = primaryFlat
+        ? `${primaryFlat.building.name} · ${primaryFlat.flatNumber}`
+        : '';
+      return {
+        credentialHash: t.templateHash,
+        kind: 'BIOMETRIC' as const,
+        visitorName: `${t.user.name} (Resident)`,
+        flatNumber,
+        validFrom: 0,
+        validUntil: now.getTime() + 365 * 86400_000,
+        maxUses: 999999,
+        usedCount: 0,
+      };
+    });
 
     const revokedPasses = await this.prisma.visitorPass.findMany({
       where: {
@@ -479,7 +507,7 @@ export class DeviceApiController {
       include: {
         credentials: { select: { credentialHash: true } },
       },
-    }).catch(() => []);
+    });
     const revokedPassHashes = (revokedPasses || []).flatMap((p) => p.credentials.map((c) => c.credentialHash));
 
     const endedResidents = await this.prisma.residentFlatMembership.findMany({
@@ -488,8 +516,21 @@ export class DeviceApiController {
         endedAt: { not: null },
       },
       select: { userId: true },
-    }).catch(() => []);
-    const endedResidentHashes = (endedResidents || []).map((r) => `BIO_RESIDENT_${r.userId}`);
+    });
+    const endedUserIds = Array.from(new Set((endedResidents || []).map((r) => r.userId)));
+    const endedTemplates = endedUserIds.length > 0
+      ? await this.prisma.biometricTemplate.findMany({
+          where: {
+            societyId,
+            userId: { in: endedUserIds },
+          },
+          select: { templateHash: true },
+        })
+      : [];
+    const activeResidentHashes = new Set(residentCredentials.map((c) => c.credentialHash));
+    const endedResidentHashes = (endedTemplates || [])
+      .map((t) => t.templateHash)
+      .filter((h) => !activeResidentHashes.has(h));
 
     const allRevokedHashes = [...revokedPassHashes, ...endedResidentHashes];
 
