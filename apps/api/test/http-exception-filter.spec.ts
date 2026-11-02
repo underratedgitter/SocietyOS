@@ -4,7 +4,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import express from 'express';
 import request from 'supertest';
 import { Prisma } from '@prisma/client';
-import { HttpExceptionFilter } from '../src/common/http-exception.filter';
+import { HttpExceptionFilter, redactPath } from '../src/common/http-exception.filter';
 
 @Controller('echo')
 class EchoController {
@@ -114,5 +114,12 @@ describe('HttpExceptionFilter with Express body-parser errors', () => {
     expect(json).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' }),
     );
+  });
+});
+
+describe('redactPath', () => {
+  it('strips the device push token from logged paths', () => {
+    expect(redactPath('/api/v1/device-api/push/sos_dev_abc123/hikvision')).toBe('/api/v1/device-api/push/[REDACTED]/hikvision');
+    expect(redactPath('/api/v1/visitor-passes/abc')).toBe('/api/v1/visitor-passes/abc');
   });
 });

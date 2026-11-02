@@ -59,6 +59,8 @@ function zoneOffsetMinutes(timeZone: string, at: Date): number {
  * in the path because these terminals cannot send an Authorization header; nginx redacts it from
  * access logs. Bodies (and any pictures in them) are parsed in memory and never persisted or logged.
  */
+
+const PUSH_INGEST_CHUNK = 500;
 @ApiExcludeController()
 @Controller('device-api/push')
 export class VendorPushController {
@@ -112,6 +114,9 @@ export class VendorPushController {
     if (parsed.events.length === 0) return;
     const { id, societyId, protocol } = req.device!;
     const device: IngestingDevice = { id, societyId, protocol };
-    await this.ingest.ingest(device, parsed.events);
+    // Ingest caps batches; chunk so an oversized vendor upload is processed, not a 500.
+    for (let i = 0; i < parsed.events.length; i += PUSH_INGEST_CHUNK) {
+      await this.ingest.ingest(device, parsed.events.slice(i, i + PUSH_INGEST_CHUNK));
+    }
   }
 }

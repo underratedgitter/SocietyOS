@@ -51,6 +51,11 @@ export function resolveRequestId(req: Request, res?: Response): string {
   return requestId;
 }
 
+
+/** Push devices authenticate with a token in the URL path; it must never reach the logs. */
+export function redactPath(path: string): string {
+  return path.replace(/\/device-api\/push\/[^/]+/, '/device-api/push/[REDACTED]');
+}
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
@@ -121,11 +126,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     if (status >= 500) {
       this.logger.error(
-        `${request.method} ${request.path} -> ${status} ${code} (${requestId})`,
+        `${request.method} ${redactPath(request.path)} -> ${status} ${code} (${requestId})`,
         exception instanceof Error ? exception.stack : String(exception),
       );
     } else if (status === HttpStatus.TOO_MANY_REQUESTS) {
-      this.logger.warn(`${request.method} ${request.path} -> 429 ${code} (${requestId})`);
+      this.logger.warn(`${request.method} ${redactPath(request.path)} -> 429 ${code} (${requestId})`);
     }
 
     if (response.headersSent) return;
