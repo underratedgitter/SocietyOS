@@ -17,7 +17,9 @@ import type {
   RelativeMember,
   SelfRegisterVisitorRequest,
   SelfRegisterVisitorResponse,
+  PassStatus,
   Session,
+  SettledInvoice,
   StripeIntentResponse,
   User,
 } from './types';
@@ -480,7 +482,7 @@ export const api = {
     relative: RelativeMember;
     initialPass?: {
       id: string;
-      status: string;
+      status: PassStatus;
       validFrom: string;
       validUntil: string;
       maxUses: number;
@@ -608,8 +610,8 @@ export const api = {
     societyId: string,
     invoiceId: string,
     data: { razorpayOrderId: string; razorpayPaymentId: string; razorpaySignature: string },
-  ): Promise<any> {
-    return request(
+  ): Promise<SettledInvoice> {
+    return request<SettledInvoice>(
       `/societies/${societyId}/invoices/${invoiceId}/payment/razorpay/verify`,
       {
         method: 'POST',
@@ -636,8 +638,8 @@ export const api = {
     societyId: string,
     invoiceId: string,
     paymentIntentId: string,
-  ): Promise<any> {
-    return request(
+  ): Promise<SettledInvoice> {
+    return request<SettledInvoice>(
       `/societies/${societyId}/invoices/${invoiceId}/payment/stripe/verify`,
       {
         method: 'POST',

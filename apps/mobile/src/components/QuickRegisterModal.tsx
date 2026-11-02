@@ -141,8 +141,8 @@ export function QuickRegisterModal({
                 pass: {
                   id: registered.initialPass.id,
                   societyId: registered.relative.societyId,
-                  status: registered.initialPass.status as any,
-                  effectiveStatus: registered.initialPass.status as any,
+                  status: registered.initialPass.status,
+                  effectiveStatus: registered.initialPass.status,
                   category: 'RELATIVE',
                   visitor: {
                     id: registered.relative.visitorId,

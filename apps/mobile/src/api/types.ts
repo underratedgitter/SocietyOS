@@ -30,7 +30,7 @@ export interface SocietyRef {
 export interface Membership {
   society: SocietyRef;
   role: Role;
-  status: 'ACTIVE' | 'INVITED' | 'DISABLED';
+  status: 'ACTIVE' | 'INVITED' | 'DISABLED' | 'PENDING_APPROVAL';
 }
 
 export interface FlatLink {
@@ -274,6 +274,31 @@ export interface StripeIntentResponse {
   amount: number;
   currency: string;
   invoiceId: string;
+}
+
+export type InvoiceStatus = 'PENDING' | 'PAID' | 'OVERDUE' | 'CANCELLED';
+
+export interface SettledInvoice {
+  id: string;
+  societyId: string;
+  flatId: string;
+  title: string;
+  description: string | null;
+  amount: number;
+  dueDate: string;
+  status: InvoiceStatus;
+  paidAt: string | null;
+  paidById: string | null;
+  paymentReference: string | null;
+  gatewayOrderId: string | null;
+  gatewayPaymentId: string | null;
+  paymentGateway: string | null;
+  flat: {
+    id: string;
+    flatNumber: string;
+    building: { name: string };
+  };
+  paidBy?: { id: string; name: string; email: string } | null;
 }
 
 export interface PushTokenRecord {
