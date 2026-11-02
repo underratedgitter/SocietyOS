@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DATABASE_URL: postgresql://societyos:societyos@localhost:5432/societyos
+  DATABASE_URL: postgresql://societyos:societyos@localhost:5432/societyos?schema=public
   REDIS_URL: redis://localhost:6379
   MQTT_URL: mqtt://localhost:1883
   MQTT_TEST_URL: mqtt://localhost:1883

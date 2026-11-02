@@ -1,7 +1,10 @@
 import path from 'node:path';
 import type { NextConfig } from 'next';
 
-const apiInternal = (process.env.API_INTERNAL_URL || 'http://localhost:4000').replace(/\/$/, '');
+const apiInternal = (
+  process.env.API_INTERNAL_URL ||
+  (process.env.NODE_ENV === 'production' ? 'http://api:4000' : 'http://localhost:4000')
+).replace(/\/$/, '');
 const isDev = process.env.NODE_ENV !== 'production';
 
 const contentSecurityPolicy = [

@@ -23,6 +23,32 @@ fi
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT"
 
+# Load database configuration from environment file if not explicitly set
+ENV_FILE="${ENV_FILE:-.env.production}"
+if [ ! -f "$ENV_FILE" ] && [ -f ".env" ]; then
+  ENV_FILE=".env"
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  if [ -z "${POSTGRES_USER:-}" ]; then
+    VAL="$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '\r"' || true)"
+    [ -n "$VAL" ] && POSTGRES_USER="$VAL"
+  fi
+  if [ -z "${POSTGRES_DB:-}" ]; then
+    VAL="$(grep -E '^POSTGRES_DB=' "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '\r"' || true)"
+    [ -n "$VAL" ] && POSTGRES_DB="$VAL"
+  fi
+  if [ -z "${POSTGRES_DB:-}" ] || [ -z "${POSTGRES_USER:-}" ]; then
+    DB_URL="$(grep -E '^DATABASE_URL=' "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '\r"' || true)"
+    if [ -n "$DB_URL" ]; then
+      PARSED_USER="$(echo "$DB_URL" | sed -nE 's#^[a-zA-Z0-9]+://([^:]+):.*#\1#p' || true)"
+      PARSED_DB="$(echo "$DB_URL" | sed -nE 's#^[a-zA-Z0-9]+://[^/]+/([^?]+).*#\1#p' || true)"
+      [ -z "${POSTGRES_USER:-}" ] && [ -n "$PARSED_USER" ] && POSTGRES_USER="$PARSED_USER"
+      [ -z "${POSTGRES_DB:-}" ] && [ -n "$PARSED_DB" ] && POSTGRES_DB="$PARSED_DB"
+    fi
+  fi
+fi
+
 POSTGRES_USER="${POSTGRES_USER:-societyos}"
 POSTGRES_DB="${POSTGRES_DB:-societyos}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"

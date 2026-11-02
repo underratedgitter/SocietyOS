@@ -12,6 +12,8 @@ COPY apps/mobile/package.json apps/mobile/package.json
 COPY packages/shared-types/package.json packages/shared-types/package.json
 RUN pnpm install --frozen-lockfile
 COPY . .
+ARG API_INTERNAL_URL=http://api:4000
+ENV API_INTERNAL_URL=$API_INTERNAL_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm --filter @societyos/web build
 
