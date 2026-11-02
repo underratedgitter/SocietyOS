@@ -31,6 +31,10 @@ describe('MaintenanceService', () => {
       session: {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
+      notification: {
+        findMany: jest.fn().mockResolvedValue([]),
+        update: jest.fn().mockResolvedValue({}),
+      },
     };
     service = new MaintenanceService(mockPrisma);
   });
@@ -126,5 +130,40 @@ describe('MaintenanceService', () => {
     resetEnvCacheForTests();
     process.env.CREDENTIAL_RETENTION_DAYS = '-5';
     expect(() => loadEnv()).toThrow('CREDENTIAL_RETENTION_DAYS must be a positive integer');
+  });
+
+  it('clears pin from notification payloads older than 24 hours', async () => {
+    const beforeSweep = Date.now();
+    const oldNotification = {
+      id: 'notif-old-1',
+      payload: { phone: '+919876543210', pin: '123456', flatNumber: '202' },
+      createdAt: new Date(Date.now() - 25 * 3600 * 1000),
+    };
+
+    mockPrisma.notification.findMany.mockResolvedValue([oldNotification]);
+    mockPrisma.notification.update.mockResolvedValue({ id: 'notif-old-1' });
+
+    await service.sweep();
+
+    expect(mockPrisma.notification.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          createdAt: { lt: expect.any(Date) },
+        }),
+      }),
+    );
+
+    const callArg = mockPrisma.notification.findMany.mock.calls[0][0];
+    const cutoffTime = callArg.where.createdAt.lt.getTime();
+    const cutoff24Hours = 24 * 3600 * 1000;
+    expect(beforeSweep - cutoffTime).toBeGreaterThanOrEqual(cutoff24Hours - 2000);
+    expect(beforeSweep - cutoffTime).toBeLessThanOrEqual(cutoff24Hours + 2000);
+
+    expect(mockPrisma.notification.update).toHaveBeenCalledWith({
+      where: { id: 'notif-old-1' },
+      data: {
+        payload: { phone: '+919876543210', flatNumber: '202' },
+      },
+    });
   });
 });

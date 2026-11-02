@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { getEnv } from '../config';
 
@@ -36,13 +37,17 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         data: { status: 'EXPIRED' },
       });
       if (expiredCommands.count > 0) {
-        await this.prisma.securityAlert.create({
-          data: {
-            severity: 'INFO',
-            type: 'GATE_COMMANDS_EXPIRED',
-            detail: { count: expiredCommands.count, sweptAt: now.toISOString() } as never,
-          },
-        }).catch(() => undefined);
+        try {
+          await this.prisma.securityAlert.create({
+            data: {
+              severity: 'INFO',
+              type: 'GATE_COMMANDS_EXPIRED',
+              detail: { count: expiredCommands.count, sweptAt: now.toISOString() } as never,
+            },
+          });
+        } catch (alertError) {
+          this.logger.warn(`Failed to create security alert for expired gate commands: ${String(alertError)}`);
+        }
       }
 
       await this.prisma.visitorPass.updateMany({
@@ -94,6 +99,29 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
       await this.prisma.session.deleteMany({
         where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600 * 1000) } },
       });
+
+      // Remove PIN from notifications older than 24 hours to prevent plaintext PIN storage
+      const notifCutoff = new Date(now.getTime() - 24 * 3600 * 1000);
+      const oldNotifications = await this.prisma.notification.findMany({
+        where: { createdAt: { lt: notifCutoff } },
+        select: { id: true, payload: true },
+        take: 500,
+      });
+      for (const notif of oldNotifications) {
+        if (
+          notif.payload &&
+          typeof notif.payload === 'object' &&
+          !Array.isArray(notif.payload) &&
+          'pin' in notif.payload
+        ) {
+          const updatedPayload = { ...(notif.payload as Record<string, unknown>) };
+          delete updatedPayload.pin;
+          await this.prisma.notification.update({
+            where: { id: notif.id },
+            data: { payload: updatedPayload as Prisma.InputJsonValue },
+          });
+        }
+      }
     } catch (error) {
       this.logger.warn(`Maintenance sweep failed: ${String(error)}`);
     } finally {

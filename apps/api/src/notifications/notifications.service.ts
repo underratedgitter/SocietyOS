@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { createHmac } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { getEnv } from '../config';
 import { SmsDispatcherService } from './sms-dispatcher.service';
@@ -283,18 +284,28 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
             notification.payload as Record<string, any>,
             notification.userId,
           );
-          await this.prisma.notification.update({
-            where: { id: notification.id },
-            data: { status: 'SENT', sentAt: new Date(), lastError: null, nextAttemptAt: null },
-          });
-        } catch (error) {
-          const attempts = notification.attempts + 1;
+          const sanitizedPayload = this.stripPin(notification.payload);
           await this.prisma.notification.update({
             where: { id: notification.id },
             data: {
-              status: attempts >= MAX_ATTEMPTS ? 'FAILED' : 'PENDING',
+              status: 'SENT',
+              sentAt: new Date(),
+              lastError: null,
+              nextAttemptAt: null,
+              payload: sanitizedPayload as Prisma.InputJsonValue,
+            },
+          });
+        } catch (error) {
+          const attempts = notification.attempts + 1;
+          const isFailed = attempts >= MAX_ATTEMPTS;
+          const sanitizedPayload = isFailed ? this.stripPin(notification.payload) : undefined;
+          await this.prisma.notification.update({
+            where: { id: notification.id },
+            data: {
+              status: isFailed ? 'FAILED' : 'PENDING',
               lastError: String(error).slice(0, 500),
-              nextAttemptAt: attempts >= MAX_ATTEMPTS ? null : new Date(Date.now() + 60_000 * attempts),
+              nextAttemptAt: isFailed ? null : new Date(Date.now() + 60_000 * attempts),
+              ...(sanitizedPayload !== undefined ? { payload: sanitizedPayload as Prisma.InputJsonValue } : {}),
             },
           });
           this.logger.warn(`Notification ${notification.id} delivery failed (attempt ${attempts}): ${String(error)}`);
@@ -305,6 +316,15 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.running = false;
     }
+  }
+
+  private stripPin(payload: unknown): unknown {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const copy = { ...(payload as Record<string, unknown>) };
+      delete copy.pin;
+      return copy;
+    }
+    return payload;
   }
 
   private async deliver(

@@ -285,6 +285,65 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
         }),
       );
     });
+
+    test('a sent notification no longer has a pin in its payload', async () => {
+      const mockPending = [
+        {
+          id: 'notif-sent-1',
+          channel: 'SMS',
+          template: 'VISITOR_PASS_ISSUED',
+          payload: { phone: '+919876543210', flatNumber: '101', pin: '998877' },
+          attempts: 0,
+        },
+      ];
+
+      mockPrisma.notification.findMany.mockResolvedValue(mockPending);
+      mockPrisma.notification.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-sent-1', status: 'SENT' });
+
+      await notifications.drain();
+
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-sent-1' },
+          data: expect.objectContaining({
+            status: 'SENT',
+            payload: { phone: '+919876543210', flatNumber: '101' },
+          }),
+        }),
+      );
+    });
+
+    test('a permanently failed notification no longer has a pin in its payload', async () => {
+      const mockPending = [
+        {
+          id: 'notif-failed-1',
+          channel: 'PUSH',
+          template: 'VISITOR_PASS_APPROVED',
+          payload: { token: 'invalid-token', flatNumber: '202', pin: '445566' },
+          attempts: 4, // 5th attempt will fail permanently
+        },
+      ];
+
+      mockPrisma.notification.findMany.mockResolvedValue(mockPending);
+      mockPrisma.notification.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-failed-1', status: 'FAILED' });
+
+      // Mock push delivery failure
+      jest.spyOn(push, 'sendExpoPushBatch').mockResolvedValue({ sent: 0, failed: 1 });
+
+      await notifications.drain();
+
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-failed-1' },
+          data: expect.objectContaining({
+            status: 'FAILED',
+            payload: { token: 'invalid-token', flatNumber: '202' },
+          }),
+        }),
+      );
+    });
   });
 
   describe('PushTokenController', () => {
