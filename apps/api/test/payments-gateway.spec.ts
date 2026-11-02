@@ -272,6 +272,108 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
         response: expect.objectContaining({ code: 'PAYMENT_INTENT_MISMATCH' }),
       });
     });
+
+    test('rejects Stripe payment intent creation in production when STRIPE_SECRET_KEY is missing', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+      const originalEnv = configModule.getEnv();
+      const spy = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        isProduction: true,
+        stripeSecretKey: undefined,
+      });
+
+      try {
+        await expect(
+          service.createStripePaymentIntent(residentUser, SOCIETY_ID, INVOICE_ID, { currency: 'INR' }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'GATEWAY_NOT_CONFIGURED' }),
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('verifyStripePayment wraps upstream fetch network errors as badGateway PAYMENT_GATEWAY_ERROR', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_test_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithIntent);
+
+      const originalEnv = configModule.getEnv();
+      const spyEnv = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        stripeSecretKey: 'sk_test_mock_key',
+      });
+      const spyFetch = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('Network connection reset'));
+
+      try {
+        await expect(
+          service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+            paymentIntentId: 'pi_test_123',
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'PAYMENT_GATEWAY_ERROR' }),
+        });
+      } finally {
+        spyEnv.mockRestore();
+        spyFetch.mockRestore();
+      }
+    });
+
+    test('verifyStripePayment wraps non-ok HTTP responses as badGateway PAYMENT_GATEWAY_ERROR', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_test_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithIntent);
+
+      const originalEnv = configModule.getEnv();
+      const spyEnv = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        stripeSecretKey: 'sk_test_mock_key',
+      });
+      const spyFetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: jest.fn().mockResolvedValue('Bad gateway from Stripe'),
+      } as unknown as Response);
+
+      try {
+        await expect(
+          service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+            paymentIntentId: 'pi_test_123',
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'PAYMENT_GATEWAY_ERROR' }),
+        });
+      } finally {
+        spyEnv.mockRestore();
+        spyFetch.mockRestore();
+      }
+    });
+
+    test('verifyStripePayment preserves AppException when payment is not completed', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_test_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithIntent);
+
+      const originalEnv = configModule.getEnv();
+      const spyEnv = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        stripeSecretKey: 'sk_test_mock_key',
+      });
+      const spyFetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ status: 'requires_payment_method' }),
+      } as unknown as Response);
+
+      try {
+        await expect(
+          service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+            paymentIntentId: 'pi_test_123',
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'PAYMENT_NOT_COMPLETED' }),
+        });
+      } finally {
+        spyEnv.mockRestore();
+        spyFetch.mockRestore();
+      }
+    });
   });
 
   describe('Webhooks: Razorpay & Stripe Callbacks', () => {
