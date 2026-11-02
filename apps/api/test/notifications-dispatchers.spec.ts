@@ -6,6 +6,7 @@ import { PushDispatcherService } from '../src/notifications/push-dispatcher.serv
 import { NotificationsService } from '../src/notifications/notifications.service';
 import { PushTokenController } from '../src/notifications/push-token.controller';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import * as config from '../src/config';
 
 describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher)', () => {
   describe('SmsDispatcherService', () => {
@@ -167,6 +168,50 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       };
       push = new PushDispatcherService(mockPrisma);
       push.clearMockSentStore();
+    });
+
+    describe('live web push dispatch (production)', () => {
+      beforeEach(() => {
+        const realEnv = config.getEnv();
+        jest.spyOn(config, 'getEnv').mockReturnValue({ ...realEnv, nodeEnv: 'production', isProduction: true });
+      });
+
+      afterEach(() => {
+        jest.restoreAllMocks();
+      });
+
+      test('does not follow redirects and treats a 3xx response as a delivery failure', async () => {
+        const fetchSpy = jest
+          .spyOn(global, 'fetch')
+          .mockResolvedValue(new Response(null, { status: 307, headers: { location: 'http://169.254.169.254/' } }));
+
+        await expect(
+          push.sendWebPush('tok-1', 'https://fcm.googleapis.com/fcm/send/sub1', null, null, 't', 'b'),
+        ).rejects.toThrow(/redirect/i);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(fetchSpy.mock.calls[0][1]).toEqual(expect.objectContaining({ redirect: 'manual' }));
+      });
+
+      test('re-validates the stored endpoint before fetching and counts it as failed', async () => {
+        const fetchSpy = jest.spyOn(global, 'fetch');
+        mockPrisma.pushDeviceToken.findMany.mockResolvedValue([
+          // Stored before the allowlist existed; must never be fetched.
+          { id: 'dev-x', token: 'web-legacy', platform: 'web', endpoint: 'https://metadata.attacker.example/push' },
+        ]);
+
+        const res = await push.sendToUser('user-1', 'VISITOR_ARRIVED', { visitorName: 'X' });
+
+        expect(res).toEqual({ sentCount: 0, failedCount: 1 });
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+
+      test('counts non-2xx web push responses as failures', async () => {
+        jest.spyOn(global, 'fetch').mockResolvedValue(new Response(null, { status: 500 }));
+
+        await expect(
+          push.sendWebPush('tok-1', 'https://fcm.googleapis.com/fcm/send/sub1', null, null, 't', 'b'),
+        ).rejects.toThrow(/HTTP 500/);
+      });
     });
 
     test('validates Expo Push Token formats', () => {
@@ -469,6 +514,14 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
         'https://100.64.0.1:8443/push', // CGNAT
         'https://api:4000/internal', // Internal docker container name
         'not-a-url', // Malformed URL
+        'https://push.example.com/endpoint', // Public host that is not a browser push service
+        'https://internal-alias.attacker.example/push', // DNS name that may resolve to an internal IP
+        'https://fcm.googleapis.com.evil.com/fcm/send/x', // Lookalike suffix of an allowlisted host
+        'https://evilfcm.googleapis.com/fcm/send/x', // Different subdomain of an allowlisted host
+        'https://notify.windows.com/w', // Bare suffix without a regional label
+        'https://fcm.googleapis.com:8443/fcm/send/x', // Non-default port
+        'https://user:pw@fcm.googleapis.com/fcm/send/x', // Embedded credentials
+        'http://updates.push.services.mozilla.com/wpush/v2/x', // Allowlisted host over http
       ];
 
       for (const endpoint of disallowedEndpoints) {
@@ -500,6 +553,22 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
 
       expect(res.ok).toBe(true);
       expect(mockPrisma.pushDeviceToken.upsert).toHaveBeenCalled();
+    });
+
+    test('accepts endpoints of every supported browser push service', async () => {
+      mockPrisma.pushDeviceToken.upsert.mockResolvedValue({ id: 'token-rec-web', platform: 'web' });
+      const allowed = [
+        'https://fcm.googleapis.com/fcm/send/abc',
+        'https://updates.push.services.mozilla.com/wpush/v2/abc',
+        'https://web.push.apple.com/QGx',
+        'https://wns2-par02p.notify.windows.com/w/?token=abc',
+      ];
+
+      for (const endpoint of allowed) {
+        await expect(
+          controller.registerToken(testUser, { token: `token-${endpoint.length}`, platform: 'web', endpoint }),
+        ).resolves.toMatchObject({ ok: true });
+      }
     });
   });
 });
