@@ -16,6 +16,7 @@ node_modules
 !**/.env.example
 infrastructure/docker/mosquitto/passwd
 infrastructure/docker/mosquitto/acl
+infrastructure/docker/redis/password
 docs/requirements/*.pdf
 *.pdf
 # Database dumps written by backup-postgres.sh default to ./backups.

@@ -34,14 +34,18 @@ services:
   redis:
     image: redis:7.4.12-alpine3.21
     restart: unless-stopped
-    env_file: .env.production
-    # Auth is mandatory: every container on the network can reach Redis.
-    # Going through docker-entrypoint.sh keeps the drop to the redis user.
+    # Auth is mandatory: every container on the network can reach Redis. The
+    # password comes from a secret file rather than env_file so Redis never
+    # receives the app's other secrets. REDIS_URL in .env.production must
+    # carry the same value. Going through docker-entrypoint.sh keeps the drop
+    # to the redis user.
+    secrets: [redis_password]
     command:
       - sh
       - -c
       - >-
-        : "$${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env.production}" &&
+        REDIS_PASSWORD="$$(cat /run/secrets/redis_password)" &&
+        { [ -n "$$REDIS_PASSWORD" ] || { echo "redis_password secret is empty" >&2; exit 1; }; } &&
         exec docker-entrypoint.sh redis-server --appendonly yes
         --maxmemory 256mb --maxmemory-policy allkeys-lru
         --requirepass "$$REDIS_PASSWORD"
@@ -55,7 +59,7 @@ services:
           cpus: "0.5"
           memory: 384m
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -176,6 +180,11 @@ services:
       timeout: 5s
       retries: 10
     networks: [private]
+
+secrets:
+  redis_password:
+    # Generate with: openssl rand -hex 24 > infrastructure/docker/redis/password
+    file: ./infrastructure/docker/redis/password
 
 volumes:
   postgres_data:
