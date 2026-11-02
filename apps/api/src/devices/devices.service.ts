@@ -86,6 +86,8 @@ export class DevicesService {
           deviceUid,
           name: dto.name.trim(),
           firmware: dto.firmware?.trim() || null,
+          protocol: dto.protocol ?? 'NATIVE',
+          pushAllowedIps: dto.pushAllowedIps ?? [],
           credentials: {
             create: {
               tokenHash: sha256(deviceToken),

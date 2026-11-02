@@ -67,6 +67,31 @@ enum DeviceStatus {
   REVOKED
 }
 
+/// How a device talks to SocietyOS. Vendor terminals match fingerprints/faces on-device and
+/// report the matched device user ID; SocietyOS maps that ID to a resident and decides.
+enum DeviceProtocol {
+  NATIVE           // SocietyOS gate controller (bearer token + MQTT commands)
+  GENERIC_WEBHOOK  // normalized JSON from the edge connector or any middleware
+  ZKTECO_ADMS      // ZKTeco / eSSL / Realtime / Identix "iclock" push protocol
+  HIKVISION_ISAPI  // Hikvision access-control event push
+  DAHUA_HTTP       // Dahua access-control event push
+  SUPREMA_BIOSTAR2 // via edge connector polling BioStar 2
+  MATRIX_COSEC     // via edge connector polling COSEC
+}
+
+enum DeviceSyncCommandKind {
+  UPSERT_USER
+  DELETE_USER
+  OPEN_DOOR
+}
+
+enum DeviceSyncCommandStatus {
+  PENDING
+  SENT
+  ACKED
+  FAILED
+}
+
 enum CommandStatus {
   ISSUED
   ACKNOWLEDGED
@@ -147,6 +172,7 @@ model User {
   amenityBookings AmenityBooking[]   @relation("AmenityBooker")
   paidInvoices    MaintenanceInvoice[] @relation("InvoicePayer")
   biometricTemplates BiometricTemplate[]
+  biometricIdentities BiometricIdentity[]
   pushTokens     PushDeviceToken[]
 }
 
@@ -188,6 +214,7 @@ model Society {
   amenityBookings AmenityBooking[]
   maintenanceInvoices MaintenanceInvoice[]
   biometricTemplates BiometricTemplate[]
+  biometricIdentities BiometricIdentity[]
   credentials VisitorPassCredential[]
 }
 
@@ -379,6 +406,9 @@ model Device {
   deviceUid  String       @unique
   name       String
   status     DeviceStatus @default(ACTIVE)
+  protocol   DeviceProtocol @default(NATIVE)
+  /// Source IPs allowed for protocols without per-request auth (e.g. ZKTeco ADMS). Empty = any.
+  pushAllowedIps String[] @default([])
   firmware   String?
   lastSeenAt DateTime?    @db.Timestamptz(6)
   createdAt  DateTime     @default(now()) @db.Timestamptz(6)
@@ -389,8 +419,60 @@ model Device {
   commands   GateCommand[]
   events     DeviceEvent[]
   healthLogs DeviceHealthLog[]
+  syncCommands      DeviceSyncCommand[]
+  biometricReceipts BiometricEventReceipt[]
 
   @@index([societyId])
+}
+
+/// A resident's user ID on biometric terminals (ZKTeco PIN, Hikvision employeeNo, Matrix user ID).
+/// Numeric and per-society so it fits every vendor's ID format.
+model BiometricIdentity {
+  id           String    @id @default(uuid()) @db.Uuid
+  societyId    String    @db.Uuid
+  userId       String    @db.Uuid
+  deviceUserId String
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6)
+  revokedAt    DateTime? @db.Timestamptz(6)
+
+  society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([societyId, deviceUserId])
+  @@unique([societyId, userId])
+}
+
+/// Dedupe ledger: vendor terminals resend the same punch after reconnecting.
+model BiometricEventReceipt {
+  id            String   @id @default(uuid()) @db.Uuid
+  deviceId      String   @db.Uuid
+  dedupeKey     String
+  accessEventId String?  @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, dedupeKey])
+  @@index([createdAt])
+}
+
+/// Commands that must reach a vendor terminal (add/remove a user, open the door). Delivered when
+/// the device polls (ZKTeco ADMS getrequest) or when the edge connector pulls them.
+model DeviceSyncCommand {
+  id          String                  @id @default(uuid()) @db.Uuid
+  deviceId    String                  @db.Uuid
+  kind        DeviceSyncCommandKind
+  payload     Json
+  status      DeviceSyncCommandStatus @default(PENDING)
+  attempts    Int                     @default(0)
+  result      String?
+  createdAt   DateTime                @default(now()) @db.Timestamptz(6)
+  sentAt      DateTime?               @db.Timestamptz(6)
+  completedAt DateTime?               @db.Timestamptz(6)
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, status, createdAt])
 }
 
 model DeviceCredential {

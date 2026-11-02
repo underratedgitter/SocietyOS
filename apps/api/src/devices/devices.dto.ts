@@ -1,8 +1,12 @@
+import { DeviceProtocol } from '@prisma/client';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   ArrayUnique,
   IsArray,
+  IsEnum,
   IsIn,
+  IsIP,
   IsOptional,
   IsString,
   IsUUID,
@@ -48,6 +52,17 @@ export class ProvisionDeviceDto {
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   accessPointIds!: string[];
+  /** Defaults to NATIVE (SocietyOS controller). Vendor terminals: see docs/BIOMETRIC_DEVICES.md. */
+  @IsOptional()
+  @IsEnum(DeviceProtocol)
+  protocol?: DeviceProtocol;
+
+  /** Pin source IPs for protocols that cannot authenticate each request (ZKTeco ADMS). */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(16)
+  @IsIP(undefined, { each: true })
+  pushAllowedIps?: string[];
 }
 
 export class EmergencyOverrideDto {

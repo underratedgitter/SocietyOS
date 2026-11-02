@@ -6,6 +6,7 @@ import { AppException } from '../common/app.exception';
 import { parseCookies } from '../common/crypto.util';
 import { getEnv } from '../config';
 import { ACCESS_COOKIE } from './auth.constants';
+import { DeviceProtocol } from '@prisma/client';
 
 export interface JwtUser {
   sub: string;
@@ -20,7 +21,7 @@ export interface AuthedRequest extends Request {
   authSource?: 'bearer' | 'cookie';
   membership?: { societyId: string; role: string };
   flat?: { id: string; societyId: string };
-  device?: { id: string; deviceUid: string; societyId: string; name: string };
+  device?: { id: string; deviceUid: string; societyId: string; name: string; protocol: DeviceProtocol };
 }
 
 const PASSWORD_CHANGE_ALLOWED_PATHS = [
