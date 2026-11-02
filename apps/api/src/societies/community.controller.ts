@@ -106,11 +106,13 @@ export class CommunityController {
   // =========================================================================
 
   @Get('amenity-bookings')
+  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
   listBookings(
+    @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,
     @Query('flatId') flatId?: string,
   ) {
-    return this.community.listBookings(paramStr(req.params.societyId), flatId);
+    return this.community.listBookings(user!, paramStr(req.params.societyId), flatId);
   }
 
   @Post('amenity-bookings')

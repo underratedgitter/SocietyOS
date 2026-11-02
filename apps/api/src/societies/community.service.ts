@@ -208,11 +208,42 @@ export class CommunityService {
   // AMENITY BOOKINGS
   // =========================================================================
 
-  async listBookings(societyId: string, flatId?: string) {
+  async listBookings(user: JwtUser, societyId: string, flatId?: string) {
+    const context = await this.authz.society(user.sub, societyId);
+
+    let targetFlatId: string | undefined = flatId;
+    let allowedFlatIds: string[] | undefined = undefined;
+
+    if (context.role === 'RESIDENT') {
+      if (flatId) {
+        // Enforce that resident belongs to this flat and that flat belongs to this society
+        const flatCtx = await this.authz.flat(user.sub, flatId);
+        if (flatCtx.societyId !== societyId) {
+          throw AppException.forbidden('NOT_YOUR_FLAT', 'Flat does not belong to this society');
+        }
+      } else {
+        // Scope to resident's flats in this society
+        const memberships = await this.prisma.residentFlatMembership.findMany({
+          where: {
+            userId: user.sub,
+            endedAt: null,
+            flat: { building: { societyId } },
+          },
+          select: { flatId: true },
+        });
+        allowedFlatIds = memberships.map((m) => m.flatId);
+      }
+    } else if (flatId) {
+      const flatCtx = await this.authz.flat(user.sub, flatId);
+      if (flatCtx.societyId !== societyId) {
+        throw AppException.forbidden('FLAT_NOT_IN_SOCIETY', 'Flat does not belong to this society');
+      }
+    }
+
     return this.prisma.amenityBooking.findMany({
       where: {
         societyId,
-        ...(flatId ? { flatId } : {}),
+        ...(targetFlatId ? { flatId: targetFlatId } : allowedFlatIds ? { flatId: { in: allowedFlatIds } } : {}),
       },
       orderBy: { slotStart: 'asc' },
       include: {

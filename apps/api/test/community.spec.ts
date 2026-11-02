@@ -441,6 +441,51 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       const res = await communityService.cancelBooking(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'book-1');
       expect(res.status).toBe('CANCELLED');
     });
+
+    it('scopes bookings to resident flats and rejects listing arbitrary other flats (Issue 7)', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue({
+        societyId: SOCIETY_A,
+        userId: residentUser1.sub,
+        role: 'RESIDENT',
+        status: 'ACTIVE',
+      });
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_102,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue(null);
+
+      await expect(
+        communityService.listBookings(residentUser1, SOCIETY_A, FLAT_102),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'NOT_YOUR_FLAT' }),
+      });
+    });
+
+    it('allows resident to list bookings for their own flat', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue({
+        societyId: SOCIETY_A,
+        userId: residentUser1.sub,
+        role: 'RESIDENT',
+        status: 'ACTIVE',
+      });
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_101,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue({ id: 'rfm-1' });
+      mockPrisma.amenityBooking.findMany.mockResolvedValue([
+        { id: 'book-1', societyId: SOCIETY_A, flatId: FLAT_101 },
+      ]);
+
+      const res = await communityService.listBookings(residentUser1, SOCIETY_A, FLAT_101);
+      expect(res.length).toBe(1);
+      expect(mockPrisma.amenityBooking.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ flatId: FLAT_101 }),
+        }),
+      );
+    });
   });
 
   // =========================================================================
