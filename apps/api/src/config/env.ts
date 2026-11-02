@@ -159,6 +159,14 @@ export function loadEnv(): AppEnv {
       .digest();
   }
 
+  const rateLimitEnabled = bool('RATE_LIMIT_ENABLED', true);
+  if (rateLimitEnabled) {
+    // Per-process fallback counters are not shared across replicas.
+    requireInProduction(isProduction, 'rate limiting is enabled', ['REDIS_URL']);
+  } else if (isProduction) {
+    logger.warn('RATE_LIMIT_ENABLED=false: login, OTP and public endpoints are unthrottled.');
+  }
+
   const smsProvider = oneOf('SMS_PROVIDER', ['twilio', 'msg91', 'mock'] as const, 'mock');
   if (smsProvider === 'twilio') {
     requireInProduction(isProduction, 'SMS_PROVIDER=twilio', [
@@ -216,7 +224,7 @@ export function loadEnv(): AppEnv {
     corsOrigins: [...corsOrigins],
     cookieSecure: bool('COOKIE_SECURE', isProduction),
     swaggerEnabled: bool('ENABLE_SWAGGER', !isProduction),
-    rateLimitEnabled: bool('RATE_LIMIT_ENABLED', true),
+    rateLimitEnabled,
     notificationWebhookUrl: process.env.NOTIFICATION_WEBHOOK_URL?.trim() || undefined,
     notificationWebhookSecret: process.env.NOTIFICATION_WEBHOOK_SECRET?.trim() || undefined,
     smsProvider,

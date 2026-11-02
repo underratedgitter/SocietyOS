@@ -1,4 +1,10 @@
+import { Logger } from '@nestjs/common';
+import { Response } from 'express';
+import { AddressInfo, createServer, Server } from 'net';
 import { RateLimitService } from '../src/common/rate-limit.service';
+import { PrismaService } from '../src/common/prisma.service';
+import { MqttService } from '../src/devices/mqtt.service';
+import { HealthController } from '../src/health.controller';
 import { resetEnvCacheForTests } from '../src/config';
 
 const original = {
@@ -80,6 +86,148 @@ describe('RateLimitService memory fallback', () => {
       count: 0,
       limit: 1,
     });
+  });
+});
+
+describe('RateLimitService without a usable Redis', () => {
+  const keys = [
+    'NODE_ENV',
+    'WEB_URL',
+    'JWT_ACCESS_SECRET',
+    'CREDENTIAL_HMAC_KEY',
+    'REDIS_URL',
+    'RATE_LIMIT_ENABLED',
+  ] as const;
+  const saved = new Map<string, string | undefined>();
+  let service: RateLimitService | undefined;
+  let noAuthServer: Server | undefined;
+
+  beforeEach(() => {
+    for (const key of keys) saved.set(key, process.env[key]);
+    process.env.RATE_LIMIT_ENABLED = 'true';
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(async () => {
+    service?.onModuleDestroy();
+    service = undefined;
+    if (noAuthServer) await new Promise<void>((resolve) => noAuthServer!.close(() => resolve()));
+    noAuthServer = undefined;
+    jest.restoreAllMocks();
+    for (const [key, value] of saved) restore(key, value);
+    resetEnvCacheForTests();
+  });
+
+  function useProduction(redisUrl: string): void {
+    process.env.NODE_ENV = 'production';
+    process.env.WEB_URL = 'https://society.example.com';
+    process.env.JWT_ACCESS_SECRET = 'prod-access-secret-0123456789abcdef0123456789';
+    process.env.CREDENTIAL_HMAC_KEY = 'prod-credential-key-0123456789abcdef0123456789';
+    process.env.REDIS_URL = redisUrl;
+    resetEnvCacheForTests();
+  }
+
+  /** A Redis-protocol server that, like `requirepass`, rejects unauthenticated commands. */
+  async function startNoAuthRedis(): Promise<string> {
+    const server = createServer((socket) => {
+      socket.on('data', () => socket.write('-NOAUTH Authentication required.\r\n'));
+      socket.on('error', () => undefined);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    noAuthServer = server;
+    const { port } = server.address() as AddressInfo;
+    return `redis://127.0.0.1:${port}`;
+  }
+
+  async function unusedPortUrl(): Promise<string> {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+    const { port } = probe.address() as AddressInfo;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    return `redis://127.0.0.1:${port}`;
+  }
+
+  it('refuses to start in production when Redis rejects authentication', async () => {
+    useProduction(await startNoAuthRedis());
+    service = new RateLimitService();
+
+    await expect(service.onModuleInit()).rejects.toThrow(
+      'Redis is required for rate limiting in production',
+    );
+    expect(service.healthy).toBe(false);
+  });
+
+  it('refuses to start in production when Redis is unreachable', async () => {
+    useProduction(await unusedPortUrl());
+    service = new RateLimitService();
+
+    await expect(service.onModuleInit()).rejects.toThrow(
+      'Redis is required for rate limiting in production',
+    );
+  });
+
+  it('fails closed in production instead of falling back to per-process counters', async () => {
+    useProduction(await startNoAuthRedis());
+    service = new RateLimitService();
+    await service.onModuleInit().catch(() => undefined);
+
+    await expect(service.hit('auth:login:ip:203.0.113.9', 20, 900)).resolves.toEqual({
+      allowed: false,
+      count: 0,
+      limit: 20,
+    });
+  });
+
+  it('keeps the in-memory fallback outside production', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.REDIS_URL = await startNoAuthRedis();
+    resetEnvCacheForTests();
+    service = new RateLimitService();
+
+    await expect(service.onModuleInit()).resolves.toBeUndefined();
+    expect(service.healthy).toBe(true);
+    await expect(service.hit('unit:dev', 1, 60)).resolves.toMatchObject({ allowed: true, count: 1 });
+  });
+});
+
+describe('HealthController readiness with rate limiting', () => {
+  function controller(rateLimit: { healthy: boolean; redisReady: boolean }): HealthController {
+    const prisma = {
+      $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+      notification: { count: jest.fn().mockResolvedValue(0) },
+    };
+    return new HealthController(
+      prisma as unknown as PrismaService,
+      rateLimit as unknown as RateLimitService,
+      { connected: true } as unknown as MqttService,
+    );
+  }
+
+  function response(): { status: jest.Mock } {
+    return { status: jest.fn() };
+  }
+
+  it('reports not-ready (503) when rate limiting cannot be enforced', async () => {
+    const res = response();
+    const body = await controller({ healthy: false, redisReady: false }).readyz(
+      res as unknown as Response,
+    );
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(body.status).toBe('not-ready');
+    expect(body.components.redis).toBe('down');
+  });
+
+  it('stays ready with Redis degraded when the memory fallback is permitted', async () => {
+    const res = response();
+    const body = await controller({ healthy: true, redisReady: false }).readyz(
+      res as unknown as Response,
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(body.status).toBe('ready');
+    expect(body.components.redis).toBe('degraded');
   });
 });
 

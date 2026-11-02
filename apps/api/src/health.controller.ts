@@ -29,7 +29,10 @@ export class HealthController {
       components.database = 'down';
       databaseReady = false;
     }
-    components.redis = this.rateLimit.redisReady ? 'ok' : 'degraded';
+    // In production rate limiting fails closed without Redis, so the replica
+    // must leave the load balancer rather than 429 every sign-in.
+    const rateLimitReady = this.rateLimit.healthy;
+    components.redis = this.rateLimit.redisReady ? 'ok' : rateLimitReady ? 'degraded' : 'down';
     components.mqtt = this.mqtt.connected ? 'ok' : 'degraded';
 
     try {
@@ -50,9 +53,10 @@ export class HealthController {
         ? 'stripe'
         : 'mock';
 
-    res.status(databaseReady ? 200 : 503);
+    const ready = databaseReady && rateLimitReady;
+    res.status(ready ? 200 : 503);
     return {
-      status: databaseReady ? 'ready' : 'not-ready',
+      status: ready ? 'ready' : 'not-ready',
       components,
       time: new Date().toISOString(),
     };
