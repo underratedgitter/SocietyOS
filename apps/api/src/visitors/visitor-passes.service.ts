@@ -31,6 +31,10 @@ export interface PassView {
   revokedAt?: Date | null;
 }
 
+export interface ApprovedPassResult extends PassView {
+  credentials?: { pin: string; qrToken: string };
+}
+
 @Injectable()
 export class VisitorPassesService {
   private readonly logger = new Logger(VisitorPassesService.name);
@@ -340,105 +344,147 @@ export class VisitorPassesService {
     caller: JwtUser,
     passId: string,
     dto: { decision: 'APPROVED' | 'REJECTED'; reason?: string },
-  ) {
+  ): Promise<ApprovedPassResult> {
     const pass = await this.loadPassOr404(passId);
     const context = await this.assertCanManage(caller, pass);
     if (pass.status !== 'PENDING_APPROVAL') {
       throw AppException.conflict('NOT_PENDING', 'Pass is not awaiting approval');
     }
     const nextStatus = dto.decision === 'APPROVED' ? 'ACTIVE' : 'REVOKED';
-    let pin: GeneratedCredential | null = null;
-    let qr: GeneratedCredential | null = null;
-    if (dto.decision === 'APPROVED') {
-      pin = this.credentials.generatePin();
-      qr = this.credentials.generateQrToken();
+
+    for (let attempt = 0; attempt < MAX_CREDENTIAL_ATTEMPTS; attempt += 1) {
+      let pin: GeneratedCredential | null = null;
+      let qr: GeneratedCredential | null = null;
+      if (dto.decision === 'APPROVED') {
+        pin = this.credentials.generatePin();
+        qr = this.credentials.generateQrToken();
+      }
+
+      try {
+        const { updated, generatedCredentialsForHost, newCredentials } = await this.prisma.$transaction(
+          async (tx) => {
+            const changed = await tx.visitorPass.updateMany({
+              where: { id: passId, status: 'PENDING_APPROVAL' },
+              data: {
+                status: nextStatus,
+                ...(nextStatus === 'REVOKED' ? { revokedAt: new Date(), revokedBy: caller.sub } : {}),
+              },
+            });
+            if (changed.count !== 1) {
+              throw AppException.conflict('NOT_PENDING', 'Pass is no longer awaiting approval');
+            }
+
+            let newCredentials: { pin: string; qrToken: string } | null = null;
+            if (dto.decision === 'APPROVED' && pin && qr) {
+              const existingCredsCount = await tx.visitorPassCredential.count({ where: { passId } });
+              if (existingCredsCount === 0) {
+                await tx.visitorPassCredential.createMany({
+                  data: [
+                    {
+                      passId,
+                      type: pin.type,
+                      credentialHash: this.credentials.hash(pin.plaintext),
+                      keyId: this.credentials.keyVersion,
+                      societyId: pass.societyId,
+                    },
+                    {
+                      passId,
+                      type: qr.type,
+                      credentialHash: this.credentials.hash(qr.plaintext),
+                      keyId: this.credentials.keyVersion,
+                    },
+                  ],
+                });
+                newCredentials = { pin: pin.plaintext, qrToken: qr.plaintext };
+              }
+            }
+
+            const updatedPass = await tx.visitorPass.findUniqueOrThrow({
+              where: { id: passId },
+              include: passInclude,
+            });
+
+            const visitorPhone = updatedPass.visitor?.phone?.trim();
+            const generatedCredentialsForHost = Boolean(newCredentials && !visitorPhone);
+
+            await tx.visitorApproval.create({
+              data: {
+                passId,
+                decidedById: caller.sub,
+                decision: dto.decision,
+                reason: dto.reason?.trim() || null,
+              },
+            });
+
+            await tx.auditLog.create({
+              data: {
+                societyId: pass.societyId,
+                actorUserId: caller.sub,
+                actorRole: context.role,
+                action: `VISITOR_PASS_${dto.decision}`,
+                entityType: 'VisitorPass',
+                entityId: passId,
+                meta: {
+                  reason: dto.reason || null,
+                  ...(generatedCredentialsForHost ? { credentialsReturnedToHost: true } : {}),
+                },
+              },
+            });
+
+            return { updated: updatedPass, generatedCredentialsForHost, newCredentials };
+          },
+        );
+
+        const view = this.toView(updated);
+
+        if (this.notifications) {
+          if (nextStatus === 'ACTIVE') {
+            this.notifications
+              .notifyPassApproved({
+                societyId: view.societyId,
+                flatNumber: view.flat.flatNumber,
+                visitorName: view.visitor.name,
+                visitorPhone: view.visitor.phone,
+                hostUserId: pass.hostUserId,
+                pin: newCredentials?.pin,
+                validFrom: view.validFrom,
+                validUntil: view.validUntil,
+                passId: view.id,
+              })
+              .catch((err) => this.logger.warn(`Failed to notify pass approved: ${String(err)}`));
+          } else {
+            this.notifications
+              .notifyPassRevoked({
+                societyId: view.societyId,
+                flatNumber: view.flat.flatNumber,
+                visitorName: view.visitor.name,
+                visitorPhone: view.visitor.phone,
+                hostUserId: pass.hostUserId,
+                passId: view.id,
+              })
+              .catch((err) => this.logger.warn(`Failed to notify pass rejected: ${String(err)}`));
+          }
+        }
+
+        if (generatedCredentialsForHost && newCredentials) {
+          return {
+            ...view,
+            credentials: newCredentials,
+          };
+        }
+
+        return view;
+      } catch (error) {
+        if (this.isCredentialCollision(error) && attempt < MAX_CREDENTIAL_ATTEMPTS - 1) {
+          continue;
+        }
+        throw error;
+      }
     }
-
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const changed = await tx.visitorPass.updateMany({
-        where: { id: passId, status: 'PENDING_APPROVAL' },
-        data: {
-          status: nextStatus,
-          ...(nextStatus === 'REVOKED' ? { revokedAt: new Date(), revokedBy: caller.sub } : {}),
-        },
-      });
-      if (changed.count !== 1) {
-        throw AppException.conflict('NOT_PENDING', 'Pass is no longer awaiting approval');
-      }
-      if (pin && qr) {
-        await tx.visitorPassCredential.deleteMany({ where: { passId } });
-        await tx.visitorPassCredential.createMany({
-          data: [
-            {
-              passId,
-              type: pin.type,
-              credentialHash: this.credentials.hash(pin.plaintext),
-              keyId: this.credentials.keyVersion,
-              societyId: pass.societyId,
-            },
-            {
-              passId,
-              type: qr.type,
-              credentialHash: this.credentials.hash(qr.plaintext),
-              keyId: this.credentials.keyVersion,
-            },
-          ],
-        });
-      }
-      await tx.visitorApproval.create({
-        data: {
-          passId,
-          decidedById: caller.sub,
-          decision: dto.decision,
-          reason: dto.reason?.trim() || null,
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          societyId: pass.societyId,
-          actorUserId: caller.sub,
-          actorRole: context.role,
-          action: `VISITOR_PASS_${dto.decision}`,
-          entityType: 'VisitorPass',
-          entityId: passId,
-          meta: { reason: dto.reason || null },
-        },
-      });
-      return tx.visitorPass.findUniqueOrThrow({ where: { id: passId }, include: passInclude });
-    });
-
-    const view = this.toView(updated);
-
-    if (this.notifications) {
-      if (nextStatus === 'ACTIVE') {
-        this.notifications
-          .notifyPassApproved({
-            societyId: view.societyId,
-            flatNumber: view.flat.flatNumber,
-            visitorName: view.visitor.name,
-            visitorPhone: view.visitor.phone,
-            hostUserId: pass.hostUserId,
-            pin: pin?.plaintext,
-            validFrom: view.validFrom,
-            validUntil: view.validUntil,
-            passId: view.id,
-          })
-          .catch((err) => this.logger.warn(`Failed to notify pass approved: ${String(err)}`));
-      } else {
-        this.notifications
-          .notifyPassRevoked({
-            societyId: view.societyId,
-            flatNumber: view.flat.flatNumber,
-            visitorName: view.visitor.name,
-            visitorPhone: view.visitor.phone,
-            hostUserId: pass.hostUserId,
-            passId: view.id,
-          })
-          .catch((err) => this.logger.warn(`Failed to notify pass rejected: ${String(err)}`));
-      }
-    }
-
-    return view;
+    throw AppException.conflict(
+      'CREDENTIAL_GENERATION_FAILED',
+      'Could not allocate a unique pass credential. Try again.',
+    );
   }
 
   async revoke(caller: JwtUser, passId: string, reason?: string) {
@@ -551,7 +597,7 @@ export class VisitorPassesService {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
     const target = error.meta?.target;
     const fields = Array.isArray(target) ? target.join(',') : String(target ?? '');
-    return fields.includes('credentialHash');
+    return fields.includes('credentialHash') || (typeof error.message === 'string' && error.message.includes('credentialHash'));
   }
 }
 

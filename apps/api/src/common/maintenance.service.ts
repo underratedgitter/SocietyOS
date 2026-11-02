@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
+import { getEnv } from '../config';
 
 /**
  * Small, bounded maintenance loop for a pilot deployment. It never opens a
@@ -74,14 +75,15 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
-      // Delete credentials of passes expired or revoked more than N days ago (default 30)
-      const retentionDays = Number.parseInt(process.env.CREDENTIAL_RETENTION_DAYS || '30', 10);
+      // Delete credentials of passes expired, exhausted, or revoked more than N days ago (default 30)
+      const retentionDays = getEnv().credentialRetentionDays;
       const credCutoff = new Date(now.getTime() - retentionDays * 24 * 3600 * 1000);
       await this.prisma.visitorPassCredential.deleteMany({
         where: {
           pass: {
             OR: [
               { status: 'EXPIRED', validUntil: { lt: credCutoff } },
+              { status: 'EXHAUSTED', validUntil: { lt: credCutoff } },
               { status: 'REVOKED', revokedAt: { lt: credCutoff } },
             ],
           },

@@ -1,4 +1,5 @@
 import { MaintenanceService } from '../src/common/maintenance.service';
+import { loadEnv, resetEnvCacheForTests } from '../src/config/env';
 
 describe('MaintenanceService', () => {
   let mockPrisma: any;
@@ -6,6 +7,7 @@ describe('MaintenanceService', () => {
 
   beforeEach(() => {
     delete process.env.CREDENTIAL_RETENTION_DAYS;
+    resetEnvCacheForTests();
     mockPrisma = {
       gateCommand: {
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -31,6 +33,11 @@ describe('MaintenanceService', () => {
       },
     };
     service = new MaintenanceService(mockPrisma);
+  });
+
+  afterEach(() => {
+    delete process.env.CREDENTIAL_RETENTION_DAYS;
+    resetEnvCacheForTests();
   });
 
   it('deletes credentials of passes expired or revoked more than 30 days ago by default', async () => {
@@ -69,5 +76,55 @@ describe('MaintenanceService', () => {
     const actualCutoff = new Date(expiredClause.validUntil.lt).getTime();
     expect(beforeSweep - actualCutoff).toBeGreaterThanOrEqual(cutoff14Days - 2000);
     expect(beforeSweep - actualCutoff).toBeLessThanOrEqual(cutoff14Days + 2000);
+  });
+
+  it('covers EXHAUSTED passes with validUntil older than cutoff during credential purge', async () => {
+    const beforeSweep = Date.now();
+    await service.sweep();
+
+    expect(mockPrisma.visitorPassCredential.deleteMany).toHaveBeenCalledTimes(1);
+    const callArg = mockPrisma.visitorPassCredential.deleteMany.mock.calls[0][0];
+    const orClauses = callArg.where.pass.OR;
+    const exhaustedClause = orClauses.find((c: any) => c.status === 'EXHAUSTED');
+    expect(exhaustedClause).toBeDefined();
+    expect(exhaustedClause.validUntil).toBeDefined();
+    const cutoff30Days = 30 * 24 * 3600 * 1000;
+    const actualCutoff = new Date(exhaustedClause.validUntil.lt).getTime();
+    expect(beforeSweep - actualCutoff).toBeGreaterThanOrEqual(cutoff30Days - 2000);
+    expect(beforeSweep - actualCutoff).toBeLessThanOrEqual(cutoff30Days + 2000);
+  });
+
+  it('validates CREDENTIAL_RETENTION_DAYS as positive integer defaulting to 30', () => {
+    resetEnvCacheForTests();
+    delete process.env.CREDENTIAL_RETENTION_DAYS;
+    expect(loadEnv().credentialRetentionDays).toBe(30);
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = '60';
+    expect(loadEnv().credentialRetentionDays).toBe(60);
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = '  45  ';
+    expect(loadEnv().credentialRetentionDays).toBe(45);
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = '0';
+    expect(() => loadEnv()).toThrow('CREDENTIAL_RETENTION_DAYS must be a positive integer');
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = 'invalid-number';
+    expect(() => loadEnv()).toThrow('CREDENTIAL_RETENTION_DAYS must be a positive integer');
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = '30.5';
+    expect(() => loadEnv()).toThrow('CREDENTIAL_RETENTION_DAYS must be a positive integer');
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = '30days';
+    expect(() => loadEnv()).toThrow('CREDENTIAL_RETENTION_DAYS must be a positive integer');
+
+    resetEnvCacheForTests();
+    process.env.CREDENTIAL_RETENTION_DAYS = '-5';
+    expect(() => loadEnv()).toThrow('CREDENTIAL_RETENTION_DAYS must be a positive integer');
   });
 });
