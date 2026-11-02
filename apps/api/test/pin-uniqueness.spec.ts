@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { AccessEngineService } from '../src/access/access-engine.service';
 import { CredentialsService } from '../src/visitors/credentials.service';
 import { CredentialType } from '@prisma/client';
@@ -216,5 +218,20 @@ describe('Per-Society PIN Uniqueness & Global QR Lookup', () => {
 
     expect(res.decision).toBe('DENIED');
     expect(res.reasonCode).toBe('WRONG_SOCIETY');
+  });
+
+  it('drops the partial unique index on QR tokens in a new migration', () => {
+    const migrationDir = path.resolve(__dirname, '../prisma/migrations');
+    const migrations = fs.readdirSync(migrationDir);
+    const dropMigration = migrations.find((m) => m.includes('drop_qr_token_unique'));
+    expect(dropMigration).toBeDefined();
+    const sql = fs.readFileSync(path.join(migrationDir, dropMigration!, 'migration.sql'), 'utf-8');
+    expect(sql).toContain('DROP INDEX IF EXISTS "VisitorPassCredential_qr_token_unique";');
+  });
+
+  it('explains why QR has no unique constraint in schema.prisma', () => {
+    const schema = fs.readFileSync(path.resolve(__dirname, '../prisma/schema.prisma'), 'utf-8');
+    expect(schema).toMatch(/QR.*unique.*constraint/i);
+    expect(schema).toMatch(/192-bit/i);
   });
 });

@@ -309,6 +309,11 @@ model VisitorPassCredential {
   pass    VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
   society Society?    @relation(fields: [societyId], references: [id], onDelete: Cascade)
 
+  // Note on QR uniqueness constraint:
+  // PostgreSQL partial unique index (WHERE type = 'QR') cannot be expressed in schema.prisma,
+  // which causes `prisma migrate dev` to attempt dropping it.
+  // Instead, QR security relies on 192-bit cryptographically secure random tokens (making collisions
+  // practically zero) plus the existing pass.societyId tenant validation check in the access engine.
   @@unique([passId, type])
   @@unique([societyId, credentialHash])
   @@index([credentialHash])
