@@ -3,10 +3,6 @@ import { publicIpRateLimit, RegistrationService } from '../src/registration/regi
 import * as config from '../src/config';
 import { RelativesService } from '../src/relatives/relatives.service';
 import { CredentialsService } from '../src/visitors/credentials.service';
-import { RateLimitService } from '../src/common/rate-limit.service';
-import { AuditService } from '../src/common/audit.service';
-import { AuthService } from '../src/auth/auth.service';
-import { AuthzService } from '../src/common/authz.service';
 
 describe('Registration & Relatives Service Modules', () => {
   const SOCIETY_ID = '11111111-1111-1111-1111-111111111111';

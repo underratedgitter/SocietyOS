@@ -22,15 +22,3 @@ export function setAuthCookies(res: Response, tokens: TokenPair): void {
     maxAge: REFRESH_MAX_AGE_MS,
   });
 }
-
-export function clearAuthCookies(res: Response): void {
-  const env = getEnv();
-  const base = {
-    httpOnly: true,
-    secure: env.cookieSecure,
-    sameSite: 'strict' as const,
-    path: '/',
-  };
-  res.clearCookie(ACCESS_COOKIE, base);
-  res.clearCookie(REFRESH_COOKIE, base);
-}

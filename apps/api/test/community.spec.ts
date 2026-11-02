@@ -1,4 +1,3 @@
-import { AppException } from '../src/common/app.exception';
 import { AuthzService } from '../src/common/authz.service';
 import { AuditService } from '../src/common/audit.service';
 import { CommunityService } from '../src/societies/community.service';

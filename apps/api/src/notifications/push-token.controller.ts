@@ -3,7 +3,6 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard, JwtUser } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { PrismaService } from '../common/prisma.service';
-import { AppException } from '../common/app.exception';
 import { RegisterPushTokenDto, UnregisterPushTokenDto } from './push-token.dto';
 import { validateWebPushEndpoint } from './web-push-endpoint';
 

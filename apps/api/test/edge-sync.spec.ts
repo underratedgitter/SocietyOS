@@ -7,7 +7,6 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
   const SOCIETY_ID = 'soc-111-aaa';
   const DEVICE_ID = 'dev-222-bbb';
   const AP_GATE_1 = 'ap-gate-1';
-  const AP_GATE_2 = 'ap-gate-2';
   const FOREIGN_AP = 'ap-foreign-soc';
 
   let controller: DeviceApiController;

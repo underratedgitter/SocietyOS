@@ -1,6 +1,6 @@
 import { ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Prisma, VisitorCategory } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { AppException } from '../src/common/app.exception';
 import { AuthzService } from '../src/common/authz.service';
@@ -61,7 +61,6 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
   const userA_Admin: JwtUser = { sub: 'user-admin-a', email: 'admin@a.com', name: 'Admin A', isPlatformAdmin: false, mustChangePassword: false };
   const userA_Resident: JwtUser = { sub: 'user-resident-a', email: 'resident@a.com', name: 'Resident A', isPlatformAdmin: false, mustChangePassword: false };
   const userA_Guard: JwtUser = { sub: 'user-guard-a', email: 'guard@a.com', name: 'Guard A', isPlatformAdmin: false, mustChangePassword: false };
-  const userB_Admin: JwtUser = { sub: 'user-admin-b', email: 'admin@b.com', name: 'Admin B', isPlatformAdmin: false, mustChangePassword: false };
   const userB_Resident: JwtUser = { sub: 'user-resident-b', email: 'resident@b.com', name: 'Resident B', isPlatformAdmin: false, mustChangePassword: false };
 
   beforeEach(() => {

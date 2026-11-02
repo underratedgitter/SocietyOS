@@ -12,14 +12,6 @@ export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-export function hmacCredential(credential: string, keyId?: string): string {
-  const env = getEnv();
-  const version = keyId || env.credentialHmacKeyId;
-  return createHmac('sha256', `${version}:${env.credentialHmacKey}`)
-    .update(credential)
-    .digest('hex');
-}
-
 export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString('base64url');
 }
@@ -133,8 +125,4 @@ export function signAck(ack: AckSignature, secret: string): string {
 
 export function verifyAck(ack: AckSignature, secret: string, signature: string): boolean {
   return constantTimeEqual(signAck(ack, secret), signature);
-}
-
-export function hashPasswordToken(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
 }

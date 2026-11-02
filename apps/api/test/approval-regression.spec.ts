@@ -1,5 +1,4 @@
-import { Prisma, CredentialType } from '@prisma/client';
-import { AppException } from '../src/common/app.exception';
+import { Prisma } from '@prisma/client';
 import { CredentialsService } from '../src/visitors/credentials.service';
 import { VisitorPassesService } from '../src/visitors/visitor-passes.service';
 import { RegistrationService } from '../src/registration/registration.service';

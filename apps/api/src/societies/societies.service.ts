@@ -6,7 +6,7 @@ import { AuthService } from '../auth/auth.service';
 import { JwtUser } from '../auth/jwt-auth.guard';
 import { AuditService } from '../common/audit.service';
 import { AppException } from '../common/app.exception';
-import { mergeVisitorPolicy, visitorPolicy, VisitorPolicy } from './policy';
+import { mergeVisitorPolicy, visitorPolicy } from './policy';
 import {
   AddFlatMemberDto,
   CreateBuildingDto,
