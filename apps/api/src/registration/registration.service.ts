@@ -244,8 +244,6 @@ export class RegistrationService {
 
     const maxUses = dto.category === 'RELATIVE' ? Math.min(policy.maxUsesPerPass, 5) : 1;
 
-    let pin = this.credentials.generatePin();
-    let qr = this.credentials.generateQrToken();
     let pass: any;
 
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -281,21 +279,6 @@ export class RegistrationService {
               validFrom,
               validUntil,
               maxUses,
-              credentials: {
-                create: [
-                  {
-                    type: pin.type,
-                    credentialHash: this.credentials.hash(pin.plaintext),
-                    keyId: this.credentials.keyVersion,
-                    societyId: dto.societyId,
-                  },
-                  {
-                    type: qr.type,
-                    credentialHash: this.credentials.hash(qr.plaintext),
-                    keyId: this.credentials.keyVersion,
-                  },
-                ],
-              },
               accessPoints: {
                 create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
               },
@@ -330,9 +313,7 @@ export class RegistrationService {
         });
         break;
       } catch (err: any) {
-        if ((err?.code === 'P2002' || String(err).includes('credentialHash')) && attempt < 4) {
-          pin = this.credentials.generatePin();
-          qr = this.credentials.generateQrToken();
+        if (err?.code === 'P2002' && attempt < 4) {
           continue;
         }
         throw err;

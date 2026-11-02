@@ -455,6 +455,7 @@ describe('Registration & Relatives Service Modules', () => {
 
       mockPrisma.visitorPass.updateMany.mockResolvedValueOnce({ count: 1 });
       mockPrisma.visitorPassCredential = {
+        count: jest.fn().mockResolvedValue(0),
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
         createMany: jest.fn().mockResolvedValue({ count: 2 }),
       };
