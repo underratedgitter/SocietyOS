@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { AppException } from '../src/common/app.exception';
 import { DeviceApiController } from '../src/devices/device-api.controller';
 import { AuthedRequest } from '../src/auth/jwt-auth.guard';
@@ -20,6 +21,11 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       },
       visitorPass: {
         findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      visitorPassCredential: {
+        findFirst: jest.fn().mockResolvedValue(null),
       },
       residentFlatMembership: {
         findMany: jest.fn().mockResolvedValue([]),
@@ -31,6 +37,7 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'evt-1', ...data })),
       },
       deviceEvent: {
+        findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'dev-evt-1', ...data })),
       },
@@ -40,6 +47,7 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       biometricTemplate: {
         findMany: jest.fn().mockResolvedValue([]),
       },
+      $executeRaw: jest.fn().mockResolvedValue(1),
       $transaction: jest.fn().mockImplementation((cb) => {
         if (typeof cb === 'function') {
           return cb(mockPrisma);
@@ -529,10 +537,12 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
     it('handles unique constraint violation gracefully on concurrent sequence replay (Issue 8)', async () => {
       mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
       mockPrisma.deviceEvent.findFirst.mockResolvedValue(null); // Passed initial check
-      mockPrisma.deviceEvent.create.mockRejectedValueOnce({
-        code: 'P2002',
-        message: 'Unique constraint failed on DeviceEvent(deviceId, sequence)',
-      });
+      mockPrisma.deviceEvent.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on DeviceEvent(deviceId, sequence)',
+          { code: 'P2002', clientVersion: '6.16.0' },
+        ),
+      );
 
       const events: any[] = [
         {
@@ -550,6 +560,26 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       expect(res.syncedCount).toBe(0);
       expect(res.duplicateCount).toBe(1);
       expect(mockPrisma.accessEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('propagates database errors thrown by $executeRaw advisory lock or savepoints during syncOffline', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.$executeRaw.mockRejectedValueOnce(new Error('Advisory lock failed'));
+
+      const events: any[] = [
+        {
+          sequence: 1,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      await expect(
+        controller.syncOffline(mockDeviceReq, { events }),
+      ).rejects.toThrow('Advisory lock failed');
     });
 
     it('rejects duplicate sequences within the same batch payload to prevent repeated pass consumption', async () => {
@@ -604,10 +634,12 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         .mockResolvedValueOnce(null)
         .mockResolvedValueOnce({ id: 'existing-event-100' });
 
-      mockPrisma.deviceEvent.create.mockRejectedValueOnce({
-        code: 'P2002',
-        message: 'Unique constraint failed on DeviceEvent(deviceId, sequence)',
-      });
+      mockPrisma.deviceEvent.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on DeviceEvent(deviceId, sequence)',
+          { code: 'P2002', clientVersion: '6.16.0' },
+        ),
+      );
 
       const res = await controller.events(mockDeviceReq, {
         type: 'ACK',

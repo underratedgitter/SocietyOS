@@ -4,6 +4,7 @@ import { IsArray, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, IsUUID
 import { Type } from 'class-transformer';
 import { DeviceAuthGuard } from './device-auth.guard';
 import { AuthedRequest } from '../auth/jwt-auth.guard';
+import { CredentialType, Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { AppException } from '../common/app.exception';
 
@@ -155,7 +156,7 @@ export class DeviceApiController {
       });
       if (!link) throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point is not assigned to this device');
     }
-    if (dto.sequence != null && typeof this.prisma.deviceEvent.findFirst === 'function') {
+    if (dto.sequence != null) {
       const existing = await this.prisma.deviceEvent.findFirst({
         where: { deviceId: req.device!.id, sequence: dto.sequence },
         select: { id: true },
@@ -164,7 +165,7 @@ export class DeviceApiController {
         await this.prisma.device.update({
           where: { id: req.device!.id },
           data: { lastSeenAt: new Date() },
-        }).catch(() => undefined);
+        });
         return { ok: true, eventId: existing.id, duplicate: true };
       }
     }
@@ -184,11 +185,11 @@ export class DeviceApiController {
         data: { lastSeenAt: new Date() },
       });
       return { ok: true, eventId: event.id };
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (
-        (err?.code === 'P2002' || String(err).includes('sequence')) &&
-        dto.sequence != null &&
-        typeof this.prisma.deviceEvent.findFirst === 'function'
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002' &&
+        dto.sequence != null
       ) {
         const existing = await this.prisma.deviceEvent.findFirst({
           where: { deviceId: req.device!.id, sequence: dto.sequence },
@@ -230,18 +231,11 @@ export class DeviceApiController {
 
     await this.prisma.$transaction(async (tx) => {
       // Serialize offline event ingestion for this device using advisory lock
-      if (typeof (tx as any).$executeRawUnsafe === 'function') {
-        await (tx as any)
-          .$executeRawUnsafe(
-            `SELECT pg_advisory_xact_lock(hashtext('device-sync'), hashtext($1))`,
-            deviceId,
-          )
-          .catch(() => undefined);
-      }
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('device-sync'), hashtext(${deviceId}))`;
 
       const batchSeqs = dto.events.map((e) => e.sequence).filter((s): s is number => s != null);
       const existingInDb =
-        batchSeqs.length > 0 && typeof tx.deviceEvent.findMany === 'function'
+        batchSeqs.length > 0
           ? await tx.deviceEvent.findMany({
               where: { deviceId, sequence: { in: batchSeqs } },
               select: { sequence: true },
@@ -262,7 +256,7 @@ export class DeviceApiController {
         }
 
         // Additional sequence check if sequence exists
-        if (ev.sequence != null && typeof tx.deviceEvent.findFirst === 'function') {
+        if (ev.sequence != null) {
           const existing = await tx.deviceEvent.findFirst({
             where: {
               deviceId,
@@ -276,7 +270,8 @@ export class DeviceApiController {
           }
         }
 
-        const credType = (['PIN', 'QR'].includes(ev.credentialType) ? ev.credentialType : null) as any;
+        const credType: CredentialType | null =
+          ev.credentialType === 'PIN' || ev.credentialType === 'QR' ? ev.credentialType : null;
         const requestedAt = new Date(ev.timestamp);
         let validTime = !isNaN(requestedAt.getTime()) ? requestedAt : now;
         let clockDriftDetected = false;
@@ -295,9 +290,7 @@ export class DeviceApiController {
         }
 
         // Atomically reserve the device event sequence BEFORE creating access events or updating pass usage
-        if (typeof (tx as any).$executeRawUnsafe === 'function') {
-          await (tx as any).$executeRawUnsafe('SAVEPOINT dev_ev_ins').catch(() => undefined);
-        }
+        await tx.$executeRaw`SAVEPOINT dev_ev_ins`;
         try {
           await tx.deviceEvent.create({
             data: {
@@ -314,14 +307,10 @@ export class DeviceApiController {
               } as never,
             },
           });
-          if (typeof (tx as any).$executeRawUnsafe === 'function') {
-            await (tx as any).$executeRawUnsafe('RELEASE SAVEPOINT dev_ev_ins').catch(() => undefined);
-          }
-        } catch (err: any) {
-          if (typeof (tx as any).$executeRawUnsafe === 'function') {
-            await (tx as any).$executeRawUnsafe('ROLLBACK TO SAVEPOINT dev_ev_ins').catch(() => undefined);
-          }
-          if (err?.code === 'P2002' || String(err).includes('sequence') || String(err).includes('unique')) {
+          await tx.$executeRaw`RELEASE SAVEPOINT dev_ev_ins`;
+        } catch (err: unknown) {
+          await tx.$executeRaw`ROLLBACK TO SAVEPOINT dev_ev_ins`;
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
             duplicateCount++;
             continue;
           }
@@ -330,8 +319,8 @@ export class DeviceApiController {
 
         const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         let passId = ev.passId;
-        if (!passId && ev.credentialHash && typeof (tx as any).visitorPassCredential?.findFirst === 'function') {
-          const cred = await (tx as any).visitorPassCredential.findFirst({
+        if (!passId && ev.credentialHash) {
+          const cred = await tx.visitorPassCredential.findFirst({
             where: { credentialHash: ev.credentialHash, pass: { societyId } },
             select: { passId: true },
           });
@@ -342,8 +331,8 @@ export class DeviceApiController {
         // passId is device-supplied: only accept passes owned by the device's own society,
         // otherwise a device could consume or exhaust another tenant's passes.
         let ownedPass: { id: string; usedCount: number; maxUses: number; status: string } | null = null;
-        if (candidatePassId && typeof (tx as any).visitorPass?.findUnique === 'function') {
-          const pass = await (tx as any).visitorPass.findUnique({
+        if (candidatePassId) {
+          const pass = await tx.visitorPass.findUnique({
             where: { id: candidatePassId },
             select: { id: true, societyId: true, usedCount: true, maxUses: true, status: true },
           });
@@ -373,9 +362,9 @@ export class DeviceApiController {
           },
         });
 
-        if (ev.decision === 'AUTHORIZED' && ownedPass && typeof (tx as any).visitorPass?.update === 'function') {
+        if (ev.decision === 'AUTHORIZED' && ownedPass) {
           const nextCount = ownedPass.usedCount + 1;
-          await (tx as any).visitorPass.update({
+          await tx.visitorPass.update({
             where: { id: ownedPass.id },
             data: {
               usedCount: nextCount,
