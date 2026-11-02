@@ -1,3 +1,7 @@
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { AuthedRequest } from '../src/auth/jwt-auth.guard';
+import { VendorBiometricBatchDto, VendorDeviceApiController } from '../src/devices/vendor/vendor-device.controller';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../src/common/prisma.service';
 import { AuditService } from '../src/common/audit.service';
@@ -272,5 +276,34 @@ describe('DeviceSyncService', () => {
 
     expect(await sync.pull(DEVICE)).toEqual([]);
     expect(updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('VendorDeviceApiController batch handling', () => {
+  it('accepts a batch with one malformed event so ingest rejects it alone (no retry poison pill)', async () => {
+    const body = {
+      events: [
+        { deviceUserId: '1001', method: 'FACE', occurredAt: '2026-11-02T09:59:00+05:30', matched: true },
+        { deviceUserId: 'bad id!', method: 'VEIN', occurredAt: 'yesterday', matched: true },
+      ],
+    };
+    const dto = plainToInstance(VendorBiometricBatchDto, body);
+    expect(await validate(dto, { whitelist: true, forbidNonWhitelisted: true })).toEqual([]);
+
+    const ingest = { ingest: jest.fn().mockResolvedValue([]) };
+    const controller = new VendorDeviceApiController(
+      ingest as unknown as BiometricIngestService,
+      {} as DeviceSyncService,
+    );
+    await controller.biometricEvents({ device } as unknown as AuthedRequest, dto);
+
+    const [, events] = ingest.ingest.mock.calls[0] as [unknown, VendorBiometricEvent[]];
+    expect(events.map((e) => e.method)).toEqual(['FACE', 'UNKNOWN']);
+    expect(Number.isNaN(events[1].occurredAt.getTime())).toBe(true);
+  });
+
+  it('still rejects a batch whose shape is wrong', async () => {
+    const dto = plainToInstance(VendorBiometricBatchDto, { events: [{ deviceUserId: 5, matched: 'yes' }] });
+    expect((await validate(dto)).length).toBeGreaterThan(0);
   });
 });

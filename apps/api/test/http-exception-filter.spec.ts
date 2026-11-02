@@ -121,5 +121,6 @@ describe('redactPath', () => {
   it('strips the device push token from logged paths', () => {
     expect(redactPath('/api/v1/device-api/push/sos_dev_abc123/hikvision')).toBe('/api/v1/device-api/push/[REDACTED]/hikvision');
     expect(redactPath('/api/v1/visitor-passes/abc')).toBe('/api/v1/visitor-passes/abc');
+    expect(redactPath('/api/v1/Device-API/PUSH/sos_dev_abc123/dahua')).toBe('/api/v1/device-api/push/[REDACTED]/dahua');
   });
 });

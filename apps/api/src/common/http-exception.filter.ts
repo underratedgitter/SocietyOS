@@ -54,7 +54,8 @@ export function resolveRequestId(req: Request, res?: Response): string {
 
 /** Push devices authenticate with a token in the URL path; it must never reach the logs. */
 export function redactPath(path: string): string {
-  return path.replace(/\/device-api\/push\/[^/]+/, '/device-api/push/[REDACTED]');
+  // Case-insensitive: Express routing is, so a mixed-case path still reaches the push route.
+  return path.replace(/\/device-api\/push\/[^/]+/i, '/device-api/push/[REDACTED]');
 }
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {

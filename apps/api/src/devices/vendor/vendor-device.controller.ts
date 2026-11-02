@@ -5,8 +5,6 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
-  IsIn,
-  IsISO8601,
   IsOptional,
   IsString,
   IsUUID,
@@ -25,14 +23,26 @@ import { BiometricIngestService } from './biometric-ingest.service';
 import { DeviceSyncService } from './device-sync.service';
 import { DEVICE_USER_ID_PATTERN, VERIFY_METHODS, VerifyMethod } from './vendor-event';
 
+function toVerifyMethod(raw: string): VerifyMethod {
+  return (VERIFY_METHODS as readonly string[]).includes(raw) ? (raw as VerifyMethod) : 'UNKNOWN';
+}
+
+/**
+ * Only the shape is validated here. Content problems (bad ID, unparseable time, unknown method)
+ * become per-event REJECTED outcomes in ingest, so one bad row never fails, and endlessly
+ * re-sends, a whole batch from the edge connector.
+ */
 export class VendorBiometricEventDto {
-  @Matches(DEVICE_USER_ID_PATTERN)
+  @IsString()
+  @MaxLength(64)
   deviceUserId!: string;
 
-  @IsIn(VERIFY_METHODS)
-  method!: VerifyMethod;
+  @IsString()
+  @MaxLength(32)
+  method!: string;
 
-  @IsISO8601({ strict: true })
+  @IsString()
+  @MaxLength(64)
   occurredAt!: string;
 
   @IsBoolean()
@@ -92,7 +102,11 @@ export class VendorDeviceApiController {
     const device = req.device!;
     const outcomes = await this.ingest.ingest(
       device,
-      dto.events.map((event) => ({ ...event, occurredAt: new Date(event.occurredAt) })),
+      dto.events.map((event) => ({
+        ...event,
+        method: toVerifyMethod(event.method),
+        occurredAt: new Date(event.occurredAt),
+      })),
     );
     return { outcomes };
   }
