@@ -366,16 +366,18 @@ export class BiometricsService implements OnModuleInit {
     const deviceIdsEmerg = Array.from(
       new Set(
         (accessPoint.devices || [])
-          .map((d: any) => d.deviceId || d.device?.id)
-          .filter(Boolean),
+          .map((d) => d.deviceId || d.device?.id)
+          .filter((id): id is string => Boolean(id)),
       ),
     );
+
+    const deviceResults: { deviceId: string; commandId?: string; status: 'ISSUED' | 'FAILED'; error?: string }[] = [];
     for (const devId of deviceIdsEmerg) {
       const commandIdEmerg = crypto.randomUUID();
       const nowEmerg = new Date();
       const expiresAtEmerg = new Date(nowEmerg.getTime() + 15 * 1000);
-      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
-        await (this.prisma as any).gateCommand.create({
+      try {
+        await this.prisma.gateCommand.create({
           data: {
             id: commandIdEmerg,
             deviceId: devId,
@@ -386,15 +388,22 @@ export class BiometricsService implements OnModuleInit {
             issuedAt: nowEmerg,
             expiresAt: expiresAtEmerg,
           },
-        }).catch((cmdErr: unknown) => {
-          this.logger.warn(`Emergency GateCommand insertion failed: ${String(cmdErr)}`);
         });
+        // Publish ONLY after a successful insert
+        await this.mqtt.publishCommand(commandIdEmerg);
+        deviceResults.push({ deviceId: devId, commandId: commandIdEmerg, status: 'ISSUED' });
+      } catch (cmdErr: unknown) {
+        this.logger.warn(`Emergency GateCommand insertion/publish failed for device ${devId}: ${String(cmdErr)}`);
+        deviceResults.push({ deviceId: devId, status: 'FAILED', error: String(cmdErr) });
       }
-      if (typeof this.mqtt?.publishCommand === 'function') {
-        await this.mqtt.publishCommand(commandIdEmerg).catch((mqttErr: unknown) => {
-          this.logger.warn(`Emergency MQTT command publish failed: ${String(mqttErr)}`);
-        });
-      }
+    }
+
+    const successfulDispatches = deviceResults.filter((r) => r.status === 'ISSUED');
+    if (deviceIdsEmerg.length === 0 || successfulDispatches.length === 0) {
+      throw AppException.badGateway(
+        'COMMAND_DISPATCH_FAILED',
+        'No active gate controller device received the emergency override command',
+      );
     }
 
     const accessEvent = await this.prisma.accessEvent.create({
@@ -430,6 +439,7 @@ export class BiometricsService implements OnModuleInit {
       accessEventId: accessEvent.id,
       gateState: await adapter.getState(),
       message: 'Emergency override activated: gate held open',
+      deviceResults,
     };
   }
 
@@ -459,43 +469,50 @@ export class BiometricsService implements OnModuleInit {
     if (typeof (adapter as any).clearEmergency === 'function') {
       (adapter as any).clearEmergency();
     }
-    await adapter.close().catch(() => undefined);
+    await adapter.close();
 
     // Actuate real hardware on Reset: insert GateCommand into PostgreSQL and publish via MQTT
     const deviceIdsReset = Array.from(
-       new Set(
-         (accessPoint.devices || [])
-           .map((d: any) => d.deviceId || d.device?.id)
-           .filter(Boolean),
-       ),
+      new Set(
+        (accessPoint.devices || [])
+          .map((d) => d.deviceId || d.device?.id)
+          .filter((id): id is string => Boolean(id)),
+      ),
     );
+
+    const deviceResultsReset: { deviceId: string; commandId?: string; status: 'ISSUED' | 'FAILED'; error?: string }[] = [];
     for (const devId of deviceIdsReset) {
       const commandIdReset = crypto.randomUUID();
       const nowReset = new Date();
       const expiresAtReset = new Date(nowReset.getTime() + 15 * 1000);
-      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
-        await (this.prisma as any).gateCommand
-          .create({
-            data: {
-              id: commandIdReset,
-              deviceId: devId,
-              accessPointId: accessPoint.id,
-              type: 'CLOSE',
-              status: 'ISSUED',
-              nonce: crypto.randomBytes(16).toString('hex'),
-              issuedAt: nowReset,
-              expiresAt: expiresAtReset,
-            },
-          })
-          .catch((cmdErr: unknown) => {
-            this.logger.warn(`Reset Emergency GateCommand insertion failed: ${String(cmdErr)}`);
-          });
-      }
-      if (typeof this.mqtt?.publishCommand === 'function') {
-        await this.mqtt.publishCommand(commandIdReset).catch((mqttErr: unknown) => {
-          this.logger.warn(`Reset Emergency MQTT command publish failed: ${String(mqttErr)}`);
+      try {
+        await this.prisma.gateCommand.create({
+          data: {
+            id: commandIdReset,
+            deviceId: devId,
+            accessPointId: accessPoint.id,
+            type: 'CLOSE',
+            status: 'ISSUED',
+            nonce: crypto.randomBytes(16).toString('hex'),
+            issuedAt: nowReset,
+            expiresAt: expiresAtReset,
+          },
         });
+        // Publish ONLY after a successful insert
+        await this.mqtt.publishCommand(commandIdReset);
+        deviceResultsReset.push({ deviceId: devId, commandId: commandIdReset, status: 'ISSUED' });
+      } catch (cmdErr: unknown) {
+        this.logger.warn(`Reset Emergency GateCommand insertion/publish failed for device ${devId}: ${String(cmdErr)}`);
+        deviceResultsReset.push({ deviceId: devId, status: 'FAILED', error: String(cmdErr) });
       }
+    }
+
+    const successfulResets = deviceResultsReset.filter((r) => r.status === 'ISSUED');
+    if (deviceIdsReset.length === 0 || successfulResets.length === 0) {
+      throw AppException.badGateway(
+        'COMMAND_DISPATCH_FAILED',
+        'No active gate controller device received the emergency reset command',
+      );
     }
 
     const accessEvent = await this.prisma.accessEvent.create({
@@ -531,6 +548,7 @@ export class BiometricsService implements OnModuleInit {
       accessEventId: accessEvent.id,
       gateState: await adapter.getState(),
       message: 'Emergency override reset: gate closed and normal access restored',
+      deviceResults: deviceResultsReset,
     };
   }
 

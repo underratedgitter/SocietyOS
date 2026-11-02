@@ -49,10 +49,6 @@ export class EmergencyOverrideDto {
   @MinLength(3)
   @MaxLength(250)
   reason!: string;
-
-  @IsOptional()
-  @IsBoolean()
-  reset?: boolean;
 }
 
 @ApiTags('access')
@@ -134,15 +130,6 @@ export class AccessController {
       throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point not found');
     }
     const context = await this.authz.society(req.user!.sub, accessPoint.societyId, ['SOCIETY_ADMIN', 'GUARD']);
-    if (dto.reset) {
-      return this.biometrics.resetEmergencyOverride(
-        accessPoint.societyId,
-        req.user!.sub,
-        context.role,
-        dto.accessPointId,
-        dto.reason,
-      );
-    }
     return this.biometrics.triggerEmergencyOverride(
       accessPoint.societyId,
       req.user!.sub,
