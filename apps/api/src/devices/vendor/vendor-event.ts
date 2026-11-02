@@ -34,9 +34,10 @@ export const MAX_EVENT_AGE_MS = 7 * 24 * 3600 * 1000;
 export const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 export function dedupeKeyFor(event: VendorBiometricEvent): string {
-  return event.vendorEventId
-    ? `id:${event.vendorEventId}`
-    : `u:${event.deviceUserId}:${event.occurredAt.toISOString()}`;
+  if (event.vendorEventId) return `id:${event.vendorEventId}`;
+  // An unparseable vendor timestamp must not throw here and take the rest of the batch down.
+  const at = Number.isNaN(event.occurredAt.getTime()) ? 'invalid' : event.occurredAt.toISOString();
+  return `u:${event.deviceUserId}:${at}`;
 }
 
 export type IngestOutcome =
