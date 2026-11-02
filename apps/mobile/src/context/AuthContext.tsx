@@ -63,7 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSession(null);
         setSelectedFlat(null);
         setAuthTokens(null, null);
-        void mobileStorage.clearCachedSession();
+        void mobileStorage.clearAllCache();
         void mobileStorage.clearTokens();
       }
     }
@@ -111,7 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setSession(null);
             setSelectedFlat(null);
             setAuthTokens(null, null);
-            void mobileStorage.clearCachedSession();
+            void mobileStorage.clearAllCache();
             void mobileStorage.clearTokens();
           }
         }

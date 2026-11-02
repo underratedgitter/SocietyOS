@@ -528,6 +528,27 @@ describe('Mobile Session Refresh Concurrency & Error Clearance', () => {
 
     globalThis.fetch = originalFetch;
   });
+
+  test('refreshSession purges cached passes and PINs when the session is revoked', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ code: 'INVALID_SESSION' }), { status: 401 })) as typeof fetch;
+
+    try {
+      setAuthTokens('expired-at', 'revoked-rt');
+      await mobileStorage.saveCachedPasses([{ id: 'pass-1' }]);
+      await mobileStorage.saveCachedCredentials({ 'pass-1': { pin: '123456', qrToken: 'qr-1' } });
+      await mobileStorage.saveCachedSession({ user: { id: 'user-a' } });
+
+      assert.equal(await refreshSession(), false);
+
+      assert.equal(await mobileStorage.loadCachedPasses(), null);
+      assert.equal(await mobileStorage.loadCachedCredentials(), null);
+      assert.equal(await mobileStorage.loadCachedSession(), null);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe('Mobile Relatives & Directory Client Methods', () => {

@@ -331,10 +331,10 @@ export async function refreshSession(): Promise<boolean> {
 
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
-          // Token is revoked or expired; clear dead tokens to prevent endless auth failure loops
+          // Token is revoked or expired; clear dead tokens to prevent endless auth failure loops.
+          // Cached passes/PINs are purged too so the next account on this device never sees them.
           setAuthTokens(null, null);
-          void mobileStorage.clearTokens();
-          void mobileStorage.clearCachedSession();
+          await Promise.all([mobileStorage.clearTokens(), mobileStorage.clearAllCache()]);
         }
         return false;
       }
