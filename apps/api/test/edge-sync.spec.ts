@@ -234,7 +234,9 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
             societyId: SOCIETY_ID,
             validUntil: { gt: expect.any(Date) },
           }),
-          take: 1000,
+          // One past the 1000 cap so truncation is detectable; newest revocations first.
+          take: 1001,
+          orderBy: [{ revokedAt: { sort: 'desc', nulls: 'last' } }, { id: 'asc' }],
         }),
       );
 
@@ -244,9 +246,25 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
           where: expect.objectContaining({
             endedAt: expect.objectContaining({ gte: expect.any(Date) }),
           }),
-          take: 1000,
+          take: 1001,
+          orderBy: [{ endedAt: 'desc' }, { id: 'asc' }],
         }),
       );
+      expect(res.revokedHashesTruncated).toBe(false);
+    });
+
+    it('flags truncation instead of silently dropping revocations past the cap', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({ id: DEVICE_ID, accessPoints: [{ accessPointId: AP_GATE_1 }] });
+      const revoked = Array.from({ length: 1001 }, (_, i) => ({ credentials: [{ credentialHash: `h-${i}` }] }));
+      mockPrisma.visitorPass.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce(revoked);
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+
+      expect(res.revokedHashes).toHaveLength(1000);
+      expect(res.revokedHashes[0]).toBe('h-0');
+      expect(res.revokedHashesTruncated).toBe(true);
     });
 
     it('does not include active resident biometric template in revokedHashes even if an older flat membership ended in the last 30 days', async () => {

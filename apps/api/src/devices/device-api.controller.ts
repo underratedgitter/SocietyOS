@@ -505,7 +505,9 @@ export class DeviceApiController {
       include: {
         credentials: { select: { credentialHash: true } },
       },
-      take: MAX_REVOKED_HASHES,
+      // Newest revocations first: those are the credentials most likely still cached on a device.
+      orderBy: [{ revokedAt: { sort: 'desc', nulls: 'last' } }, { id: 'asc' }],
+      take: MAX_REVOKED_HASHES + 1,
     });
     const revokedPassHashes = (revokedPasses || []).flatMap((p) => p.credentials.map((c) => c.credentialHash));
 
@@ -515,7 +517,8 @@ export class DeviceApiController {
         endedAt: { not: null, gte: thirtyDaysAgo },
       },
       select: { userId: true },
-      take: MAX_REVOKED_HASHES,
+      orderBy: [{ endedAt: 'desc' }, { id: 'asc' }],
+      take: MAX_REVOKED_HASHES + 1,
     });
     const endedUserIds = Array.from(new Set((endedResidents || []).map((r) => r.userId)));
     const endedTemplates = endedUserIds.length > 0
@@ -533,7 +536,13 @@ export class DeviceApiController {
       .map((t) => t.templateHash)
       .filter((h) => !activeResidentHashes.has(h));
 
-    const allRevokedHashes = [...revokedPassHashes, ...endedResidentHashes];
+    const allRevokedHashes = Array.from(new Set([...revokedPassHashes, ...endedResidentHashes]));
+    // Fetching one past the cap reveals truncation; the device must then fall back to treating
+    // anything absent from `credentials` as invalid rather than trusting its old cache.
+    const revokedHashesTruncated =
+      (revokedPasses ?? []).length > MAX_REVOKED_HASHES ||
+      (endedResidents ?? []).length > MAX_REVOKED_HASHES ||
+      allRevokedHashes.length > MAX_REVOKED_HASHES;
 
     return {
       ok: true,
@@ -547,7 +556,8 @@ export class DeviceApiController {
         syncIntervalSeconds: 300,
       },
       credentials: [...residentCredentials, ...credentialsList],
-      revokedHashes: Array.from(new Set(allRevokedHashes)).slice(0, MAX_REVOKED_HASHES),
+      revokedHashes: allRevokedHashes.slice(0, MAX_REVOKED_HASHES),
+      revokedHashesTruncated,
     };
   }
 }
