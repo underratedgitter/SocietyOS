@@ -73,6 +73,8 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         where: {
           createdAt: { lt: retentionCutoff },
           name: { not: 'ANONYMIZED_VISITOR' },
+          // Visitor rows are reused across visits; keep anyone with a pass still inside the window.
+          passes: { none: { validUntil: { gte: retentionCutoff } } },
         },
         data: {
           name: 'ANONYMIZED_VISITOR',

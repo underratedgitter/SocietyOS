@@ -44,6 +44,14 @@ describe('MaintenanceService', () => {
     resetEnvCacheForTests();
   });
 
+  it('does not anonymize repeat visitors who still hold a pass inside the retention window', async () => {
+    await service.sweep();
+
+    const where = mockPrisma.visitor.updateMany.mock.calls[0][0].where;
+    const cutoff = where.createdAt.lt;
+    expect(where.passes).toEqual({ none: { validUntil: { gte: cutoff } } });
+  });
+
   it('deletes credentials of passes expired or revoked more than 30 days ago by default', async () => {
     const beforeSweep = Date.now();
     await service.sweep();
