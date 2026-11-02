@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { api, ApiError, getAccessToken, getRefreshToken, initStorage, setAuthTokens } from '../api/client';
 import { mobileStorage } from '../api/storage';
 import type { FlatLink, RegisterUserRequest, Session, SocietyRef } from '../api/types';

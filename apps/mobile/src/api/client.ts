@@ -301,10 +301,6 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
 let refreshPromise: Promise<boolean> | null = null;
 
-export function getInFlightRefreshPromise(): Promise<boolean> | null {
-  return refreshPromise;
-}
-
 export async function refreshSession(): Promise<boolean> {
   if (!storedRefreshToken) return false;
   if (refreshPromise) {

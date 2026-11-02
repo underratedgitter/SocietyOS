@@ -19,7 +19,6 @@ import { mobileStorage } from '../src/api/storage';
 import {
   categoryLabel,
   formatDate,
-  formatDateTime,
   formatWindow,
   relativeTime,
   calculateWindowDates,

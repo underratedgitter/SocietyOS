@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -18,7 +18,7 @@ import { colors } from '../styles/theme';
 type NoticeCategoryFilter = 'ALL' | 'EMERGENCY' | 'MAINTENANCE' | 'EVENT' | 'GENERAL';
 
 export function NoticesScreen() {
-  const { selectedSociety, isOffline } = useAuth();
+  const { selectedSociety } = useAuth();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   // Read via ref so the loader isn't recreated (and re-fired) whenever the list length changes.
   const announcementsCountRef = useRef(0);

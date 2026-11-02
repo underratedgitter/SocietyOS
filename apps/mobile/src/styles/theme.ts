@@ -55,11 +55,3 @@ export const colors = {
   whatsapp: '#25D366',
   whatsappDark: '#128C7E',
 };
-
-export const typography = {
-  fontFamily: {
-    display: 'Georgia',
-    sans: 'System',
-    mono: 'Courier',
-  },
-};
