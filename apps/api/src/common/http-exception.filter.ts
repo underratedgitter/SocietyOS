@@ -104,6 +104,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
         status = HttpStatus.NOT_FOUND;
         code = 'NOT_FOUND';
         message = 'Resource not found';
+      } else if (exception.code === 'P2023') {
+        // Malformed id (e.g. a non-UUID path param) is a client error, not a server fault.
+        status = HttpStatus.BAD_REQUEST;
+        code = 'INVALID_REQUEST';
+        message = 'Request could not be processed';
       }
     } else if (exception instanceof Prisma.PrismaClientValidationError) {
       status = HttpStatus.BAD_REQUEST;

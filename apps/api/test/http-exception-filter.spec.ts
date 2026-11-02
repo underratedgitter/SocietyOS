@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import express from 'express';
 import request from 'supertest';
+import { Prisma } from '@prisma/client';
 import { HttpExceptionFilter } from '../src/common/http-exception.filter';
 
 @Controller('echo')
@@ -69,6 +70,28 @@ describe('HttpExceptionFilter with Express body-parser errors', () => {
 
     expect(res.status).toBe(415);
     expect(res.body).toMatchObject({ code: 'UNSUPPORTED_MEDIA_TYPE' });
+    expect(errorLog).not.toHaveBeenCalled();
+  });
+
+  it('maps Prisma P2023 (malformed id) to 400 instead of 500', () => {
+    const filter = new HttpExceptionFilter();
+    const json = jest.fn();
+    const response = { headersSent: false, setHeader: jest.fn(), status: jest.fn(() => ({ json })) };
+    const host = {
+      switchToHttp: () => ({
+        getResponse: () => response,
+        getRequest: () => ({ headers: {}, method: 'GET', path: '/visitor-passes/abc' }),
+      }),
+    };
+    const malformed = new Prisma.PrismaClientKnownRequestError('Inconsistent column data: invalid uuid', {
+      code: 'P2023',
+      clientVersion: Prisma.prismaVersion.client,
+    });
+
+    filter.catch(malformed, host as never);
+
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ code: 'INVALID_REQUEST' }));
     expect(errorLog).not.toHaveBeenCalled();
   });
 
