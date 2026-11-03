@@ -289,6 +289,39 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       notifications = new NotificationsService(mockPrisma, sms, whatsapp, push);
     });
 
+    test.each(['created', 'approved'] as const)(
+      'keeps PIN and QR link out of push payloads for %s passes (visitor SMS/WhatsApp only)',
+      async (kind) => {
+        const enqueue = jest.spyOn(notifications, 'enqueue').mockResolvedValue(undefined as never);
+        const params = {
+          societyId: 'soc-1',
+          flatId: 'flat-1',
+          flatNumber: '101',
+          visitorName: 'Guest',
+          visitorPhone: '+919876500000',
+          hostUserId: 'host-1',
+          pin: '123456',
+          qrToken: 'qr-token-abcdefghijklmnop',
+          validFrom: new Date(),
+          validUntil: new Date(Date.now() + 3600_000),
+          passId: 'pass-1',
+        };
+        if (kind === 'created') await notifications.notifyPassCreated(params);
+        else await notifications.notifyPassApproved(params);
+
+        const byChannel = (channel: string) =>
+          enqueue.mock.calls.map(([input]) => input).filter((input) => input.channel === channel);
+        for (const push of byChannel('PUSH')) {
+          expect(push.payload).not.toHaveProperty('pin');
+          expect(push.payload).not.toHaveProperty('passUrl');
+        }
+        for (const channel of ['SMS', 'WHATSAPP']) {
+          expect(byChannel(channel)[0].payload).toMatchObject({ pin: '123456', passUrl: expect.stringContaining('#qr=') });
+        }
+        enqueue.mockRestore();
+      },
+    );
+
     test('enqueue creates persistent outbox record', async () => {
       await notifications.enqueue({
         societyId: 'soc-1',

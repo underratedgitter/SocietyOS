@@ -82,8 +82,12 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       flatId: params.flatId,
       flatNumber: params.flatNumber,
       visitorName: params.visitorName,
-      pin: params.pin,
       validWindow,
+    };
+    // Credentials go only to the visitor's own phone, never into push payloads (a third-party
+    // relay); the host already has them in the create response.
+    const visitorCredentials = {
+      pin: params.pin,
       // The /p page renders the QR from the link fragment; without a token it has nothing to show.
       ...(params.qrToken ? { passUrl: passQrUrl(params.passId, params.qrToken) } : {}),
     };
@@ -96,6 +100,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         template: 'VISITOR_PASS_ISSUED',
         payload: {
           ...commonPayload,
+          ...visitorCredentials,
           phone: params.visitorPhone,
         },
       });
@@ -107,6 +112,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         template: 'VISITOR_PASS_ISSUED',
         payload: {
           ...commonPayload,
+          ...visitorCredentials,
           phone: params.visitorPhone,
         },
       });
@@ -142,13 +148,14 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       passId: params.passId,
       flatNumber: params.flatNumber,
       visitorName: params.visitorName,
-      pin: params.pin,
       validWindow,
     };
 
     if (params.visitorPhone) {
+      // Credentials only to the visitor's phone; the approver gets them in the API response.
       const visitorPayload = {
         ...commonPayload,
+        pin: params.pin,
         phone: params.visitorPhone,
         ...(params.qrToken ? { passUrl: passQrUrl(params.passId, params.qrToken) } : {}),
       };
