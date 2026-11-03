@@ -212,6 +212,7 @@ export class VisitorPassesService {
               visitorPhone: phone,
               hostUserId: caller.sub,
               pin: pin.plaintext,
+              qrToken: qr.plaintext,
               validFrom,
               validUntil,
               passId: pass.id,
@@ -364,7 +365,7 @@ export class VisitorPassesService {
       }
 
       try {
-        const { updated, generatedCredentialsForHost, newCredentials } = await this.prisma.$transaction(
+        const { updated, newCredentials } = await this.prisma.$transaction(
           async (tx) => {
             const changed = await tx.visitorPass.updateMany({
               where: { id: passId, status: 'PENDING_APPROVAL' },
@@ -395,6 +396,7 @@ export class VisitorPassesService {
                       type: qr.type,
                       credentialHash: this.credentials.hash(qr.plaintext),
                       keyId: this.credentials.keyVersion,
+                      societyId: pass.societyId,
                     },
                   ],
                 });
@@ -406,9 +408,6 @@ export class VisitorPassesService {
               where: { id: passId },
               include: passInclude,
             });
-
-            const visitorPhone = updatedPass.visitor?.phone?.trim();
-            const generatedCredentialsForHost = Boolean(newCredentials && !visitorPhone);
 
             await tx.visitorApproval.create({
               data: {
@@ -429,12 +428,13 @@ export class VisitorPassesService {
                 entityId: passId,
                 meta: {
                   reason: dto.reason || null,
-                  ...(generatedCredentialsForHost ? { credentialsReturnedToHost: true } : {}),
+                  // Credentials are returned once to the approver and sent to the visitor.
+                  ...(newCredentials ? { credentialsReturnedToApprover: true } : {}),
                 },
               },
             });
 
-            return { updated: updatedPass, generatedCredentialsForHost, newCredentials };
+            return { updated: updatedPass, newCredentials };
           },
         );
 
@@ -450,6 +450,7 @@ export class VisitorPassesService {
                 visitorPhone: view.visitor.phone,
                 hostUserId: pass.hostUserId,
                 pin: newCredentials?.pin,
+                qrToken: newCredentials?.qrToken,
                 validFrom: view.validFrom,
                 validUntil: view.validUntil,
                 passId: view.id,
@@ -469,7 +470,9 @@ export class VisitorPassesService {
           }
         }
 
-        if (generatedCredentialsForHost && newCredentials) {
+        // Both sides see the credentials: the approver here (once; only hashes are stored) and
+        // the visitor via SMS/WhatsApp (PIN plus a link that renders the QR).
+        if (newCredentials) {
           return {
             ...view,
             credentials: newCredentials,

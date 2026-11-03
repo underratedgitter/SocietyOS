@@ -101,13 +101,14 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600 * 1000) } },
       });
 
-      // Remove PIN from notifications older than 24 hours to prevent plaintext PIN storage.
+      // Remove PIN and QR pass link from notifications older than 24 hours (no plaintext credentials).
       // One set-based statement: a capped, unfiltered batch re-read the same rows every sweep
       // and never reached older notifications that still held a PIN.
       const notifCutoff = new Date(now.getTime() - 24 * 3600 * 1000);
       await this.prisma.$executeRaw`
-        UPDATE "Notification" SET payload = payload - 'pin'
-        WHERE "createdAt" < ${notifCutoff} AND jsonb_typeof(payload) = 'object' AND payload ? 'pin'`;
+        UPDATE "Notification" SET payload = payload - 'pin' - 'passUrl'
+        WHERE "createdAt" < ${notifCutoff} AND jsonb_typeof(payload) = 'object'
+          AND (payload ? 'pin' OR payload ? 'passUrl')`;
     } catch (error) {
       this.logger.warn(`Maintenance sweep failed: ${String(error)}`);
     } finally {

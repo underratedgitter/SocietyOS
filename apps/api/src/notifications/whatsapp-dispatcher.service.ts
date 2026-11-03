@@ -47,11 +47,12 @@ export class WhatsappDispatcherService {
         const flat = payload.flatNumber ? `Flat ${payload.flatNumber}` : 'Residence';
         const pin = payload.pin ? `🔑 *Entry PIN*: ${payload.pin}\n` : '';
         const window = payload.validWindow ? `🕒 *Validity*: ${payload.validWindow}\n` : '';
+        const link = payload.passUrl ? `📲 *QR Pass*: ${payload.passUrl}\n` : '';
         return (
           `✅ *SocietyOS Pass Approved*\n\n` +
           `Your visitor pass for *${flat}* has been approved by the resident.\n` +
-          `${pin}${window}\n` +
-          `Welcome to SocietyOS!`
+          `${pin}${window}${link}\n` +
+          `Show this PIN or QR code at the security gate.`
         );
       }
       case 'VISITOR_PASS_REVOKED': {

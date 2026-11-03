@@ -170,14 +170,24 @@ function ResidentWorkspace() {
     setBusyKey(`pass:${pass.id}`);
     setActionError('');
     try {
-      await apiRequest(`/api/v1/visitor-passes/${pass.id}/${action}`, {
-        method: 'POST',
-        body: JSON.stringify(
-          action === 'approve'
-            ? { decision: 'APPROVED' }
-            : { reason: 'Revoked by the host resident' },
-        ),
-      });
+      const response = await apiRequest<PassView & { credentials?: PassWithCredentials['credentials'] }>(
+        `/api/v1/visitor-passes/${pass.id}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(
+            action === 'approve'
+              ? { decision: 'APPROVED' }
+              : { reason: 'Revoked by the host resident' },
+          ),
+        },
+      );
+      // Approval mints the PIN/QR and returns them once; show the approver the same pass card
+      // the visitor receives, since they cannot be retrieved again later.
+      if (action === 'approve' && response?.credentials) {
+        const { credentials, ...approvedPass } = response;
+        setIssued({ pass: approvedPass, credentials });
+        setIssuedMeta(null);
+      }
       notify(action === 'approve' ? 'Visitor approved' : 'Pass revoked');
       reload();
     } catch (caught) {

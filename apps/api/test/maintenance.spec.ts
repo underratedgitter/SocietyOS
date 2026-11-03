@@ -153,6 +153,8 @@ describe('MaintenanceService', () => {
     // No row cap: the old take: 500 batch re-read the same rows and never reached the rest.
     expect(pinScrub[0].join('?')).not.toMatch(/LIMIT/i);
     expect(pinScrub[0].join('?')).toContain("payload ? 'pin'");
+    // The visitor's QR pass link carries the QR token and is scrubbed with the PIN.
+    expect(pinScrub[0].join('?')).toContain("- 'passUrl'");
 
     const cutoffTime = (pinScrub[1] as Date).getTime();
     const cutoff24Hours = 24 * 3600 * 1000;

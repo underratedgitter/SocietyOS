@@ -120,7 +120,7 @@ describe('A1: Visitor Pass Approval Regression Suite', () => {
     expect(result.credentials).toBeUndefined();
   });
 
-  it('(b) approving a self-registered pass creates credentials exactly once (with visitor phone)', async () => {
+  it('(b) approving with a visitor phone shows the same PIN and QR to both the approver and the visitor', async () => {
     mockPrisma.visitorPass.findUnique.mockResolvedValueOnce({
       id: PASS_ID,
       societyId: SOCIETY_ID,
@@ -143,15 +143,17 @@ describe('A1: Visitor Pass Approval Regression Suite', () => {
     expect(mockPrisma.visitorPassCredential.createMany).toHaveBeenCalledTimes(1);
     expect(mockPrisma.visitorPassCredential.deleteMany).not.toHaveBeenCalled();
 
-    // Plaintext credentials delivered via notifications to visitor phone
+    // Returned once to the approving resident...
+    expect(result.credentials?.pin).toMatch(/^\d{6}$/);
+    expect(typeof result.credentials?.qrToken).toBe('string');
+    // ...and the identical PIN and QR are delivered to the visitor's phone.
     expect(mockNotifications.notifyPassApproved).toHaveBeenCalledWith(
       expect.objectContaining({
         visitorPhone: '+919876543210',
-        pin: expect.stringMatching(/^\d{6}$/),
+        pin: result.credentials?.pin,
+        qrToken: result.credentials?.qrToken,
       }),
     );
-    // Not returned to host
-    expect(result.credentials).toBeUndefined();
   });
 
   it('(b2) approving a self-registered pass when visitor has no phone returns credentials to host and records in audit log', async () => {
@@ -183,13 +185,13 @@ describe('A1: Visitor Pass Approval Regression Suite', () => {
     expect(result.credentials?.pin).toMatch(/^\d{6}$/);
     expect(typeof result.credentials?.qrToken).toBe('string');
 
-    // Audit log records that credentials were returned to host
+    // Audit log records that credentials were returned to the approver
     expect(mockPrisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           action: 'VISITOR_PASS_APPROVED',
           meta: expect.objectContaining({
-            credentialsReturnedToHost: true,
+            credentialsReturnedToApprover: true,
           }),
         }),
       }),
@@ -382,7 +384,7 @@ describe('A1: Visitor Pass Approval Regression Suite', () => {
         data: expect.objectContaining({
           action: 'VISITOR_PASS_APPROVED',
           meta: expect.objectContaining({
-            credentialsReturnedToHost: true,
+            credentialsReturnedToApprover: true,
           }),
         }),
       }),

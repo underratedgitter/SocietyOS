@@ -51,7 +51,8 @@ export class SmsDispatcherService {
         const flat = payload.flatNumber ? `Flat ${payload.flatNumber}` : 'the residence';
         const pin = payload.pin ? ` Entry PIN: ${payload.pin}.` : '';
         const window = payload.validWindow ? ` Valid: ${payload.validWindow}.` : '';
-        return `Your SocietyOS visitor pass for ${flat} has been approved!${pin}${window}`.trim();
+        const link = payload.passUrl ? ` QR pass: ${payload.passUrl}` : '';
+        return `Your SocietyOS visitor pass for ${flat} has been approved!${pin}${window}${link}`.trim();
       }
       case 'VISITOR_PASS_REVOKED': {
         const flat = payload.flatNumber ? `Flat ${payload.flatNumber}` : 'the residence';

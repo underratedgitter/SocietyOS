@@ -119,8 +119,17 @@ export function HomeScreen({
   const handleApprove = async (pass: PassView) => {
     setActionBusyId(pass.id);
     try {
-      await api.approvePass(pass.id, 'APPROVED');
-      Alert.alert('Pass Approved', `${pass.visitor.name} has been approved for gate entry.`);
+      const approved = await api.approvePass(pass.id, 'APPROVED');
+      if (approved.credentials) {
+        // Shown once: the same PIN and QR the visitor receives, cached like a newly created pass.
+        const { credentials, ...approvedPass } = approved;
+        const nextCreds = { ...issuedCredentials, [approvedPass.id]: credentials };
+        setIssuedCredentials(nextCreds);
+        void mobileStorage.saveCachedCredentials(nextCreds);
+        setSelectedPassModal({ passWithCredentials: { pass: approvedPass, credentials } });
+      } else {
+        Alert.alert('Pass Approved', `${pass.visitor.name} has been approved for gate entry.`);
+      }
       await loadData();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Failed to approve pass.';

@@ -423,7 +423,7 @@ describe('Registration & Relatives Service Modules', () => {
       expect(result.credentials).toBeNull();
     });
 
-    it('sends generated PIN to visitor phone upon host approval and does not expose it in the approval response', async () => {
+    it('on host approval sends the PIN and QR to the visitor and shows the same credentials to the host', async () => {
       const mockNotificationsService = {
         notifyPassApproved: jest.fn().mockResolvedValue(undefined),
         notifyPassRevoked: jest.fn().mockResolvedValue(undefined),
@@ -489,13 +489,15 @@ describe('Registration & Relatives Service Modules', () => {
       );
 
       expect(approved.status).toBe('ACTIVE');
-      expect((approved as { credentials?: unknown }).credentials).toBeUndefined();
+      const { credentials } = approved as { credentials?: { pin: string; qrToken: string } };
+      expect(credentials?.pin).toMatch(/^\d{6}$/);
       expect(mockNotificationsService.notifyPassApproved).toHaveBeenCalledWith(
         expect.objectContaining({
           societyId: SOCIETY_ID,
           flatNumber: '101',
           visitorPhone: '+919876511111',
-          pin: expect.stringMatching(/^\d{6}$/),
+          pin: credentials?.pin,
+          qrToken: credentials?.qrToken,
         }),
       );
     });

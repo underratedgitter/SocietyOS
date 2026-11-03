@@ -1,3 +1,4 @@
+import { passQrUrl } from '../src/notifications/notifications.service';
 import { Logger } from '@nestjs/common';
 import { SmsDispatcherService } from '../src/notifications/sms-dispatcher.service';
 import { MOCK_STORE_LIMIT, maskToken } from '../src/notifications/redaction';
@@ -579,5 +580,26 @@ describe('maskToken', () => {
     expect(maskToken(token)).toBe('***rstuv]');
     expect(maskToken(token)).not.toContain('abcdef');
     expect(maskToken('short')).toBe('****');
+  });
+});
+
+describe('visitor QR pass link', () => {
+  it('keeps the QR token in the URL fragment so it never reaches a server log', () => {
+    const url = new URL(passQrUrl('pass-1', 'tok/en+=='));
+    expect(url.pathname).toBe('/p/pass-1');
+    expect(url.search).toBe('');
+    expect(decodeURIComponent(url.hash)).toBe('#qr=tok/en+==');
+  });
+
+  it('includes the QR link in the approval SMS and WhatsApp messages', async () => {
+    const sms = new SmsDispatcherService();
+    const whatsapp = new WhatsappDispatcherService();
+    const passUrl = 'https://app.example/p/pass-1#qr=abc';
+
+    await sms.sendSms('+919876500000', 'VISITOR_PASS_APPROVED', { pin: '123456', passUrl });
+    await whatsapp.sendWhatsapp('+919876500000', 'VISITOR_PASS_APPROVED', { pin: '123456', passUrl });
+
+    expect(sms.getMockSentStore().at(-1)?.message).toContain(passUrl);
+    expect(whatsapp.getMockSentStore().at(-1)?.message).toContain(passUrl);
   });
 });

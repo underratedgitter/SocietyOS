@@ -460,8 +460,13 @@ export const api = {
     });
   },
 
-  async approvePass(passId: string, decision: 'APPROVED' | 'REJECTED', reason?: string): Promise<PassView> {
-    return request<PassView>(`/visitor-passes/${passId}/approve`, {
+  /** Approval mints the PIN/QR and returns them once (`credentials`); rejection never does. */
+  async approvePass(
+    passId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    reason?: string,
+  ): Promise<PassView & { credentials?: PassWithCredentials['credentials'] }> {
+    return request<PassView & { credentials?: PassWithCredentials['credentials'] }>(`/visitor-passes/${passId}/approve`, {
       method: 'POST',
       body: JSON.stringify({ decision, reason }),
     });
