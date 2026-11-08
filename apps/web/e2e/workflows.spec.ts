@@ -139,7 +139,8 @@ test('admin provisioning form offers vendor protocols and validates allowed IPs'
   await login(page, ADMIN);
   await expect(page).toHaveURL(/\/admin$/);
   await page.getByRole('button', { name: 'Gates & devices' }).click();
-  await page.getByRole('button', { name: /Provision controller/ }).click();
+  // The devices tab shows this action in both the page header and the panel.
+  await page.getByRole('button', { name: /Provision controller/ }).first().click();
 
   const protocol = page.getByLabel('Terminal brand / protocol');
   await expect(protocol.locator('option')).toHaveCount(7);
@@ -153,7 +154,7 @@ test('admin provisioning form offers vendor protocols and validates allowed IPs'
   await page.getByLabel('Device UID').fill(`ADMS${Date.now()}`);
   await page.getByRole('button', { name: 'Provision controller' }).last().click();
 
-  await expect(page.getByTestId('device-setup-instructions')).toContainText('port 443');
+  await expect(page.getByTestId('device-setup-instructions')).toContainText('the port to 443');
   await expect(page.getByText(/Shown only once/)).toBeVisible();
 });
 
