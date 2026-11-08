@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { getEnv } from '../config';
+import { capMockStore, maskPhone } from './redaction';
 
 export interface SentSmsRecord {
   to: string;
@@ -50,7 +51,8 @@ export class SmsDispatcherService {
         const flat = payload.flatNumber ? `Flat ${payload.flatNumber}` : 'the residence';
         const pin = payload.pin ? ` Entry PIN: ${payload.pin}.` : '';
         const window = payload.validWindow ? ` Valid: ${payload.validWindow}.` : '';
-        return `Your SocietyOS visitor pass for ${flat} has been approved!${pin}${window}`.trim();
+        const link = payload.passUrl ? ` QR pass: ${payload.passUrl}` : '';
+        return `Your SocietyOS visitor pass for ${flat} has been approved!${pin}${window}${link}`.trim();
       }
       case 'VISITOR_PASS_REVOKED': {
         const flat = payload.flatNumber ? `Flat ${payload.flatNumber}` : 'the residence';
@@ -112,7 +114,9 @@ export class SmsDispatcherService {
       messageId,
     };
     this.mockSentStore.push(record);
-    this.logger.log(`[SMS-MOCK] Sent to ${normalizedPhone}: "${message}"`);
+    capMockStore(this.mockSentStore);
+    // Message bodies carry gate PINs; never write them or full phone numbers to logs.
+    this.logger.log(`[SMS-MOCK] Sent ${template} to ${maskPhone(normalizedPhone)} (${messageId})`);
     return { success: true, messageId, provider: 'mock' };
   }
 

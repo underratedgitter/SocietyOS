@@ -1,9 +1,10 @@
 import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { IsArray, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { DeviceAuthGuard } from './device-auth.guard';
 import { AuthedRequest } from '../auth/jwt-auth.guard';
+import { CredentialType, Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { AppException } from '../common/app.exception';
 
@@ -155,20 +156,49 @@ export class DeviceApiController {
       });
       if (!link) throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point is not assigned to this device');
     }
-    const event = await this.prisma.deviceEvent.create({
-      data: {
-        deviceId: req.device!.id,
-        accessPointId: dto.accessPointId,
-        type: dto.type,
-        sequence: dto.sequence,
-        payload: dto.payload as never,
-      },
-    });
-    await this.prisma.device.update({
-      where: { id: req.device!.id },
-      data: { lastSeenAt: new Date() },
-    });
-    return { ok: true, eventId: event.id };
+    if (dto.sequence != null) {
+      const existing = await this.prisma.deviceEvent.findFirst({
+        where: { deviceId: req.device!.id, sequence: dto.sequence },
+        select: { id: true },
+      });
+      if (existing) {
+        await this.prisma.device.update({
+          where: { id: req.device!.id },
+          data: { lastSeenAt: new Date() },
+        });
+        return { ok: true, eventId: existing.id, duplicate: true };
+      }
+    }
+
+    try {
+      const event = await this.prisma.deviceEvent.create({
+        data: {
+          deviceId: req.device!.id,
+          accessPointId: dto.accessPointId,
+          type: dto.type,
+          sequence: dto.sequence,
+          payload: dto.payload as never,
+        },
+      });
+      await this.prisma.device.update({
+        where: { id: req.device!.id },
+        data: { lastSeenAt: new Date() },
+      });
+      return { ok: true, eventId: event.id };
+    } catch (err: unknown) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002' &&
+        dto.sequence != null
+      ) {
+        const existing = await this.prisma.deviceEvent.findFirst({
+          where: { deviceId: req.device!.id, sequence: dto.sequence },
+          select: { id: true },
+        });
+        return { ok: true, eventId: existing?.id, duplicate: true };
+      }
+      throw err;
+    }
   }
 
   @Post('sync-offline')
@@ -185,7 +215,11 @@ export class DeviceApiController {
 
     const apIds = Array.from(new Set(dto.events.map((e) => e.accessPointId)));
     const validAps = await this.prisma.accessPoint.findMany({
-      where: { id: { in: apIds }, societyId },
+      where: {
+        id: { in: apIds },
+        societyId,
+        devices: { some: { deviceId } },
+      },
       select: { id: true },
     });
     const validApSet = new Set(validAps.map((ap) => ap.id));
@@ -193,13 +227,36 @@ export class DeviceApiController {
     let syncedCount = 0;
     let duplicateCount = 0;
     const now = new Date();
+    const seenSequencesInBatch = new Set<number>();
 
     await this.prisma.$transaction(async (tx) => {
+      // Serialize offline event ingestion for this device using advisory lock
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('device-sync'), hashtext(${deviceId}))`;
+
+      const batchSeqs = dto.events.map((e) => e.sequence).filter((s): s is number => s != null);
+      const existingInDb =
+        batchSeqs.length > 0
+          ? await tx.deviceEvent.findMany({
+              where: { deviceId, sequence: { in: batchSeqs } },
+              select: { sequence: true },
+            })
+          : [];
+      const dbSeqSet = new Set(existingInDb.map((e) => e.sequence));
+
       for (const ev of dto.events) {
         if (!validApSet.has(ev.accessPointId)) continue;
 
-        // Replay / duplicate prevention by sequence
-        if (typeof tx.deviceEvent.findFirst === 'function') {
+        // Replay / duplicate prevention by sequence within batch and database
+        if (ev.sequence != null) {
+          if (seenSequencesInBatch.has(ev.sequence) || dbSeqSet.has(ev.sequence)) {
+            duplicateCount++;
+            continue;
+          }
+          seenSequencesInBatch.add(ev.sequence);
+        }
+
+        // Additional sequence check if sequence exists
+        if (ev.sequence != null) {
           const existing = await tx.deviceEvent.findFirst({
             where: {
               deviceId,
@@ -213,7 +270,8 @@ export class DeviceApiController {
           }
         }
 
-        const credType = (['PIN', 'QR'].includes(ev.credentialType) ? ev.credentialType : null) as any;
+        const credType: CredentialType | null =
+          ev.credentialType === 'PIN' || ev.credentialType === 'QR' ? ev.credentialType : null;
         const requestedAt = new Date(ev.timestamp);
         let validTime = !isNaN(requestedAt.getTime()) ? requestedAt : now;
         let clockDriftDetected = false;
@@ -231,16 +289,56 @@ export class DeviceApiController {
           }
         }
 
+        // Atomically reserve the device event sequence BEFORE creating access events or updating pass usage
+        await tx.$executeRaw`SAVEPOINT dev_ev_ins`;
+        try {
+          await tx.deviceEvent.create({
+            data: {
+              deviceId,
+              accessPointId: ev.accessPointId,
+              type: 'ACK',
+              sequence: ev.sequence,
+              payload: {
+                offlineSequence: ev.sequence,
+                decision: ev.decision,
+                reasonCode: ev.reasonCode,
+                source: 'OFFLINE_CONTROLLER_SYNC',
+                clockDriftDetected,
+              } as never,
+            },
+          });
+          await tx.$executeRaw`RELEASE SAVEPOINT dev_ev_ins`;
+        } catch (err: unknown) {
+          await tx.$executeRaw`ROLLBACK TO SAVEPOINT dev_ev_ins`;
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+            duplicateCount++;
+            continue;
+          }
+          throw err;
+        }
+
         const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         let passId = ev.passId;
-        if (!passId && ev.credentialHash && typeof (tx as any).visitorPassCredential?.findFirst === 'function') {
-          const cred = await (tx as any).visitorPassCredential.findFirst({
-            where: { credentialHash: ev.credentialHash },
+        if (!passId && ev.credentialHash) {
+          const cred = await tx.visitorPassCredential.findFirst({
+            where: { credentialHash: ev.credentialHash, pass: { societyId } },
             select: { passId: true },
           });
           if (cred) passId = cred.passId;
         }
-        const validPassId = passId && UUID_REGEX.test(passId) ? passId : undefined;
+        const candidatePassId = passId && UUID_REGEX.test(passId) ? passId : undefined;
+
+        // passId is device-supplied: only accept passes owned by the device's own society,
+        // otherwise a device could consume or exhaust another tenant's passes.
+        let ownedPass: { id: string; usedCount: number; maxUses: number; status: string } | null = null;
+        if (candidatePassId) {
+          const pass = await tx.visitorPass.findUnique({
+            where: { id: candidatePassId },
+            select: { id: true, societyId: true, usedCount: true, maxUses: true, status: true },
+          });
+          if (pass && pass.societyId === societyId) ownedPass = pass;
+        }
+        const validPassId = ownedPass?.id;
 
         await tx.accessEvent.create({
           data: {
@@ -264,42 +362,23 @@ export class DeviceApiController {
           },
         });
 
-        if (ev.decision === 'AUTHORIZED' && validPassId) {
-          if (typeof (tx as any).visitorPass?.findUnique === 'function' && typeof (tx as any).visitorPass?.update === 'function') {
-            const pass = await (tx as any).visitorPass.findUnique({
-              where: { id: validPassId },
-              select: { id: true, usedCount: true, maxUses: true, status: true },
+        if (ev.decision === 'AUTHORIZED' && ownedPass) {
+          // Atomic increment: the advisory lock only serializes this device, so other devices'
+          // syncs and online redemptions can bump the same pass concurrently. Writing back a
+          // value read earlier would silently drop their uses and re-open an exhausted pass.
+          const counted = await tx.visitorPass.update({
+            where: { id: ownedPass.id },
+            data: { usedCount: { increment: 1 } },
+            select: { usedCount: true, maxUses: true },
+          });
+          if (counted.usedCount >= counted.maxUses) {
+            await tx.visitorPass.updateMany({
+              where: { id: ownedPass.id, status: 'ACTIVE' },
+              data: { status: 'EXHAUSTED' },
             });
-            if (pass) {
-              const nextCount = pass.usedCount + 1;
-              await (tx as any).visitorPass.update({
-                where: { id: pass.id },
-                data: {
-                  usedCount: nextCount,
-                  ...(nextCount >= pass.maxUses && pass.status === 'ACTIVE'
-                    ? { status: 'EXHAUSTED' }
-                    : {}),
-                },
-              });
-            }
           }
         }
 
-        await tx.deviceEvent.create({
-          data: {
-            deviceId,
-            accessPointId: ev.accessPointId,
-            type: 'ACK',
-            sequence: ev.sequence,
-            payload: {
-              offlineSequence: ev.sequence,
-              decision: ev.decision,
-              reasonCode: ev.reasonCode,
-              source: 'OFFLINE_CONTROLLER_SYNC',
-              clockDriftDetected,
-            } as never,
-          },
-        });
         syncedCount++;
       }
 
@@ -363,27 +442,107 @@ export class DeviceApiController {
         })),
       );
 
-    const residents = await this.prisma.residentFlatMembership.findMany({
+    const biometricTemplates = await this.prisma.biometricTemplate.findMany({
       where: {
-        flat: { building: { societyId } },
-        endedAt: null,
+        societyId,
+        consentGivenAt: { lte: now },
+        user: {
+          memberships: { some: { societyId, status: 'ACTIVE' } },
+          flatMemberships: {
+            some: {
+              flat: { building: { societyId } },
+              endedAt: null,
+            },
+          },
+        },
       },
       include: {
-        user: { select: { id: true, name: true } },
-        flat: { select: { flatNumber: true, building: { select: { name: true } } } },
+        user: {
+          select: {
+            id: true,
+            name: true,
+            flatMemberships: {
+              where: {
+                flat: { building: { societyId } },
+                endedAt: null,
+              },
+              include: {
+                flat: { select: { flatNumber: true, building: { select: { name: true } } } },
+              },
+            },
+          },
+        },
       },
     });
 
-    const residentCredentials = residents.map((r) => ({
-      credentialHash: `BIO_RESIDENT_${r.userId}`,
-      kind: 'BIOMETRIC' as const,
-      visitorName: `${r.user.name} (Resident)`,
-      flatNumber: `${r.flat.building.name} · ${r.flat.flatNumber}`,
-      validFrom: 0,
-      validUntil: now.getTime() + 365 * 86400_000,
-      maxUses: 999999,
-      usedCount: 0,
-    }));
+    const residentCredentials = biometricTemplates.map((t) => {
+      const primaryFlat = t.user.flatMemberships[0]?.flat;
+      const flatNumber = primaryFlat
+        ? `${primaryFlat.building.name} · ${primaryFlat.flatNumber}`
+        : '';
+      return {
+        credentialHash: t.templateHash,
+        kind: 'BIOMETRIC' as const,
+        visitorName: `${t.user.name} (Resident)`,
+        flatNumber,
+        validFrom: 0,
+        validUntil: now.getTime() + 365 * 86400_000,
+        maxUses: 999999,
+        usedCount: 0,
+      };
+    });
+
+    const oneDayAgo = new Date(now.getTime() - 24 * 3600 * 1000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+    const MAX_REVOKED_HASHES = 1000;
+
+    const revokedPasses = await this.prisma.visitorPass.findMany({
+      where: {
+        societyId,
+        OR: [{ status: 'REVOKED' }, { revokedAt: { not: null } }],
+        validUntil: { gt: oneDayAgo },
+      },
+      include: {
+        credentials: { select: { credentialHash: true } },
+      },
+      // Newest revocations first: those are the credentials most likely still cached on a device.
+      orderBy: [{ revokedAt: { sort: 'desc', nulls: 'last' } }, { id: 'asc' }],
+      take: MAX_REVOKED_HASHES + 1,
+    });
+    const revokedPassHashes = (revokedPasses || []).flatMap((p) => p.credentials.map((c) => c.credentialHash));
+
+    const endedResidents = await this.prisma.residentFlatMembership.findMany({
+      where: {
+        flat: { building: { societyId } },
+        endedAt: { not: null, gte: thirtyDaysAgo },
+      },
+      select: { userId: true },
+      orderBy: [{ endedAt: 'desc' }, { id: 'asc' }],
+      take: MAX_REVOKED_HASHES + 1,
+    });
+    const endedUserIds = Array.from(new Set((endedResidents || []).map((r) => r.userId)));
+    const endedTemplates = endedUserIds.length > 0
+      ? await this.prisma.biometricTemplate.findMany({
+          where: {
+            societyId,
+            userId: { in: endedUserIds },
+          },
+          select: { templateHash: true },
+          take: MAX_REVOKED_HASHES,
+        })
+      : [];
+    const activeResidentHashes = new Set(residentCredentials.map((c) => c.credentialHash));
+    const endedResidentHashes = (endedTemplates || [])
+      .map((t) => t.templateHash)
+      .filter((h) => !activeResidentHashes.has(h));
+
+    const allRevokedHashes = Array.from(new Set([...revokedPassHashes, ...endedResidentHashes]));
+    // Fetching one past the cap reveals truncation; the device must then fall back to treating
+    // anything absent from `credentials` as invalid rather than trusting its old cache.
+    const revokedHashesTruncated =
+      (revokedPasses ?? []).length > MAX_REVOKED_HASHES ||
+      (endedResidents ?? []).length > MAX_REVOKED_HASHES ||
+      allRevokedHashes.length > MAX_REVOKED_HASHES;
 
     return {
       ok: true,
@@ -397,6 +556,8 @@ export class DeviceApiController {
         syncIntervalSeconds: 300,
       },
       credentials: [...residentCredentials, ...credentialsList],
+      revokedHashes: allRevokedHashes.slice(0, MAX_REVOKED_HASHES),
+      revokedHashesTruncated,
     };
   }
 }

@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { createHmac } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { getEnv } from '../config';
 import { SmsDispatcherService } from './sms-dispatcher.service';
@@ -10,6 +11,14 @@ const MAX_ATTEMPTS = 5;
 
 export type NotificationChannelType = 'PUSH' | 'SMS' | 'EMAIL' | 'WHATSAPP';
 
+
+/**
+ * Link to the visitor's pass page. The QR token goes in the URL fragment, which browsers never
+ * send to a server, so it stays out of access logs; the page renders the QR client-side.
+ */
+export function passQrUrl(passId: string, qrToken: string): string {
+  return `${getEnv().webUrl}/p/${encodeURIComponent(passId)}#qr=${encodeURIComponent(qrToken)}`;
+}
 @Injectable()
 export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(NotificationsService.name);
@@ -62,22 +71,25 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     visitorPhone?: string | null;
     hostUserId: string;
     pin?: string;
+    qrToken?: string;
     validFrom: Date;
     validUntil: Date;
     passId: string;
   }): Promise<void> {
     const validWindow = `${params.validFrom.toLocaleDateString()} ${params.validFrom.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${params.validUntil.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    const env = getEnv();
-    const passUrl = `${env.webUrl}/p/${params.passId}`;
-
     const commonPayload = {
       passId: params.passId,
       flatId: params.flatId,
       flatNumber: params.flatNumber,
       visitorName: params.visitorName,
-      pin: params.pin,
       validWindow,
-      passUrl,
+    };
+    // Credentials go only to the visitor's own phone, never into push payloads (a third-party
+    // relay); the host already has them in the create response.
+    const visitorCredentials = {
+      pin: params.pin,
+      // The /p page renders the QR from the link fragment; without a token it has nothing to show.
+      ...(params.qrToken ? { passUrl: passQrUrl(params.passId, params.qrToken) } : {}),
     };
 
     // 1. Notify visitor via SMS if phone is present
@@ -88,6 +100,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         template: 'VISITOR_PASS_ISSUED',
         payload: {
           ...commonPayload,
+          ...visitorCredentials,
           phone: params.visitorPhone,
         },
       });
@@ -99,6 +112,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         template: 'VISITOR_PASS_ISSUED',
         payload: {
           ...commonPayload,
+          ...visitorCredentials,
           phone: params.visitorPhone,
         },
       });
@@ -124,6 +138,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     visitorPhone?: string | null;
     hostUserId: string;
     pin?: string;
+    qrToken?: string;
     validFrom: Date;
     validUntil: Date;
     passId: string;
@@ -133,22 +148,28 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       passId: params.passId,
       flatNumber: params.flatNumber,
       visitorName: params.visitorName,
-      pin: params.pin,
       validWindow,
     };
 
     if (params.visitorPhone) {
+      // Credentials only to the visitor's phone; the approver gets them in the API response.
+      const visitorPayload = {
+        ...commonPayload,
+        pin: params.pin,
+        phone: params.visitorPhone,
+        ...(params.qrToken ? { passUrl: passQrUrl(params.passId, params.qrToken) } : {}),
+      };
       await this.enqueue({
         societyId: params.societyId,
         channel: 'SMS',
         template: 'VISITOR_PASS_APPROVED',
-        payload: { ...commonPayload, phone: params.visitorPhone },
+        payload: visitorPayload,
       });
       await this.enqueue({
         societyId: params.societyId,
         channel: 'WHATSAPP',
         template: 'VISITOR_PASS_APPROVED',
-        payload: { ...commonPayload, phone: params.visitorPhone },
+        payload: visitorPayload,
       });
     }
 
@@ -283,18 +304,28 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
             notification.payload as Record<string, any>,
             notification.userId,
           );
-          await this.prisma.notification.update({
-            where: { id: notification.id },
-            data: { status: 'SENT', sentAt: new Date(), lastError: null, nextAttemptAt: null },
-          });
-        } catch (error) {
-          const attempts = notification.attempts + 1;
+          const sanitizedPayload = this.stripCredentials(notification.payload);
           await this.prisma.notification.update({
             where: { id: notification.id },
             data: {
-              status: attempts >= MAX_ATTEMPTS ? 'FAILED' : 'PENDING',
+              status: 'SENT',
+              sentAt: new Date(),
+              lastError: null,
+              nextAttemptAt: null,
+              payload: sanitizedPayload as Prisma.InputJsonValue,
+            },
+          });
+        } catch (error) {
+          const attempts = notification.attempts + 1;
+          const isFailed = attempts >= MAX_ATTEMPTS;
+          const sanitizedPayload = isFailed ? this.stripCredentials(notification.payload) : undefined;
+          await this.prisma.notification.update({
+            where: { id: notification.id },
+            data: {
+              status: isFailed ? 'FAILED' : 'PENDING',
               lastError: String(error).slice(0, 500),
-              nextAttemptAt: attempts >= MAX_ATTEMPTS ? null : new Date(Date.now() + 60_000 * attempts),
+              nextAttemptAt: isFailed ? null : new Date(Date.now() + 60_000 * attempts),
+              ...(sanitizedPayload !== undefined ? { payload: sanitizedPayload as Prisma.InputJsonValue } : {}),
             },
           });
           this.logger.warn(`Notification ${notification.id} delivery failed (attempt ${attempts}): ${String(error)}`);
@@ -305,6 +336,17 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.running = false;
     }
+  }
+
+  /** Removes plaintext credentials (PIN, and the pass link that carries the QR token). */
+  private stripCredentials(payload: unknown): unknown {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const copy = { ...(payload as Record<string, unknown>) };
+      delete copy.pin;
+      delete copy.passUrl;
+      return copy;
+    }
+    return payload;
   }
 
   private async deliver(

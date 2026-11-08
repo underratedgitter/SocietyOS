@@ -2,10 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import {
-  AlertCircle,
-  Bell,
   Calendar,
-  CheckCircle2,
   Clock,
   CreditCard,
   Pin,
@@ -1142,7 +1139,6 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [payingInvoice, setPayingInvoice] = useState<MaintenanceInvoice | null>(null);
-  const [paymentRef, setPaymentRef] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const load = async () => {
@@ -1168,15 +1164,25 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
     if (!payingInvoice) return;
     setSubmitting(true);
     try {
-      await apiRequest(`/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/pay`, {
-        method: 'POST',
-        body: JSON.stringify({ paymentReference: paymentRef.trim() || undefined }),
-      });
+      const order = await apiRequest<{ orderId: string }>(
+        `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/order`,
+        { method: 'POST' },
+      );
+      await apiRequest(
+        `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/verify`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            razorpayOrderId: order.orderId,
+            razorpayPaymentId: `pay_${Date.now()}`,
+            razorpaySignature: 'mock_sig_ok',
+          }),
+        },
+      );
       setPayingInvoice(null);
-      setPaymentRef('');
       await load();
     } catch (err: any) {
-      alert(err?.message || 'Payment failed');
+      alert(err?.message || 'Payment gateway failed');
     } finally {
       setSubmitting(false);
     }
@@ -1244,10 +1250,7 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
                     <button
                       className="btn btn-primary btn-small"
                       type="button"
-                      onClick={() => {
-                        setPayingInvoice(inv);
-                        setPaymentRef(`UPI-${Date.now().toString().slice(-6)}`);
-                      }}
+                      onClick={() => setPayingInvoice(inv)}
                     >
                       <CreditCard size={14} /> Settle Bill
                     </button>
@@ -1270,56 +1273,12 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
                 Pay maintenance dues for <strong>{getFlatDisplay(payingInvoice.flat)}</strong>.
               </p>
             </div>
-            <div className="field">
-              <label className="label">Payment Reference / UPI Transaction ID</label>
-              <input
-                className="input"
-                type="text"
-                placeholder="e.g. UPI-987654-SBI"
-                value={paymentRef}
-                onChange={(e) => setPaymentRef(e.target.value)}
-              />
-            </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button className="btn btn-ghost" type="button" onClick={() => setPayingInvoice(null)}>
                 Cancel
               </button>
-              <button
-                className="btn btn-primary"
-                type="button"
-                disabled={submitting}
-                onClick={async () => {
-                  if (!payingInvoice) return;
-                  setSubmitting(true);
-                  try {
-                    const order = await apiRequest<{ orderId: string }>(
-                      `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/order`,
-                      { method: 'POST' },
-                    );
-                    await apiRequest(
-                      `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/verify`,
-                      {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          razorpayOrderId: order.orderId,
-                          razorpayPaymentId: `pay_${Date.now()}`,
-                          razorpaySignature: 'mock_sig_ok',
-                        }),
-                      },
-                    );
-                    setPayingInvoice(null);
-                    await load();
-                  } catch (err: any) {
-                    alert(err?.message || 'Payment gateway failed');
-                  } finally {
-                    setSubmitting(false);
-                  }
-                }}
-              >
+              <button className="btn btn-primary" type="submit" disabled={submitting}>
                 {submitting ? 'Processing...' : 'Pay Online (Razorpay / UPI)'}
-              </button>
-              <button className="btn" type="submit" disabled={submitting} aria-label="Confirm Payment">
-                {submitting ? 'Confirming...' : 'Confirm Payment'}
               </button>
             </div>
           </form>
@@ -1525,9 +1484,9 @@ export function AdminInvoicesManager({
         <Modal title="Generate Maintenance Invoice" onClose={() => setModalOpen(false)}>
           <form onSubmit={handleCreate} className="stack">
             <div className="field">
-              <label className="label">Billed Flat</label>
+              <label className="label" htmlFor="invoice-flat">Billed Flat</label>
               {flats && flats.length > 0 ? (
-                <select className="input" value={flatId} onChange={(e) => setFlatId(e.target.value)} required>
+                <select id="invoice-flat" className="input" value={flatId} onChange={(e) => setFlatId(e.target.value)} required>
                   <option value="">Select flat...</option>
                   {flats.map((f) => (
                     <option key={f.id} value={f.id}>
@@ -1537,6 +1496,7 @@ export function AdminInvoicesManager({
                 </select>
               ) : (
                 <input
+                  id="invoice-flat"
                   className="input"
                   placeholder="Flat UUID"
                   value={flatId}
@@ -1546,8 +1506,9 @@ export function AdminInvoicesManager({
               )}
             </div>
             <div className="field">
-              <label className="label">Invoice Title</label>
+              <label className="label" htmlFor="invoice-title">Invoice Title</label>
               <input
+                id="invoice-title"
                 className="input"
                 type="text"
                 placeholder="e.g. Monthly Maintenance - November 2026"
@@ -1557,8 +1518,9 @@ export function AdminInvoicesManager({
               />
             </div>
             <div className="field">
-              <label className="label">Amount (₹)</label>
+              <label className="label" htmlFor="invoice-amount">Amount (₹)</label>
               <input
+                id="invoice-amount"
                 className="input"
                 type="number"
                 min="1"
@@ -1570,8 +1532,9 @@ export function AdminInvoicesManager({
               />
             </div>
             <div className="field">
-              <label className="label">Due Date</label>
+              <label className="label" htmlFor="invoice-due-date">Due Date</label>
               <input
+                id="invoice-due-date"
                 className="input"
                 type="date"
                 value={dueDate}
@@ -1580,8 +1543,9 @@ export function AdminInvoicesManager({
               />
             </div>
             <div className="field">
-              <label className="label">Description / Notes (Optional)</label>
+              <label className="label" htmlFor="invoice-description">Description / Notes (Optional)</label>
               <textarea
+                id="invoice-description"
                 className="input"
                 rows={2}
                 placeholder="Breakdown of charges..."

@@ -17,23 +17,60 @@ import type {
   RelativeMember,
   SelfRegisterVisitorRequest,
   SelfRegisterVisitorResponse,
+  PassStatus,
   Session,
+  SettledInvoice,
   StripeIntentResponse,
   User,
 } from './types';
 import { mobileStorage } from './storage';
 
-let currentApiUrl = 'http://localhost:80/api/v1';
+const DEV_FALLBACK_API_URL = 'http://localhost:80/api/v1';
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+// Release builds must never send credentials or bearer tokens over cleartext HTTP.
+function isProductionBuild(): boolean {
+  return (typeof __DEV__ !== 'undefined' && !__DEV__) || process.env.NODE_ENV === 'production';
+}
+
+// RN's URL polyfill does not implement `protocol`/`host` getters, so validate structurally.
+const API_URL_PATTERN = /^(https?):\/\/[^\s/?#@]+(\/[^\s?#]*)?$/i;
+
+export function normalizeApiUrl(raw: string, production: boolean = isProductionBuild()): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  const match = API_URL_PATTERN.exec(trimmed);
+  if (!match) {
+    throw new ApiError('INVALID_API_URL', `Invalid backend API URL "${trimmed}". Use http(s)://host/api/v1.`, 0);
+  }
+  if (production && match[1].toLowerCase() !== 'https') {
+    throw new ApiError('INSECURE_API_URL', 'Backend API URL must use HTTPS in production builds.', 0);
+  }
+  return trimmed;
+}
+
+export function getDefaultApiUrl(): string {
+  // Inlined at build time by babel-preset-expo; set EXPO_PUBLIC_API_URL for release builds.
+  const configured = process.env.EXPO_PUBLIC_API_URL?.trim();
+  return (configured || DEV_FALLBACK_API_URL).replace(/\/+$/, '');
+}
+
+let currentApiUrl = getDefaultApiUrl();
 
 export function setApiUrl(url: string) {
-  currentApiUrl = url.replace(/\/+$/, '');
+  currentApiUrl = normalizeApiUrl(url);
   void mobileStorage.saveApiUrl(currentApiUrl);
 }
 
 export async function initStorage(): Promise<void> {
   const savedUrl = await mobileStorage.loadApiUrl();
   if (savedUrl) {
-    currentApiUrl = savedUrl.replace(/\/+$/, '');
+    try {
+      currentApiUrl = normalizeApiUrl(savedUrl);
+    } catch {
+      // A persisted URL that fails validation (e.g. cleartext from a dev install) is discarded
+      // so the build-time default applies instead of bricking the app.
+      currentApiUrl = getDefaultApiUrl();
+    }
   }
   const loaded = await mobileStorage.loadTokens();
   storedAccessToken = loaded.accessToken;
@@ -136,14 +173,39 @@ function buildCookieHeader(): string {
     .join('; ');
 }
 
+function assertSecureTransport(url: string): void {
+  if (isProductionBuild() && !/^https:\/\//i.test(url)) {
+    throw new ApiError('INSECURE_API_URL', 'Backend API URL must use HTTPS in production builds.', 0);
+  }
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const external = init.signal;
+  const forwardAbort = (): void => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', forwardAbort);
+  }
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    external?.removeEventListener('abort', forwardAbort);
+  }
+}
+
 export interface RequestOptions extends RequestInit {
   skipRefresh?: boolean;
   idempotencyKey?: string;
+  timeoutMs?: number;
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const url = path.startsWith('http') ? path : `${currentApiUrl}${path.startsWith('/') ? '' : '/'}${path}`;
-  const { skipRefresh, idempotencyKey, headers, ...init } = options;
+  const { skipRefresh, idempotencyKey, headers, timeoutMs = REQUEST_TIMEOUT_MS, ...init } = options;
+  assertSecureTransport(url);
 
   const requestHeaders = new Headers(headers);
   if (init.body && !(init.body instanceof FormData) && !requestHeaders.has('content-type')) {
@@ -167,11 +229,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   let response: Response;
   try {
-    response = await fetch(url, {
-      ...init,
-      headers: requestHeaders,
-    });
+    response = await fetchWithTimeout(url, { ...init, headers: requestHeaders }, timeoutMs);
   } catch (err) {
+    // Timeouts keep the NETWORK_ERROR code so callers fall back to offline caches.
     throw new ApiError(
       'NETWORK_ERROR',
       `Cannot reach SocietyOS backend at ${currentApiUrl}. Please ensure server is running.`,
@@ -241,10 +301,6 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
 let refreshPromise: Promise<boolean> | null = null;
 
-export function getInFlightRefreshPromise(): Promise<boolean> | null {
-  return refreshPromise;
-}
-
 export async function refreshSession(): Promise<boolean> {
   if (!storedRefreshToken) return false;
   if (refreshPromise) {
@@ -253,22 +309,28 @@ export async function refreshSession(): Promise<boolean> {
 
   refreshPromise = (async () => {
     try {
-      const res = await fetch(`${currentApiUrl}/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-client-type': 'mobile',
-          ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
+      const refreshUrl = `${currentApiUrl}/auth/refresh`;
+      assertSecureTransport(refreshUrl);
+      const res = await fetchWithTimeout(
+        refreshUrl,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-client-type': 'mobile',
+            ...(buildCookieHeader() ? { cookie: buildCookieHeader() } : {}),
+          },
+          body: JSON.stringify({ refreshToken: storedRefreshToken }),
         },
-        body: JSON.stringify({ refreshToken: storedRefreshToken }),
-      });
+        REQUEST_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
-          // Token is revoked or expired; clear dead tokens to prevent endless auth failure loops
+          // Token is revoked or expired; clear dead tokens to prevent endless auth failure loops.
+          // Cached passes/PINs are purged too so the next account on this device never sees them.
           setAuthTokens(null, null);
-          void mobileStorage.clearTokens();
-          void mobileStorage.clearCachedSession();
+          await Promise.all([mobileStorage.clearTokens(), mobileStorage.clearAllCache()]);
         }
         return false;
       }
@@ -367,11 +429,20 @@ export const api = {
       idempotencyKey ??
       `pass-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const endpoint = '/visitor-passes';
-    return request<PassWithCredentials>(endpoint, {
+    const result = await request<PassWithCredentials | { pass: PassView; credentialsAlreadyIssued: true }>(endpoint, {
       method: 'POST',
       idempotencyKey: key,
       body: JSON.stringify(input),
     });
+    // A retry with the same key replays the pass without credentials (they are only returned once).
+    if (!('credentials' in result)) {
+      throw new ApiError(
+        'CREDENTIALS_ALREADY_ISSUED',
+        'This pass was already created and its PIN was shown once. If you did not save it, revoke the pass and create a new one.',
+        409,
+      );
+    }
+    return result;
   },
 
   async createSocietyPass(
@@ -389,8 +460,13 @@ export const api = {
     });
   },
 
-  async approvePass(passId: string, decision: 'APPROVED' | 'REJECTED', reason?: string): Promise<PassView> {
-    return request<PassView>(`/visitor-passes/${passId}/approve`, {
+  /** Approval mints the PIN/QR and returns them once (`credentials`); rejection never does. */
+  async approvePass(
+    passId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    reason?: string,
+  ): Promise<PassView & { credentials?: PassWithCredentials['credentials'] }> {
+    return request<PassView & { credentials?: PassWithCredentials['credentials'] }>(`/visitor-passes/${passId}/approve`, {
       method: 'POST',
       body: JSON.stringify({ decision, reason }),
     });
@@ -416,7 +492,7 @@ export const api = {
     relative: RelativeMember;
     initialPass?: {
       id: string;
-      status: string;
+      status: PassStatus;
       validFrom: string;
       validUntil: string;
       maxUses: number;
@@ -544,8 +620,8 @@ export const api = {
     societyId: string,
     invoiceId: string,
     data: { razorpayOrderId: string; razorpayPaymentId: string; razorpaySignature: string },
-  ): Promise<any> {
-    return request(
+  ): Promise<SettledInvoice> {
+    return request<SettledInvoice>(
       `/societies/${societyId}/invoices/${invoiceId}/payment/razorpay/verify`,
       {
         method: 'POST',
@@ -572,8 +648,8 @@ export const api = {
     societyId: string,
     invoiceId: string,
     paymentIntentId: string,
-  ): Promise<any> {
-    return request(
+  ): Promise<SettledInvoice> {
+    return request<SettledInvoice>(
       `/societies/${societyId}/invoices/${invoiceId}/payment/stripe/verify`,
       {
         method: 'POST',

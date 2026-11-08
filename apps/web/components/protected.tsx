@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, type ReactNode } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { homeFor, userRoles, useSession } from './session-provider';
 import type { Role } from '@/lib/types';
 import { LoadingScreen } from './ui';

@@ -1,11 +1,8 @@
 import { AppException } from '../src/common/app.exception';
-import { RegistrationService } from '../src/registration/registration.service';
+import { publicIpRateLimit, RegistrationService } from '../src/registration/registration.service';
+import * as config from '../src/config';
 import { RelativesService } from '../src/relatives/relatives.service';
 import { CredentialsService } from '../src/visitors/credentials.service';
-import { RateLimitService } from '../src/common/rate-limit.service';
-import { AuditService } from '../src/common/audit.service';
-import { AuthService } from '../src/auth/auth.service';
-import { AuthzService } from '../src/common/authz.service';
 
 describe('Registration & Relatives Service Modules', () => {
   const SOCIETY_ID = '11111111-1111-1111-1111-111111111111';
@@ -29,6 +26,7 @@ describe('Registration & Relatives Service Modules', () => {
     process.env.CREDENTIAL_HMAC_KEY_ID = 'v1';
 
     mockPrisma = {
+      $executeRaw: jest.fn().mockResolvedValue(1),
       society: {
         findMany: jest.fn().mockResolvedValue([
           { id: SOCIETY_ID, name: 'Palm Grove', slug: 'palm-grove', timezone: 'Asia/Kolkata' },
@@ -170,6 +168,11 @@ describe('Registration & Relatives Service Modules', () => {
       flat: jest.fn().mockResolvedValue({
         societyId: SOCIETY_ID,
         flatId: FLAT_ID,
+        userId: USER_ID,
+        role: 'RESIDENT',
+      }),
+      society: jest.fn().mockResolvedValue({
+        societyId: SOCIETY_ID,
         userId: USER_ID,
         role: 'RESIDENT',
       }),
@@ -331,7 +334,52 @@ describe('Registration & Relatives Service Modules', () => {
       );
     });
 
-    it('auto-approves and returns credentials when category is excluded from approval policy', async () => {
+    it('requires host approval when self-registering for FRIEND or OTHER categories even if not in society approvalCategories', async () => {
+      mockPrisma.flat.findUnique.mockResolvedValueOnce({
+        id: FLAT_ID,
+        buildingId: BUILDING_ID,
+        flatNumber: '101',
+        building: {
+          id: BUILDING_ID,
+          name: 'Tower A',
+          societyId: SOCIETY_ID,
+          society: {
+            id: SOCIETY_ID,
+            name: 'Palm Grove',
+            settings: { approvalCategories: ['DELIVERY'], maxPassDurationHours: 24, maxUsesPerPass: 5, maxPassesPerFlatPerDay: 20 },
+          },
+        },
+      });
+
+      mockPrisma.visitorPass.create.mockResolvedValueOnce({
+        id: 'pass-friend-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        visitorId: VISITOR_ID,
+        category: 'FRIEND',
+        status: 'PENDING_APPROVAL',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 4 * 3600 * 1000),
+        maxUses: 1,
+        usedCount: 0,
+        visitor: { id: VISITOR_ID, name: 'Close Friend', phone: '+91 98765 33333' },
+      });
+
+      const result = await registrationService.selfRegisterVisitor({
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        visitorName: 'Close Friend',
+        category: 'FRIEND',
+      });
+
+      expect(result.status).toBe('PENDING_APPROVAL');
+      expect(result.requiresHostApproval).toBe(true);
+      expect(result.credentials).toBeNull();
+    });
+
+
+    it('marks self-registration as PENDING_APPROVAL even when category is excluded from approval policy (replaced auto-approves assertion)', async () => {
       mockPrisma.flat.findUnique.mockResolvedValueOnce({
         id: FLAT_ID,
         buildingId: BUILDING_ID,
@@ -355,7 +403,7 @@ describe('Registration & Relatives Service Modules', () => {
         hostUserId: USER_ID,
         visitorId: VISITOR_ID,
         category: 'CAB',
-        status: 'ACTIVE',
+        status: 'PENDING_APPROVAL',
         validFrom: new Date(),
         validUntil: new Date(Date.now() + 2 * 3600 * 1000),
         maxUses: 1,
@@ -370,10 +418,88 @@ describe('Registration & Relatives Service Modules', () => {
         category: 'CAB',
       });
 
-      expect(result.status).toBe('ACTIVE');
-      expect(result.requiresHostApproval).toBe(false);
-      expect(result.credentials?.pin).toHaveLength(6);
-      expect(result.credentials?.qrToken).toBeTruthy();
+      expect(result.status).toBe('PENDING_APPROVAL');
+      expect(result.requiresHostApproval).toBe(true);
+      expect(result.credentials).toBeNull();
+    });
+
+    it('on host approval sends the PIN and QR to the visitor and shows the same credentials to the host', async () => {
+      const mockNotificationsService = {
+        notifyPassApproved: jest.fn().mockResolvedValue(undefined),
+        notifyPassRevoked: jest.fn().mockResolvedValue(undefined),
+      };
+      const { VisitorPassesService } = require('../src/visitors/visitor-passes.service');
+      const passesService = new VisitorPassesService(
+        mockPrisma,
+        mockAuthz,
+        credentialsService,
+        mockAudit,
+        mockNotificationsService,
+      );
+
+      mockPrisma.visitorPass.findUnique = jest.fn().mockResolvedValueOnce({
+        id: 'pass-pending-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        status: 'PENDING_APPROVAL',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 3600 * 1000),
+        usedCount: 0,
+        maxUses: 1,
+        category: 'CAB',
+        flat: { building: { societyId: SOCIETY_ID, name: 'Tower A' }, flatNumber: '101' },
+      });
+
+      mockPrisma.visitorPass.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockPrisma.visitorPassCredential = {
+        count: jest.fn().mockResolvedValue(0),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        createMany: jest.fn().mockResolvedValue({ count: 2 }),
+      };
+      mockPrisma.visitorApproval = {
+        create: jest.fn().mockResolvedValue({ id: 'appr-1' }),
+      };
+      mockPrisma.auditLog = {
+        create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
+      };
+      mockPrisma.visitorPass.findUniqueOrThrow = jest.fn().mockResolvedValueOnce({
+        id: 'pass-pending-1',
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        hostUserId: USER_ID,
+        visitorId: VISITOR_ID,
+        status: 'ACTIVE',
+        validFrom: new Date(),
+        validUntil: new Date(Date.now() + 3600 * 1000),
+        maxUses: 1,
+        usedCount: 0,
+        category: 'CAB',
+        visitor: { id: VISITOR_ID, name: 'Uber Driver', phone: '+919876511111' },
+        flat: { id: FLAT_ID, flatNumber: '101', building: { name: 'Tower A' } },
+        host: { id: USER_ID, name: 'Resident Host' },
+        accessPoints: [{ accessPoint: { id: GATE_ID, name: 'Main Gate', type: 'BOOM_BARRIER' } }],
+        createdAt: new Date(),
+      });
+
+      const approved = await passesService.approve(
+        { sub: USER_ID, isPlatformAdmin: false },
+        'pass-pending-1',
+        { decision: 'APPROVED' },
+      );
+
+      expect(approved.status).toBe('ACTIVE');
+      const { credentials } = approved as { credentials?: { pin: string; qrToken: string } };
+      expect(credentials?.pin).toMatch(/^\d{6}$/);
+      expect(mockNotificationsService.notifyPassApproved).toHaveBeenCalledWith(
+        expect.objectContaining({
+          societyId: SOCIETY_ID,
+          flatNumber: '101',
+          visitorPhone: '+919876511111',
+          pin: credentials?.pin,
+          qrToken: credentials?.qrToken,
+        }),
+      );
     });
 
     it('marks delivery / cab partner pass as PENDING_APPROVAL per society policy', async () => {
@@ -429,6 +555,61 @@ describe('Registration & Relatives Service Modules', () => {
           category: 'RELATIVE',
         }),
       ).rejects.toThrow(AppException);
+    });
+
+    describe('public endpoint rate limits behind a proxy in production', () => {
+      afterEach(() => {
+        jest.restoreAllMocks();
+      });
+
+      const useProduction = (isProduction: boolean) => {
+        const realEnv = config.getEnv();
+        jest.spyOn(config, 'getEnv').mockReturnValue({ ...realEnv, isProduction });
+      };
+
+      it.each(['unknown', '127.0.0.1', '::ffff:127.0.0.1'])(
+        'applies the strict self-registration limit for %s in production',
+        async (ip) => {
+          useProduction(true);
+          mockRateLimit.hit.mockResolvedValueOnce({ allowed: false, remaining: 0, resetAt: new Date() });
+
+          await expect(
+            registrationService.selfRegisterVisitor(
+              { societyId: SOCIETY_ID, flatId: FLAT_ID, visitorName: 'Proxy Visitor', category: 'RELATIVE' },
+              ip,
+            ),
+          ).rejects.toThrow(AppException);
+          expect(mockRateLimit.hit).toHaveBeenCalledWith(`visitor:self-register:ip:${ip}`, 15, 900, { failClosed: true });
+        },
+      );
+
+      it('keeps the relaxed loopback limit outside production for local e2e runs', () => {
+        useProduction(false);
+        expect(publicIpRateLimit('127.0.0.1', 15, 500)).toBe(500);
+        expect(publicIpRateLimit('unknown', 15, 500)).toBe(500);
+        expect(publicIpRateLimit('203.0.113.9', 15, 500)).toBe(15);
+      });
+
+      it('applies the strict account-registration limit for loopback in production', async () => {
+        useProduction(true);
+        const { RegistrationController } = await import('../src/registration/registration.controller');
+        const controller = new RegistrationController(registrationService, mockRateLimit);
+        mockRateLimit.hit.mockResolvedValueOnce({ allowed: false, remaining: 0, resetAt: new Date() });
+
+        await expect(
+          controller.register(
+            {
+              name: 'Proxy User',
+              email: 'proxy@example.com',
+              password: 'Password#2026',
+              societyId: SOCIETY_ID,
+            },
+            { ip: '127.0.0.1', headers: {} } as never,
+            { cookie: jest.fn() } as never,
+          ),
+        ).rejects.toThrow(AppException);
+        expect(mockRateLimit.hit).toHaveBeenCalledWith('auth:register:ip:127.0.0.1', 10, 900, { failClosed: true });
+      });
     });
 
     it('rejects self-registration if flat belongs to a different society', async () => {
@@ -594,6 +775,50 @@ describe('Registration & Relatives Service Modules', () => {
       expect(result.credentials.pin).toHaveLength(6);
       expect(result.credentials.qrToken).toBeTruthy();
       expect(mockPrisma.visitorPass.create).toHaveBeenCalled();
+    });
+
+    it('scopes relative-pass credentials to the society so PIN collisions hit the unique index', async () => {
+      await relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 });
+
+      const created = mockPrisma.visitorPass.create.mock.calls.at(-1)[0].data.credentials.create;
+      expect(created).toHaveLength(2);
+      for (const credential of created) {
+        expect(credential.societyId).toEqual(expect.any(String));
+      }
+    });
+
+    it('re-checks the cap under the per-flat lock at insert time (parallel quick-pass race)', async () => {
+      // First count (pre-check) sees room; the locked re-count sees the cap already reached.
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(19).mockResolvedValueOnce(20);
+      mockPrisma.visitorPass.create.mockClear();
+
+      await expect(
+        relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
+      expect(mockPrisma.$executeRaw).toHaveBeenCalled();
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects quick pass once the flat has reached the society daily pass cap', async () => {
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(20); // policy maxPassesPerFlatPerDay = 20
+
+      await expect(
+        relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
+      expect(mockPrisma.visitorPass.count).toHaveBeenCalledWith({
+        where: { flatId: FLAT_ID, createdAt: { gte: expect.any(Date) } },
+      });
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects relative registration once the flat has reached the daily pass cap without creating a visitor', async () => {
+      mockPrisma.visitorPass.count.mockResolvedValueOnce(20);
+
+      await expect(
+        relativesService.registerRelative(USER_ID, FLAT_ID, { name: 'Late Cousin', relation: 'Cousin' }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
+      expect(mockPrisma.visitor.create).not.toHaveBeenCalled();
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
     });
 
     it('rejects quick pass if visitor does not belong to the flat (IDOR protection)', async () => {

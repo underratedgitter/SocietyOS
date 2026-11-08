@@ -25,7 +25,6 @@ describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
     const CONCURRENCY = 100;
     const promises: Promise<{ decision: 'AUTHORIZED' | 'DENIED'; reason: string; durationMs: number }>[] = [];
 
-    const start = performance.now();
     for (let i = 0; i < CONCURRENCY; i++) {
       const reqStart = performance.now();
       promises.push(
@@ -37,7 +36,6 @@ describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
     }
 
     const results = await Promise.all(promises);
-    const totalDuration = performance.now() - start;
 
     const authorized = results.filter((r) => r.decision === 'AUTHORIZED');
     const denied = results.filter((r) => r.decision === 'DENIED');
@@ -258,7 +256,7 @@ describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
 
     for (let i = 0; i < CONCURRENCY; i++) {
       promises.push(
-        communityService.recordPayment(residentUser, 'RESIDENT', 'soc-alpha', 'inv-race-1', {
+        communityService.recordPayment(residentUser, 'SOCIETY_ADMIN', 'soc-alpha', 'inv-race-1', {
           paidAt: new Date().toISOString(),
           paymentReference: `REF-${i + 1}`,
         }),

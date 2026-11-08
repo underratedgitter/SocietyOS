@@ -1,10 +1,27 @@
 name: societyos-prod
 
+# Bounded json-file logs: the default driver grows without limit and can fill
+# the host disk that also holds postgres_data.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine3.24
     restart: unless-stopped
     env_file: .env.production
+    # Docker's 64 MB /dev/shm default breaks parallel queries and large sorts.
+    shm_size: 256mb
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,22 +32,50 @@ services:
     networks: [private]
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.12-alpine3.21
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    # Auth is mandatory: every container on the network can reach Redis. The
+    # password comes from a secret file rather than env_file so Redis never
+    # receives the app's other secrets. REDIS_URL in .env.production must
+    # carry the same value. Going through docker-entrypoint.sh keeps the drop
+    # to the redis user.
+    secrets: [redis_password]
+    command:
+      - sh
+      - -c
+      - >-
+        REDIS_PASSWORD="$$(cat /run/secrets/redis_password)" &&
+        { [ -n "$$REDIS_PASSWORD" ] || { echo "redis_password secret is empty" >&2; exit 1; }; } &&
+        exec docker-entrypoint.sh redis-server --appendonly yes
+        --maxmemory 256mb --maxmemory-policy allkeys-lru
+        --requirepass "$$REDIS_PASSWORD"
     volumes:
       - redis_data:/data
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384m
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
     networks: [private]
 
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.1.2-alpine
     restart: unless-stopped
     env_file: .env.production
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
     volumes:
       - ./infrastructure/docker/mosquitto/mosquitto.prod.conf:/mosquitto/config/mosquitto.conf:ro
       - ./infrastructure/docker/mosquitto/passwd:/mosquitto/config/passwd:ro
@@ -58,6 +103,13 @@ services:
       NODE_ENV: production
       API_PORT: "4000"
       ENABLE_SWAGGER: "false"
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768m
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,10 +129,19 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      # Baked into the Next.js rewrite at build time (see apps/web/Dockerfile).
+      args:
+        API_INTERNAL_URL: http://api:4000
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      API_INTERNAL_URL: http://api:4000
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
     depends_on:
       api:
         condition: service_healthy
@@ -93,10 +154,19 @@ services:
     networks: [private]
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.30.6-alpine3.24
     restart: unless-stopped
+    # Set NGINX_HTTP_BIND=127.0.0.1:80 (shell or ./.env) when the TLS
+    # terminator runs on this host, so plaintext :80 is not internet-facing.
     ports:
-      - "80:80"
+      - "${NGINX_HTTP_BIND:-80}:80"
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
     volumes:
       - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -110,6 +180,11 @@ services:
       timeout: 5s
       retries: 10
     networks: [private]
+
+secrets:
+  redis_password:
+    # Generate with: openssl rand -hex 24 > infrastructure/docker/redis/password
+    file: ./infrastructure/docker/redis/password
 
 volumes:
   postgres_data:

@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../common/audit.service';
 import { AppException } from '../common/app.exception';
@@ -21,6 +22,12 @@ export interface BiometricVerifyDto {
   accessPointId: string;
   templateHash: string;
   type: 'FINGERPRINT' | 'FACE';
+}
+
+/** Set when the scan arrives from an authenticated gate reader rather than the guard console. */
+export interface BiometricVerifyOrigin {
+  deviceId: string;
+  requestId: string;
 }
 
 @Injectable()
@@ -54,21 +61,19 @@ export class BiometricsService implements OnModuleInit {
       // DPDP Act 2023 Compliance:
       // Only preload explicitly consented and persisted biometric records.
       // Automatic boot-time consent synthesis is removed to prevent unlawful data processing.
-      if (typeof (this.prisma as any).biometricTemplate?.findMany === 'function') {
-        const persistedTemplates = await (this.prisma as any).biometricTemplate.findMany();
-        for (const tmpl of persistedTemplates) {
-          this.templateRegistry.set(`${tmpl.societyId}:${tmpl.templateHash}`, {
-            userId: tmpl.userId,
-            societyId: tmpl.societyId,
-            type: tmpl.type as 'FINGERPRINT' | 'FACE',
-            templateHash: tmpl.templateHash,
-            algorithm: tmpl.algorithm,
-            consentGivenAt: tmpl.consentGivenAt,
-            lawfulBasis: tmpl.lawfulBasis,
-          });
-        }
-        this.logger.log(`Preloaded ${persistedTemplates.length} explicitly consented resident biometric templates`);
+      const persistedTemplates = await this.prisma.biometricTemplate.findMany();
+      for (const tmpl of persistedTemplates) {
+        this.templateRegistry.set(`${tmpl.societyId}:${tmpl.templateHash}`, {
+          userId: tmpl.userId,
+          societyId: tmpl.societyId,
+          type: tmpl.type as 'FINGERPRINT' | 'FACE',
+          templateHash: tmpl.templateHash,
+          algorithm: tmpl.algorithm,
+          consentGivenAt: tmpl.consentGivenAt,
+          lawfulBasis: tmpl.lawfulBasis,
+        });
       }
+      this.logger.log(`Preloaded ${persistedTemplates.length} explicitly consented resident biometric templates`);
     } catch (err) {
       this.logger.warn(`Could not preload resident biometric templates: ${String(err)}`);
     }
@@ -104,6 +109,17 @@ export class BiometricsService implements OnModuleInit {
       );
     }
 
+    if (
+      !dto.templateHash ||
+      dto.templateHash.startsWith('BIO_RESIDENT_') ||
+      dto.templateHash.startsWith('FINGERPRINT_RESIDENT_')
+    ) {
+      throw AppException.badRequest(
+        'INVALID_BIOMETRIC_TEMPLATE',
+        'Synthetic biometric identifiers cannot be enrolled as biometric proof.',
+      );
+    }
+
     const key = `${societyId}:${dto.templateHash}`;
     const enrollment = {
       userId: dto.userId,
@@ -115,40 +131,25 @@ export class BiometricsService implements OnModuleInit {
       lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
     };
 
-    this.templateRegistry.set(key, enrollment);
-
-    // Encrypt template payload with AES-256-GCM and store in PostgreSQL
+    // Encrypt template payload with AES-256-GCM and store in PostgreSQL.
+    // templateHash is globally unique, so the society is part of the upsert match: a hash
+    // already enrolled by another society falls through to create and hits the unique
+    // constraint instead of silently re-homing that tenant's template.
     const encryptedTemplate = encryptDeviceSecret(dto.rawTemplate || dto.templateHash);
-    if (typeof (this.prisma as any).biometricTemplate?.upsert === 'function') {
-      await (this.prisma as any).biometricTemplate.upsert({
-        where: { templateHash: dto.templateHash },
-        update: {
-          societyId,
-          userId: dto.userId,
-          type: dto.type,
-          encryptedTemplate,
-          algorithm: enrollment.algorithm,
-          consentGivenAt: enrollment.consentGivenAt,
-          lawfulBasis: enrollment.lawfulBasis,
-          consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
-          enrolledBy: actorUserId,
-        },
-        create: {
-          societyId,
-          userId: dto.userId,
-          type: dto.type,
-          templateHash: dto.templateHash,
-          encryptedTemplate,
-          algorithm: enrollment.algorithm,
-          consentGivenAt: enrollment.consentGivenAt,
-          lawfulBasis: enrollment.lawfulBasis,
-          consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
-          enrolledBy: actorUserId,
-        },
-      }).catch((err: unknown) => {
-        this.logger.warn(`Failed to persist encrypted biometric template: ${String(err)}`);
-      });
+    try {
+      await this.persistTemplate(actorUserId, societyId, dto, enrollment, encryptedTemplate);
+    } catch (err: unknown) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw AppException.conflict(
+          'BIOMETRIC_TEMPLATE_CONFLICT',
+          'This biometric template is already enrolled elsewhere',
+        );
+      }
+      throw err;
     }
+
+    // Only cache once persisted, otherwise a failed enrollment would still authorize at the gate.
+    this.templateRegistry.set(key, enrollment);
 
     await this.audit.record({
       societyId,
@@ -177,15 +178,55 @@ export class BiometricsService implements OnModuleInit {
     };
   }
 
+  private async persistTemplate(
+    actorUserId: string,
+    societyId: string,
+    dto: BiometricEnrollDto,
+    enrollment: { algorithm: string; consentGivenAt: Date; lawfulBasis: string },
+    encryptedTemplate: string,
+  ): Promise<void> {
+    await this.prisma.biometricTemplate.upsert({
+      where: { templateHash: dto.templateHash, societyId },
+      update: {
+        userId: dto.userId,
+        type: dto.type,
+        encryptedTemplate,
+        algorithm: enrollment.algorithm,
+        consentGivenAt: enrollment.consentGivenAt,
+        lawfulBasis: enrollment.lawfulBasis,
+        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+        enrolledBy: actorUserId,
+      },
+      create: {
+        societyId,
+        userId: dto.userId,
+        type: dto.type,
+        templateHash: dto.templateHash,
+        encryptedTemplate,
+        algorithm: enrollment.algorithm,
+        consentGivenAt: enrollment.consentGivenAt,
+        lawfulBasis: enrollment.lawfulBasis,
+        consentText: dto.consentNotice || 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+        enrolledBy: actorUserId,
+      },
+    });
+  }
+
   async verifyResidentBiometric(
     societyId: string,
     dto: BiometricVerifyDto,
+    origin?: BiometricVerifyOrigin,
   ) {
-    const key = `${societyId}:${dto.templateHash}`;
-    let enrollment = this.templateRegistry.get(key);
+    const isSynthetic =
+      !dto.templateHash ||
+      dto.templateHash.startsWith('BIO_RESIDENT_') ||
+      dto.templateHash.startsWith('FINGERPRINT_RESIDENT_');
 
-    if (!enrollment && typeof (this.prisma as any).biometricTemplate?.findFirst === 'function') {
-      const persisted = await (this.prisma as any).biometricTemplate.findFirst({
+    const key = `${societyId}:${dto.templateHash}`;
+    let enrollment = !isSynthetic ? this.templateRegistry.get(key) : undefined;
+
+    if (!enrollment && !isSynthetic) {
+      const persisted = await this.prisma.biometricTemplate.findFirst({
         where: { societyId, templateHash: dto.templateHash },
       });
       if (persisted) {
@@ -202,57 +243,8 @@ export class BiometricsService implements OnModuleInit {
       }
     }
 
-    if (!enrollment) {
-      // Dynamic fallback: resolve resident by flat number or user ID within this society
-      const flatMatch = dto.templateHash.match(/FINGERPRINT_RESIDENT_([A-Za-z0-9_-]+)/i);
-      if (flatMatch) {
-        const flatNumber = flatMatch[1];
-        const rfm = await this.prisma.residentFlatMembership.findFirst({
-          where: {
-            flat: {
-              flatNumber: { equals: flatNumber, mode: 'insensitive' },
-              building: { societyId },
-            },
-            endedAt: null,
-          },
-          include: { user: true, flat: true },
-        });
-        if (rfm) {
-          enrollment = {
-            userId: rfm.userId,
-            societyId,
-            type: dto.type,
-            templateHash: dto.templateHash,
-            algorithm: 'DEFAULT_EDGE_HASH_V1',
-            consentGivenAt: new Date(),
-            lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
-          };
-          this.templateRegistry.set(key, enrollment);
-        }
-      } else if (dto.templateHash.startsWith('BIO_RESIDENT_')) {
-        const userId = dto.templateHash.replace('BIO_RESIDENT_', '');
-        const rfm = await this.prisma.residentFlatMembership.findFirst({
-          where: {
-            userId,
-            flat: { building: { societyId } },
-            endedAt: null,
-          },
-          include: { user: true, flat: true },
-        });
-        if (rfm) {
-          enrollment = {
-            userId: rfm.userId,
-            societyId,
-            type: dto.type,
-            templateHash: dto.templateHash,
-            algorithm: 'DEFAULT_EDGE_HASH_V1',
-            consentGivenAt: new Date(),
-            lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
-          };
-          this.templateRegistry.set(key, enrollment);
-        }
-      }
-    }
+    // Synthetic/placeholder biometric identifiers (e.g. FINGERPRINT_RESIDENT_*, BIO_RESIDENT_*)
+    // are explicitly rejected. Biometric verification must use real enrolled templates only.
 
     const accessPoint = await this.prisma.accessPoint.findFirst({
       where: { id: dto.accessPointId, societyId },
@@ -278,6 +270,8 @@ export class BiometricsService implements OnModuleInit {
           decision: 'DENIED',
           reasonCode: 'BIOMETRIC_NOT_RECOGNIZED',
           source: 'BIOMETRIC_READER',
+          deviceId: origin?.deviceId,
+          requestId: origin?.requestId,
           meta: { type: dto.type },
         },
       });
@@ -289,12 +283,12 @@ export class BiometricsService implements OnModuleInit {
       };
     }
 
-    // Verify resident is still active in society
+    // Verify resident still lives in THIS society: an active flat elsewhere must not open this gate.
     const resident = await this.prisma.user.findUnique({
       where: { id: enrollment.userId },
       include: {
         flatMemberships: {
-          where: { endedAt: null },
+          where: { endedAt: null, flat: { building: { societyId } } },
           include: { flat: true },
         },
       },
@@ -308,6 +302,8 @@ export class BiometricsService implements OnModuleInit {
           decision: 'DENIED',
           reasonCode: 'RESIDENT_MEMBERSHIP_INACTIVE',
           source: 'BIOMETRIC_READER',
+          deviceId: origin?.deviceId,
+          requestId: origin?.requestId,
           meta: { userId: enrollment.userId },
         },
       });
@@ -323,13 +319,20 @@ export class BiometricsService implements OnModuleInit {
     await adapter.open();
 
     // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
-    const deviceIdBio = (accessPoint as any).devices?.[0]?.deviceId || (accessPoint as any).devices?.[0]?.device?.id;
+    // A reader-originated scan actuates the reader's own (already authenticated and linked)
+    // controller rather than whichever device happens to be linked first.
+    const deviceIdBio =
+      origin?.deviceId ?? (accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id);
+    let gateCommand:
+      | { status: 'ISSUED'; id: string }
+      | { status: 'FAILED'; error: string };
+
     if (deviceIdBio) {
       const commandIdBio = crypto.randomUUID();
       const nowBio = new Date();
       const expiresAtBio = new Date(nowBio.getTime() + 15 * 1000);
-      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
-        await (this.prisma as any).gateCommand.create({
+      try {
+        await this.prisma.gateCommand.create({
           data: {
             id: commandIdBio,
             deviceId: deviceIdBio,
@@ -340,15 +343,19 @@ export class BiometricsService implements OnModuleInit {
             issuedAt: nowBio,
             expiresAt: expiresAtBio,
           },
-        }).catch((cmdErr: unknown) => {
-          this.logger.warn(`Biometric GateCommand insertion failed: ${String(cmdErr)}`);
         });
+        await this.mqtt.publishCommand(commandIdBio);
+        gateCommand = { status: 'ISSUED', id: commandIdBio };
+      } catch (cmdErr: unknown) {
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${errorMsg}`);
+        gateCommand = { status: 'FAILED', error: errorMsg };
       }
-      if (typeof this.mqtt?.publishCommand === 'function') {
-        await this.mqtt.publishCommand(commandIdBio).catch((mqttErr: unknown) => {
-          this.logger.warn(`Biometric MQTT command publish failed: ${String(mqttErr)}`);
-        });
-      }
+    } else {
+      gateCommand = {
+        status: 'FAILED',
+        error: 'No active device configured for access point',
+      };
     }
 
     const accessEvent = await this.prisma.accessEvent.create({
@@ -358,12 +365,15 @@ export class BiometricsService implements OnModuleInit {
         decision: 'AUTHORIZED',
         reasonCode: 'VALID_RESIDENT_BIOMETRIC',
         source: 'BIOMETRIC_READER',
+        deviceId: origin?.deviceId,
+        requestId: origin?.requestId,
         meta: {
           userId: resident.id,
           userName: resident.name,
           flatNumber: resident.flatMemberships[0].flat.flatNumber,
           type: dto.type,
           algorithm: enrollment.algorithm,
+          gateCommand,
         },
       },
     });
@@ -377,6 +387,7 @@ export class BiometricsService implements OnModuleInit {
         name: resident.name,
         flatNumber: resident.flatMemberships[0].flat.flatNumber,
       },
+      gateCommand,
     };
   }
 
@@ -402,20 +413,25 @@ export class BiometricsService implements OnModuleInit {
       accessPoint.type,
     );
 
-    // Immediately trigger emergency override on the gate controller
-    await adapter.emergencyOverride(reason);
-
     // Actuate real hardware on Emergency: insert GateCommand into PostgreSQL and publish via MQTT
-    const deviceIdEmerg = accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id;
-    if (deviceIdEmerg) {
+    const deviceIdsEmerg = Array.from(
+      new Set(
+        (accessPoint.devices || [])
+          .map((d) => d.deviceId || d.device?.id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    const deviceResults: { deviceId: string; commandId?: string; status: 'ISSUED' | 'FAILED'; error?: string }[] = [];
+    for (const devId of deviceIdsEmerg) {
       const commandIdEmerg = crypto.randomUUID();
       const nowEmerg = new Date();
       const expiresAtEmerg = new Date(nowEmerg.getTime() + 15 * 1000);
-      if (typeof (this.prisma as any).gateCommand?.create === 'function') {
-        await (this.prisma as any).gateCommand.create({
+      try {
+        await this.prisma.gateCommand.create({
           data: {
             id: commandIdEmerg,
-            deviceId: deviceIdEmerg,
+            deviceId: devId,
             accessPointId: accessPoint.id,
             type: 'OPEN',
             status: 'ISSUED',
@@ -423,16 +439,64 @@ export class BiometricsService implements OnModuleInit {
             issuedAt: nowEmerg,
             expiresAt: expiresAtEmerg,
           },
-        }).catch((cmdErr: unknown) => {
-          this.logger.warn(`Emergency GateCommand insertion failed: ${String(cmdErr)}`);
         });
-      }
-      if (typeof this.mqtt?.publishCommand === 'function') {
-        await this.mqtt.publishCommand(commandIdEmerg).catch((mqttErr: unknown) => {
-          this.logger.warn(`Emergency MQTT command publish failed: ${String(mqttErr)}`);
-        });
+        // Publish ONLY after a successful insert
+        await this.mqtt.publishCommand(commandIdEmerg);
+        deviceResults.push({ deviceId: devId, commandId: commandIdEmerg, status: 'ISSUED' });
+      } catch (cmdErr: unknown) {
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Emergency GateCommand insertion/publish failed for device ${devId}: ${errorMsg}`);
+        deviceResults.push({ deviceId: devId, status: 'FAILED', error: errorMsg });
       }
     }
+
+    const successfulDispatches = deviceResults.filter((r) => r.status === 'ISSUED');
+    if (deviceIdsEmerg.length === 0 || successfulDispatches.length === 0) {
+      let failedAccessEventId: string | undefined;
+      try {
+        const failedAccessEvent = await this.prisma.accessEvent.create({
+          data: {
+            societyId,
+            accessPointId,
+            decision: 'DENIED',
+            reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+            source: 'MANUAL_OVERRIDE',
+            meta: {
+              actorUserId,
+              actorRole,
+              reason,
+              deviceResults,
+            },
+          },
+        });
+        failedAccessEventId = failedAccessEvent?.id;
+      } catch (evtErr: unknown) {
+        this.logger.error(`Failed to record accessEvent on emergency dispatch failure: ${String(evtErr)}`);
+      }
+
+      await this.audit.record({
+        societyId,
+        actorUserId,
+        actorRole,
+        action: 'GATE_EMERGENCY_OVERRIDE',
+        entityType: 'AccessPoint',
+        entityId: accessPointId,
+        meta: {
+          reason,
+          ...(failedAccessEventId ? { accessEventId: failedAccessEventId } : {}),
+          status: 'FAILED',
+          deviceResults,
+        },
+      });
+
+      throw AppException.badGateway(
+        'COMMAND_DISPATCH_FAILED',
+        'No active gate controller device received the emergency override command',
+      );
+    }
+
+    // Trigger emergency override on the gate controller only after hardware dispatch succeeds
+    await adapter.emergencyOverride(reason);
 
     const accessEvent = await this.prisma.accessEvent.create({
       data: {
@@ -467,6 +531,152 @@ export class BiometricsService implements OnModuleInit {
       accessEventId: accessEvent.id,
       gateState: await adapter.getState(),
       message: 'Emergency override activated: gate held open',
+      deviceResults,
+    };
+  }
+
+  async resetEmergencyOverride(
+    societyId: string,
+    actorUserId: string,
+    actorRole: string,
+    accessPointId: string,
+    reason?: string,
+  ) {
+    const accessPoint = await this.prisma.accessPoint.findFirst({
+      where: { id: accessPointId, societyId },
+      include: { devices: { include: { device: true } } },
+    });
+
+    if (!accessPoint) {
+      throw AppException.notFound('ACCESS_POINT_NOT_FOUND', 'Access point not found in this society');
+    }
+
+    const adapter = this.adapterFactory.getOrCreate(
+      accessPoint.id,
+      accessPoint.name,
+      accessPoint.type,
+    );
+
+    // Actuate real hardware on Reset: insert GateCommand into PostgreSQL and publish via MQTT
+    const deviceIdsReset = Array.from(
+      new Set(
+        (accessPoint.devices || [])
+          .map((d) => d.deviceId || d.device?.id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    const deviceResultsReset: { deviceId: string; commandId?: string; status: 'ISSUED' | 'FAILED'; error?: string }[] = [];
+    for (const devId of deviceIdsReset) {
+      const commandIdReset = crypto.randomUUID();
+      const nowReset = new Date();
+      const expiresAtReset = new Date(nowReset.getTime() + 15 * 1000);
+      try {
+        await this.prisma.gateCommand.create({
+          data: {
+            id: commandIdReset,
+            deviceId: devId,
+            accessPointId: accessPoint.id,
+            type: 'CLOSE',
+            status: 'ISSUED',
+            nonce: crypto.randomBytes(16).toString('hex'),
+            issuedAt: nowReset,
+            expiresAt: expiresAtReset,
+          },
+        });
+        // Publish ONLY after a successful insert
+        await this.mqtt.publishCommand(commandIdReset);
+        deviceResultsReset.push({ deviceId: devId, commandId: commandIdReset, status: 'ISSUED' });
+      } catch (cmdErr: unknown) {
+        const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
+        this.logger.warn(`Reset Emergency GateCommand insertion/publish failed for device ${devId}: ${errorMsg}`);
+        deviceResultsReset.push({ deviceId: devId, status: 'FAILED', error: errorMsg });
+      }
+    }
+
+    const successfulResets = deviceResultsReset.filter((r) => r.status === 'ISSUED');
+    if (deviceIdsReset.length === 0 || successfulResets.length === 0) {
+      let failedAccessEventId: string | undefined;
+      try {
+        const failedAccessEvent = await this.prisma.accessEvent.create({
+          data: {
+            societyId,
+            accessPointId,
+            decision: 'DENIED',
+            reasonCode: 'EMERGENCY_DISPATCH_FAILED',
+            source: 'MANUAL_OVERRIDE',
+            meta: {
+              actorUserId,
+              actorRole,
+              reason: reason || 'Emergency hold released. Normal access restored.',
+              deviceResults: deviceResultsReset,
+            },
+          },
+        });
+        failedAccessEventId = failedAccessEvent?.id;
+      } catch (evtErr: unknown) {
+        this.logger.error(`Failed to record accessEvent on emergency reset dispatch failure: ${String(evtErr)}`);
+      }
+
+      await this.audit.record({
+        societyId,
+        actorUserId,
+        actorRole,
+        action: 'GATE_EMERGENCY_RESET',
+        entityType: 'AccessPoint',
+        entityId: accessPointId,
+        meta: {
+          reason: reason || 'Emergency hold released. Normal access restored.',
+          ...(failedAccessEventId ? { accessEventId: failedAccessEventId } : {}),
+          status: 'FAILED',
+          deviceResults: deviceResultsReset,
+        },
+      });
+
+      throw AppException.badGateway(
+        'COMMAND_DISPATCH_FAILED',
+        'No active gate controller device received the emergency reset command',
+      );
+    }
+
+    // Clear emergency state on physical controller and close gate only after hardware dispatch succeeds
+    adapter.clearEmergency?.();
+    await adapter.close();
+
+    const accessEvent = await this.prisma.accessEvent.create({
+      data: {
+        societyId,
+        accessPointId,
+        decision: 'AUTHORIZED',
+        reasonCode: 'EMERGENCY_RESET',
+        source: 'MANUAL_OVERRIDE',
+        meta: {
+          actorUserId,
+          actorRole,
+          reason: reason || 'Emergency hold released. Normal access restored.',
+          gateState: 'CLOSED',
+        },
+      },
+    });
+
+    await this.audit.record({
+      societyId,
+      actorUserId,
+      actorRole,
+      action: 'GATE_EMERGENCY_RESET',
+      entityType: 'AccessPoint',
+      entityId: accessPointId,
+      meta: { reason, accessEventId: accessEvent.id },
+    });
+
+    return {
+      success: true,
+      decision: 'AUTHORIZED',
+      reasonCode: 'EMERGENCY_RESET',
+      accessEventId: accessEvent.id,
+      gateState: await adapter.getState(),
+      message: 'Emergency override reset: gate closed and normal access restored',
+      deviceResults: deviceResultsReset,
     };
   }
 
@@ -516,28 +726,25 @@ export class BiometricsService implements OnModuleInit {
   async anonymizeExpiredVisitorData(societyId: string, daysRetention = 90) {
     const cutoff = new Date(Date.now() - daysRetention * 24 * 3600 * 1000);
 
-    const expiredVisitors = await this.prisma.visitor.findMany({
+    // Visitor rows are reused for repeat visits, so createdAt alone is not the retention clock:
+    // anyone holding a pass that is still inside the window (including a live pass) is kept.
+    // A single set-based update also avoids loading an unbounded id list into memory.
+    const anonymized = await this.prisma.visitor.updateMany({
       where: {
         societyId,
         createdAt: { lt: cutoff },
         name: { not: 'ANONYMIZED_VISITOR' },
+        passes: { none: { validUntil: { gte: cutoff } } },
       },
-      select: { id: true },
+      data: {
+        name: 'ANONYMIZED_VISITOR',
+        phone: null,
+      },
     });
-
-    if (expiredVisitors.length > 0) {
-      await this.prisma.visitor.updateMany({
-        where: { id: { in: expiredVisitors.map((v) => v.id) } },
-        data: {
-          name: 'ANONYMIZED_VISITOR',
-          phone: null,
-        },
-      });
-    }
 
     return {
       societyId,
-      anonymizedCount: expiredVisitors.length,
+      anonymizedCount: anonymized.count,
       retentionDays: daysRetention,
       status: 'SUCCESS',
     };

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { AppException } from '../src/common/app.exception';
 import { DeviceApiController } from '../src/devices/device-api.controller';
 import { AuthedRequest } from '../src/auth/jwt-auth.guard';
@@ -6,7 +7,6 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
   const SOCIETY_ID = 'soc-111-aaa';
   const DEVICE_ID = 'dev-222-bbb';
   const AP_GATE_1 = 'ap-gate-1';
-  const AP_GATE_2 = 'ap-gate-2';
   const FOREIGN_AP = 'ap-foreign-soc';
 
   let controller: DeviceApiController;
@@ -19,10 +19,15 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         update: jest.fn().mockResolvedValue({}),
       },
       visitorPass: {
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      visitorPassCredential: {
+        findFirst: jest.fn().mockResolvedValue(null),
       },
       residentFlatMembership: {
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       accessPoint: {
         findMany: jest.fn(),
@@ -31,12 +36,17 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'evt-1', ...data })),
       },
       deviceEvent: {
+        findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'dev-evt-1', ...data })),
       },
       deviceAccessPoint: {
         findUnique: jest.fn(),
       },
+      biometricTemplate: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      $executeRaw: jest.fn().mockResolvedValue(1),
       $transaction: jest.fn().mockImplementation((cb) => {
         if (typeof cb === 'function') {
           return cb(mockPrisma);
@@ -79,11 +89,16 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         },
       ]);
 
-      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([
         {
-          userId: 'res-user-1',
-          user: { id: 'res-user-1', name: 'Rohan Sharma' },
-          flat: { flatNumber: '202', building: { name: 'Tower B' } },
+          templateHash: 'real_enrolled_template_hash_1',
+          user: {
+            id: 'res-user-1',
+            name: 'Rohan Sharma',
+            flatMemberships: [
+              { flat: { flatNumber: '202', building: { name: 'Tower B' } } },
+            ],
+          },
         },
       ]);
 
@@ -96,11 +111,12 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       expect(res.policy.offlineValidityWindowHours).toBe(24);
       expect(res.policy.maxOfflineEvents).toBe(500);
 
-      // Verify credentials contain both resident biometric template and visitor PIN
+      // Verify credentials contain real enrolled resident biometric template (not synthetic BIO_RESIDENT_)
       const resBiometric = res.credentials.find((c: any) => c.kind === 'BIOMETRIC');
       expect(resBiometric).toBeDefined();
-      expect(resBiometric!.credentialHash).toBe('BIO_RESIDENT_res-user-1');
+      expect(resBiometric!.credentialHash).toBe('real_enrolled_template_hash_1');
       expect(resBiometric!.visitorName).toContain('Rohan Sharma (Resident)');
+      expect(resBiometric!.flatNumber).toBe('Tower B · 202');
 
       const visitorCred = res.credentials.find((c: any) => c.kind === 'PIN');
       expect(visitorCred).toBeDefined();
@@ -128,10 +144,168 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         },
       ]);
 
-      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
 
       const res = await controller.edgeSync(mockDeviceReq);
       expect(res.credentials.length).toBe(0);
+    });
+
+    it('returns revoked pass credential hashes and ended resident template hashes in revokedHashes', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany
+        .mockResolvedValueOnce([]) // active passes
+        .mockResolvedValueOnce([  // revoked passes
+          {
+            id: 'pass-revoked-1',
+            credentials: [{ credentialHash: 'hash-revoked-pin' }],
+          },
+        ]);
+
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValueOnce([{ userId: 'ex-resident-99' }]); // ended residents
+      mockPrisma.biometricTemplate.findMany
+        .mockResolvedValueOnce([]) // active resident templates
+        .mockResolvedValueOnce([{ templateHash: 'revoked-bio-template-hash-99' }]); // ended resident templates
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+      expect(res.revokedHashes).toContain('hash-revoked-pin');
+      expect(res.revokedHashes).toContain('revoked-bio-template-hash-99');
+      expect(res.revokedHashes).not.toContain('BIO_RESIDENT_ex-resident-99');
+    });
+
+    it('edgeSync queries only enrolled templates with consent and never outputs synthetic BIO_RESIDENT_ IDs', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany.mockResolvedValue([]);
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+      expect(mockPrisma.biometricTemplate.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            societyId: SOCIETY_ID,
+            consentGivenAt: expect.any(Object),
+            user: expect.objectContaining({
+              memberships: { some: { societyId: SOCIETY_ID, status: 'ACTIVE' } },
+              flatMemberships: {
+                some: {
+                  flat: { building: { societyId: SOCIETY_ID } },
+                  endedAt: null,
+                },
+              },
+            }),
+          }),
+        }),
+      );
+      for (const cred of res.credentials) {
+        expect(cred.credentialHash).not.toMatch(/^BIO_RESIDENT_/);
+      }
+    });
+
+    it('bounds revoked passes to validity window (validUntil > now - 1 day) and memberships to last 30 days with limit', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany
+        .mockResolvedValueOnce([]) // active passes
+        .mockResolvedValueOnce([]); // revoked passes
+
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+
+      // Verify revoked passes queried with validUntil > now - 1 day and take limit
+      expect(mockPrisma.visitorPass.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            societyId: SOCIETY_ID,
+            validUntil: { gt: expect.any(Date) },
+          }),
+          // One past the 1000 cap so truncation is detectable; newest revocations first.
+          take: 1001,
+          orderBy: [{ revokedAt: { sort: 'desc', nulls: 'last' } }, { id: 'asc' }],
+        }),
+      );
+
+      // Verify ended residents queried with endedAt >= 30 days ago and take limit
+      expect(mockPrisma.residentFlatMembership.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            endedAt: expect.objectContaining({ gte: expect.any(Date) }),
+          }),
+          take: 1001,
+          orderBy: [{ endedAt: 'desc' }, { id: 'asc' }],
+        }),
+      );
+      expect(res.revokedHashesTruncated).toBe(false);
+    });
+
+    it('flags truncation instead of silently dropping revocations past the cap', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({ id: DEVICE_ID, accessPoints: [{ accessPointId: AP_GATE_1 }] });
+      const revoked = Array.from({ length: 1001 }, (_, i) => ({ credentials: [{ credentialHash: `h-${i}` }] }));
+      mockPrisma.visitorPass.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce(revoked);
+      mockPrisma.biometricTemplate.findMany.mockResolvedValue([]);
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValue([]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+
+      expect(res.revokedHashes).toHaveLength(1000);
+      expect(res.revokedHashes[0]).toBe('h-0');
+      expect(res.revokedHashesTruncated).toBe(true);
+    });
+
+    it('does not include active resident biometric template in revokedHashes even if an older flat membership ended in the last 30 days', async () => {
+      mockPrisma.device.findUnique.mockResolvedValue({
+        id: DEVICE_ID,
+        accessPoints: [{ accessPointId: AP_GATE_1 }],
+      });
+
+      mockPrisma.visitorPass.findMany
+        .mockResolvedValueOnce([]) // active passes
+        .mockResolvedValueOnce([]); // revoked passes
+
+      // Active resident template
+      mockPrisma.biometricTemplate.findMany
+        .mockResolvedValueOnce([
+          {
+            templateHash: 'active-resident-template-hash',
+            user: {
+              id: 'res-user-moving',
+              name: 'Moving Resident',
+              flatMemberships: [
+                { flat: { flatNumber: '202', building: { name: 'Tower B' } } },
+              ],
+            },
+          },
+        ])
+        // Ended templates query returns the same template hash
+        .mockResolvedValueOnce([
+          { templateHash: 'active-resident-template-hash' },
+        ]);
+
+      // Previous flat membership ended 5 days ago
+      mockPrisma.residentFlatMembership.findMany.mockResolvedValueOnce([
+        { userId: 'res-user-moving' },
+      ]);
+
+      const res = await controller.edgeSync(mockDeviceReq);
+      expect(res.ok).toBe(true);
+      const activeBio = res.credentials.find((c: any) => c.credentialHash === 'active-resident-template-hash');
+      expect(activeBio).toBeDefined();
+      expect(res.revokedHashes).not.toContain('active-resident-template-hash');
     });
   });
 
@@ -283,8 +457,9 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
       mockPrisma.visitorPass = {
         ...mockPrisma.visitorPass,
-        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
-        update: jest.fn().mockResolvedValue({ id: PASS_UUID, usedCount: 2 }),
+        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, societyId: SOCIETY_ID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
+        update: jest.fn().mockResolvedValue({ usedCount: 2, maxUses: 3 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       };
 
       const events: any[] = [
@@ -311,8 +486,226 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
       );
       expect(mockPrisma.visitorPass.update).toHaveBeenCalledWith({
         where: { id: PASS_UUID },
-        data: expect.objectContaining({ usedCount: 2 }),
+        data: { usedCount: { increment: 1 } },
+        select: { usedCount: true, maxUses: true },
       });
+      expect(mockPrisma.visitorPass.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('increments atomically so concurrent redemptions of the same pass are never lost', async () => {
+      const PASS_UUID = 'e0000000-0000-4000-a000-000000000003';
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      // This sync read usedCount=1, but another gate redeemed the pass online in the meantime:
+      // the row is already at 2, so this offline use makes it 3 of 3.
+      mockPrisma.visitorPass = {
+        ...mockPrisma.visitorPass,
+        findUnique: jest.fn().mockResolvedValue({ id: PASS_UUID, societyId: SOCIETY_ID, usedCount: 1, maxUses: 3, status: 'ACTIVE' }),
+        update: jest.fn().mockResolvedValue({ usedCount: 3, maxUses: 3 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      };
+
+      await controller.syncOffline(mockDeviceReq, {
+        events: [
+          {
+            sequence: 103,
+            accessPointId: AP_GATE_1,
+            credentialType: 'PIN',
+            decision: 'AUTHORIZED',
+            reasonCode: 'VALID_OFFLINE_CACHE',
+            timestamp: new Date().toISOString(),
+            passId: PASS_UUID,
+          },
+        ],
+      });
+
+      const updateArgs = mockPrisma.visitorPass.update.mock.calls[0][0];
+      expect(updateArgs.data.usedCount).toEqual({ increment: 1 });
+      expect(updateArgs.data.usedCount).not.toBe(2);
+      expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith({
+        where: { id: PASS_UUID, status: 'ACTIVE' },
+        data: { status: 'EXHAUSTED' },
+      });
+    });
+
+    it('ignores passIds owned by another society and never mutates them', async () => {
+      const FOREIGN_PASS_UUID = 'e0000000-0000-4000-a000-000000000002';
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.visitorPass = {
+        ...mockPrisma.visitorPass,
+        findUnique: jest.fn().mockResolvedValue({
+          id: FOREIGN_PASS_UUID,
+          societyId: 'soc-other-tenant',
+          usedCount: 0,
+          maxUses: 1,
+          status: 'ACTIVE',
+        }),
+        update: jest.fn(),
+      };
+
+      const events: any[] = [
+        {
+          sequence: 102,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+          passId: FOREIGN_PASS_UUID,
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.syncedCount).toBe(1);
+      expect(mockPrisma.visitorPass.update).not.toHaveBeenCalled();
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ passId: undefined, societyId: SOCIETY_ID }),
+        }),
+      );
+    });
+
+    it('verifies device-to-access-point assignment in query to prevent forging events for unassigned gates (Issue 4)', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([]); // Device is not assigned to this AP
+
+      const events: any[] = [
+        {
+          sequence: 50,
+          accessPointId: 'unassigned-gate',
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'FORGED_GATE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.syncedCount).toBe(0);
+      expect(mockPrisma.accessPoint.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            devices: { some: { deviceId: DEVICE_ID } },
+          }),
+        }),
+      );
+    });
+
+    it('handles unique constraint violation gracefully on concurrent sequence replay (Issue 8)', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.deviceEvent.findFirst.mockResolvedValue(null); // Passed initial check
+      mockPrisma.deviceEvent.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on DeviceEvent(deviceId, sequence)',
+          { code: 'P2002', clientVersion: '6.16.0' },
+        ),
+      );
+
+      const events: any[] = [
+        {
+          sequence: 99,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(res.syncedCount).toBe(0);
+      expect(res.duplicateCount).toBe(1);
+      expect(mockPrisma.accessEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('propagates database errors thrown by $executeRaw advisory lock or savepoints during syncOffline', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.$executeRaw.mockRejectedValueOnce(new Error('Advisory lock failed'));
+
+      const events: any[] = [
+        {
+          sequence: 1,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      await expect(
+        controller.syncOffline(mockDeviceReq, { events }),
+      ).rejects.toThrow('Advisory lock failed');
+    });
+
+    it('rejects duplicate sequences within the same batch payload to prevent repeated pass consumption', async () => {
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.deviceEvent.findFirst.mockResolvedValue(null);
+
+      const events: any[] = [
+        {
+          sequence: 15,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+        {
+          sequence: 15,
+          accessPointId: AP_GATE_1,
+          credentialType: 'PIN',
+          decision: 'AUTHORIZED',
+          reasonCode: 'VALID_OFFLINE_CACHE',
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const res = await controller.syncOffline(mockDeviceReq, { events });
+      expect(res.ok).toBe(true);
+      expect(res.syncedCount).toBe(1);
+      expect(res.duplicateCount).toBe(1);
+      expect(mockPrisma.accessEvent.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('POST /device-api/events retry handling', () => {
+    it('returns existing event on duplicate sequence retry rather than throwing 500', async () => {
+      mockPrisma.deviceEvent.findFirst.mockResolvedValueOnce({ id: 'existing-event-99' });
+
+      const res = await controller.events(mockDeviceReq, {
+        type: 'ACK',
+        sequence: 42,
+        payload: { commandId: 'cmd-1' },
+      });
+
+      expect(res.ok).toBe(true);
+      expect(res.eventId).toBe('existing-event-99');
+      expect(res.duplicate).toBe(true);
+      expect(mockPrisma.deviceEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('gracefully handles P2002 race condition on concurrent sequence retry', async () => {
+      mockPrisma.deviceEvent.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'existing-event-100' });
+
+      mockPrisma.deviceEvent.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on DeviceEvent(deviceId, sequence)',
+          { code: 'P2002', clientVersion: '6.16.0' },
+        ),
+      );
+
+      const res = await controller.events(mockDeviceReq, {
+        type: 'ACK',
+        sequence: 43,
+        payload: { commandId: 'cmd-2' },
+      });
+
+      expect(res.ok).toBe(true);
+      expect(res.eventId).toBe('existing-event-100');
+      expect(res.duplicate).toBe(true);
     });
   });
 });
+

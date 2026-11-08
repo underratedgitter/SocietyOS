@@ -1,0 +1,28 @@
+{
+  "_note": "Matrix COSEC CENTRA. The event table, its columns and the verification codes could not be confirmed offline; all are VERIFY_ON_SITE. Ask Matrix support for the CENTRA database schema or inspect it with the read-only login.",
+  "cloud": { "baseUrl": "https://api.example-society.in", "requestTimeoutSec": 15 },
+  "stateDir": "./state",
+  "sources": [
+    {
+      "name": "cosec",
+      "type": "sql",
+      "deviceTokenEnv": "COSEC_DEVICE_TOKEN",
+      "dialect": "VERIFY_ON_SITE",
+      "connectionStringEnv": "COSEC_DB_URL",
+      "query": "VERIFY_ON_SITE",
+      "cursorColumn": "VERIFY_ON_SITE",
+      "cursorType": "VERIFY_ON_SITE",
+      "pollIntervalSec": 10,
+      "batchSize": 200,
+      "timezone": "VERIFY_ON_SITE",
+      "columns": {
+        "deviceUserId": "VERIFY_ON_SITE",
+        "occurredAt": "VERIFY_ON_SITE",
+        "method": "VERIFY_ON_SITE",
+        "matched": "VERIFY_ON_SITE"
+      },
+      "methodMap": { "_eventCodes": "VERIFY_ON_SITE" },
+      "defaultMethod": "UNKNOWN"
+    }
+  ]
+}

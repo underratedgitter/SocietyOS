@@ -138,5 +138,27 @@ export class AccessController {
       dto.reason,
     );
   }
+
+  @Post('emergency-reset')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  @ApiBearerAuth()
+  async emergencyReset(@Req() req: AuthedRequest, @Body() dto: EmergencyOverrideDto) {
+    const accessPoint = await this.prisma.accessPoint.findUnique({
+      where: { id: dto.accessPointId },
+      select: { id: true, societyId: true },
+    });
+    if (!accessPoint) {
+      throw AppException.forbidden('WRONG_ACCESS_POINT', 'Access point not found');
+    }
+    const context = await this.authz.society(req.user!.sub, accessPoint.societyId, ['SOCIETY_ADMIN', 'GUARD']);
+    return this.biometrics.resetEmergencyOverride(
+      accessPoint.societyId,
+      req.user!.sub,
+      context.role,
+      dto.accessPointId,
+      dto.reason,
+    );
+  }
 }
 

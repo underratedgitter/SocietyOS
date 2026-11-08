@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowLeft, Check, KeyRound, ShieldCheck, UserPlus, Users } from 'lucide-react';
+import { ArrowLeft, Check, KeyRound, ShieldCheck, Users } from 'lucide-react';
 import { UserRegistrationForm } from '@/features/user-registration';
 
 export default function RegisterPage() {

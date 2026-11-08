@@ -208,11 +208,42 @@ export class CommunityService {
   // AMENITY BOOKINGS
   // =========================================================================
 
-  async listBookings(societyId: string, flatId?: string) {
+  async listBookings(user: JwtUser, societyId: string, flatId?: string) {
+    const context = await this.authz.society(user.sub, societyId);
+
+    let targetFlatId: string | undefined = flatId;
+    let allowedFlatIds: string[] | undefined = undefined;
+
+    if (context.role === 'RESIDENT') {
+      if (flatId) {
+        // Enforce that resident belongs to this flat and that flat belongs to this society
+        const flatCtx = await this.authz.flat(user.sub, flatId);
+        if (flatCtx.societyId !== societyId) {
+          throw AppException.forbidden('NOT_YOUR_FLAT', 'Flat does not belong to this society');
+        }
+      } else {
+        // Scope to resident's flats in this society
+        const memberships = await this.prisma.residentFlatMembership.findMany({
+          where: {
+            userId: user.sub,
+            endedAt: null,
+            flat: { building: { societyId } },
+          },
+          select: { flatId: true },
+        });
+        allowedFlatIds = memberships.map((m) => m.flatId);
+      }
+    } else if (flatId) {
+      const flatCtx = await this.authz.flat(user.sub, flatId);
+      if (flatCtx.societyId !== societyId) {
+        throw AppException.forbidden('FLAT_NOT_IN_SOCIETY', 'Flat does not belong to this society');
+      }
+    }
+
     return this.prisma.amenityBooking.findMany({
       where: {
         societyId,
-        ...(flatId ? { flatId } : {}),
+        ...(targetFlatId ? { flatId: targetFlatId } : allowedFlatIds ? { flatId: { in: allowedFlatIds } } : {}),
       },
       orderBy: { slotStart: 'asc' },
       include: {
@@ -449,6 +480,11 @@ export class CommunityService {
     invoiceId: string,
     dto: RecordInvoicePaymentDto,
   ) {
+    // Manual settlement bypasses the payment gateway; residents must pay via the payments module.
+    if (role !== 'SOCIETY_ADMIN') {
+      throw AppException.forbidden('FORBIDDEN_ROLE', 'Only society administrators can manually settle invoices');
+    }
+
     const existing = await this.prisma.maintenanceInvoice.findUnique({
       where: { id: invoiceId },
       include: { flat: { include: { building: true } } },
@@ -463,14 +499,6 @@ export class CommunityService {
 
     if (existing.status === 'CANCELLED') {
       throw AppException.unprocessable('INVOICE_CANCELLED', 'Cannot pay a cancelled invoice');
-    }
-
-    if (role !== 'SOCIETY_ADMIN' && role !== 'RESIDENT') {
-      throw AppException.forbidden('FORBIDDEN_ROLE', 'Only residents and administrators can settle invoices');
-    }
-
-    if (role === 'RESIDENT') {
-      await this.authz.assertResidentOfFlat(user.sub, existing.flatId);
     }
 
     const paidAt = dto.paidAt ? new Date(dto.paidAt) : new Date();

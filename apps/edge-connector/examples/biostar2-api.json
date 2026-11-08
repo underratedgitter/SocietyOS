@@ -1,0 +1,25 @@
+{
+  "_note": "BioStar 2 REST API source. Endpoints follow Suprema's BioStar 2 API reference; operators and event codes are not hard-coded because they could not be confirmed offline. Look them up in https://<biostar-host>/api-docs on site.",
+  "cloud": { "baseUrl": "https://api.example-society.in", "requestTimeoutSec": 15 },
+  "stateDir": "./state",
+  "sources": [
+    {
+      "name": "biostar2",
+      "type": "biostar2",
+      "deviceTokenEnv": "BIOSTAR_DEVICE_TOKEN",
+      "baseUrl": "https://192.168.1.50",
+      "loginIdEnv": "BIOSTAR_LOGIN_ID",
+      "passwordEnv": "BIOSTAR_PASSWORD",
+      "caFile": "/etc/societyos/biostar-ca.pem",
+      "pollIntervalSec": 10,
+      "batchSize": 200,
+      "doorId": "VERIFY_ON_SITE",
+      "cursorOperator": "VERIFY_ON_SITE",
+      "eventCodeOperator": "VERIFY_ON_SITE",
+      "eventCodes": {
+        "success": { "_codes": "VERIFY_ON_SITE" },
+        "failure": { "_codes": "VERIFY_ON_SITE" }
+      }
+    }
+  ]
+}

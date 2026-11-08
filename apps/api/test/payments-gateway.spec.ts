@@ -4,6 +4,7 @@ import { PaymentsController } from '../src/payments/payments.controller';
 import { WebhooksController } from '../src/payments/webhooks.controller';
 import { AppException } from '../src/common/app.exception';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import * as configModule from '../src/config';
 
 describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)', () => {
   const SOCIETY_ID = 'soc-abc-123';
@@ -39,6 +40,7 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       $transaction: jest.fn(async (cb) => {
         const tx = {
           $executeRawUnsafe: jest.fn().mockResolvedValue(undefined),
+          $executeRaw: jest.fn().mockResolvedValue(undefined),
           maintenanceInvoice: mockPrisma.maintenanceInvoice,
           auditLog: mockPrisma.auditLog,
         };
@@ -120,11 +122,12 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
     });
 
     test('verifies valid Razorpay payment signature and marks invoice PAID', async () => {
+      const invoiceWithOrder = { ...pendingInvoice, gatewayOrderId: 'order_mock_123' };
       mockPrisma.maintenanceInvoice.findUnique
-        .mockResolvedValueOnce(pendingInvoice) // for initial lookup
-        .mockResolvedValueOnce(pendingInvoice); // inside transaction fresh lookup
+        .mockResolvedValueOnce(invoiceWithOrder) // for initial lookup
+        .mockResolvedValueOnce(invoiceWithOrder); // inside transaction fresh lookup
       mockPrisma.maintenanceInvoice.update.mockResolvedValue({
-        ...pendingInvoice,
+        ...invoiceWithOrder,
         status: 'PAID',
         paidAt: new Date(),
         paidById: residentUser.sub,
@@ -141,8 +144,40 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       expect(mockNotifications.enqueue).toHaveBeenCalled();
     });
 
-    test('rejects Razorpay payment with invalid signature', async () => {
+    test('rejects Razorpay payment verification if invoice has no gateway order', async () => {
       mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+
+      await expect(
+        service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          razorpayOrderId: 'order_unrelated_123',
+          razorpayPaymentId: 'pay_rzp_999',
+          razorpaySignature: 'mock_sig_ok',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'NO_GATEWAY_ORDER' }),
+      });
+    });
+
+    test('rejects Razorpay payment verification if order ID does not match invoice order', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        gatewayOrderId: 'order_expected_456',
+      });
+
+      await expect(
+        service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          razorpayOrderId: 'order_different_789',
+          razorpayPaymentId: 'pay_rzp_999',
+          razorpaySignature: 'mock_sig_ok',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'ORDER_ID_MISMATCH' }),
+      });
+    });
+
+    test('rejects Razorpay payment with invalid signature', async () => {
+      const invoiceWithOrder = { ...pendingInvoice, gatewayOrderId: 'order_mock_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithOrder);
 
       await expect(
         service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
@@ -182,12 +217,25 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       expect(res.paymentIntentId).toBeDefined();
     });
 
+    test('rejects Stripe payment intent creation for non-INR currency', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+
+      await expect(
+        service.createStripePaymentIntent(residentUser, SOCIETY_ID, INVOICE_ID, {
+          currency: 'usd',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'INVALID_CURRENCY' }),
+      });
+    });
+
     test('verifies Stripe payment and settles invoice idempotently', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_mock_complete' };
       mockPrisma.maintenanceInvoice.findUnique
-        .mockResolvedValueOnce(pendingInvoice)
-        .mockResolvedValueOnce(pendingInvoice);
+        .mockResolvedValueOnce(invoiceWithIntent)
+        .mockResolvedValueOnce(invoiceWithIntent);
       mockPrisma.maintenanceInvoice.update.mockResolvedValue({
-        ...pendingInvoice,
+        ...invoiceWithIntent,
         status: 'PAID',
       });
 
@@ -196,6 +244,135 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       });
 
       expect(res.status).toBe('PAID');
+    });
+
+    test('rejects Stripe payment verification if invoice has no gateway order', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+
+      await expect(
+        service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          paymentIntentId: 'pi_unrelated_999',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'NO_GATEWAY_ORDER' }),
+      });
+    });
+
+    test('rejects Stripe payment verification if payment intent does not match invoice order', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        gatewayOrderId: 'pi_expected_111',
+      });
+
+      await expect(
+        service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          paymentIntentId: 'pi_different_222',
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'PAYMENT_INTENT_MISMATCH' }),
+      });
+    });
+
+    test('rejects Stripe payment intent creation in production when STRIPE_SECRET_KEY is missing', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(pendingInvoice);
+      const originalEnv = configModule.getEnv();
+      const spy = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        isProduction: true,
+        stripeSecretKey: undefined,
+      });
+
+      try {
+        await expect(
+          service.createStripePaymentIntent(residentUser, SOCIETY_ID, INVOICE_ID, { currency: 'INR' }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'GATEWAY_NOT_CONFIGURED' }),
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('verifyStripePayment wraps upstream fetch network errors as badGateway PAYMENT_GATEWAY_ERROR', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_test_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithIntent);
+
+      const originalEnv = configModule.getEnv();
+      const spyEnv = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        stripeSecretKey: 'sk_test_mock_key',
+      });
+      const spyFetch = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('Network connection reset'));
+
+      try {
+        await expect(
+          service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+            paymentIntentId: 'pi_test_123',
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'PAYMENT_GATEWAY_ERROR' }),
+        });
+      } finally {
+        spyEnv.mockRestore();
+        spyFetch.mockRestore();
+      }
+    });
+
+    test('verifyStripePayment wraps non-ok HTTP responses as badGateway PAYMENT_GATEWAY_ERROR', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_test_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithIntent);
+
+      const originalEnv = configModule.getEnv();
+      const spyEnv = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        stripeSecretKey: 'sk_test_mock_key',
+      });
+      const spyFetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: jest.fn().mockResolvedValue('Bad gateway from Stripe'),
+      } as unknown as Response);
+
+      try {
+        await expect(
+          service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+            paymentIntentId: 'pi_test_123',
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'PAYMENT_GATEWAY_ERROR' }),
+        });
+      } finally {
+        spyEnv.mockRestore();
+        spyFetch.mockRestore();
+      }
+    });
+
+    test('verifyStripePayment preserves AppException when payment is not completed', async () => {
+      const invoiceWithIntent = { ...pendingInvoice, gatewayOrderId: 'pi_test_123' };
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue(invoiceWithIntent);
+
+      const originalEnv = configModule.getEnv();
+      const spyEnv = jest.spyOn(configModule, 'getEnv').mockReturnValue({
+        ...originalEnv,
+        stripeSecretKey: 'sk_test_mock_key',
+      });
+      const spyFetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ status: 'requires_payment_method' }),
+      } as unknown as Response);
+
+      try {
+        await expect(
+          service.verifyStripePayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+            paymentIntentId: 'pi_test_123',
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({ code: 'PAYMENT_NOT_COMPLETED' }),
+        });
+      } finally {
+        spyEnv.mockRestore();
+        spyFetch.mockRestore();
+      }
     });
   });
 
@@ -375,6 +552,89 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       expect(result.status).toBe('order_mismatch');
       expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
     });
+
+    test('rejects Razorpay webhook if order ID does not match invoice gatewayOrderId', async () => {
+      const payload = {
+        event: 'order.paid',
+        payload: {
+          order: {
+            entity: {
+              id: 'order_rzp_wrong_999',
+              notes: { invoiceId: INVOICE_ID },
+            },
+          },
+          payment: {
+            entity: { id: 'pay_rzp_wrong' },
+          },
+        },
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        gatewayOrderId: 'order_rzp_expected_111',
+      });
+
+      const result = await service.handleRazorpayWebhook(JSON.stringify(payload));
+      expect(result.received).toBe(true);
+      expect(result.status).toBe('order_mismatch');
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
+    });
+
+    test('rejects Razorpay webhook if amount is less than invoice amount', async () => {
+      const payload = {
+        event: 'payment.captured',
+        payload: {
+          payment: {
+            entity: {
+              id: 'pay_underpaid',
+              order_id: 'order_rzp_expected_111',
+              amount: 1000, // 10 INR (invoice is 5000 INR = 500000 paise)
+              currency: 'INR',
+              notes: { invoiceId: INVOICE_ID },
+            },
+          },
+        },
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        amount: 5000,
+        gatewayOrderId: 'order_rzp_expected_111',
+      });
+
+      const result = await service.handleRazorpayWebhook(JSON.stringify(payload));
+      expect(result.received).toBe(true);
+      expect(result.status).toBe('amount_mismatch');
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
+    });
+
+    test('rejects Razorpay webhook if currency is not INR', async () => {
+      const payload = {
+        event: 'payment.captured',
+        payload: {
+          payment: {
+            entity: {
+              id: 'pay_foreign_currency',
+              order_id: 'order_rzp_expected_111',
+              amount: 500000,
+              currency: 'USD',
+              notes: { invoiceId: INVOICE_ID },
+            },
+          },
+        },
+      };
+
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
+        ...pendingInvoice,
+        amount: 5000,
+        gatewayOrderId: 'order_rzp_expected_111',
+      });
+
+      const result = await service.handleRazorpayWebhook(JSON.stringify(payload));
+      expect(result.received).toBe(true);
+      expect(result.status).toBe('currency_mismatch');
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
+    });
   });
 
   describe('Adversarial & Edge Cases (Amount & Order ID validation)', () => {
@@ -455,6 +715,34 @@ describe('Online Payment Gateway Integration Suite (Razorpay, Stripe & Webhooks)
       const res = await webhooksController.razorpayWebhook(req, 'sig_header');
       expect(res.received).toBe(true);
       expect(spy).toHaveBeenCalledWith(req.rawBody, 'sig_header');
+    });
+
+    test('settleInvoice propagates advisory lock errors instead of swallowing them', async () => {
+      mockPrisma.maintenanceInvoice.findUnique.mockResolvedValueOnce({
+        id: INVOICE_ID,
+        societyId: SOCIETY_ID,
+        flatId: FLAT_ID,
+        status: 'PENDING',
+        amount: 500,
+        gatewayOrderId: 'order_rzp_123',
+      });
+      mockPrisma.$transaction.mockImplementationOnce(async (cb: (tx: unknown) => Promise<unknown>) => {
+        const tx = {
+          $executeRaw: jest.fn().mockRejectedValue(new Error('Deadlock detected')),
+          $executeRawUnsafe: jest.fn().mockResolvedValue(undefined),
+          maintenanceInvoice: mockPrisma.maintenanceInvoice,
+          auditLog: mockPrisma.auditLog,
+        };
+        return cb(tx);
+      });
+
+      await expect(
+        service.verifyRazorpayPayment(residentUser, SOCIETY_ID, INVOICE_ID, {
+          razorpayOrderId: 'order_rzp_123',
+          razorpayPaymentId: 'pay_rzp_123',
+          razorpaySignature: 'mock_sig_pass',
+        }),
+      ).rejects.toThrow('Deadlock detected');
     });
   });
 });

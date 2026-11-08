@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,6 +22,9 @@ import { relativeTime } from '../utils/format';
 export function RelativesScreen() {
   const { session, selectedFlat, selectedSociety, isOffline } = useAuth();
   const [relatives, setRelatives] = useState<RelativeMember[]>([]);
+  // Read via ref so the loader isn't recreated (and re-fired) whenever the list length changes.
+  const relativesCountRef = useRef(0);
+  relativesCountRef.current = relatives.length;
   const [accessPoints, setAccessPoints] = useState<AccessPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -61,7 +64,7 @@ export function RelativesScreen() {
       void mobileStorage.saveCachedRelatives(relativesList);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
-        if (relatives.length === 0) {
+        if (relativesCountRef.current === 0) {
           const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>();
           if (cached && cached.length > 0) {
             setRelatives(cached);
@@ -77,7 +80,7 @@ export function RelativesScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [flatId, relatives.length]);
+  }, [flatId]);
 
   useEffect(() => {
     void loadData();

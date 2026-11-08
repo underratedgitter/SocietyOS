@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { getEnv } from '../config';
+import { capMockStore, maskPhone } from './redaction';
 
 export interface SentWhatsappRecord {
   to: string;
@@ -46,11 +47,12 @@ export class WhatsappDispatcherService {
         const flat = payload.flatNumber ? `Flat ${payload.flatNumber}` : 'Residence';
         const pin = payload.pin ? `🔑 *Entry PIN*: ${payload.pin}\n` : '';
         const window = payload.validWindow ? `🕒 *Validity*: ${payload.validWindow}\n` : '';
+        const link = payload.passUrl ? `📲 *QR Pass*: ${payload.passUrl}\n` : '';
         return (
           `✅ *SocietyOS Pass Approved*\n\n` +
           `Your visitor pass for *${flat}* has been approved by the resident.\n` +
-          `${pin}${window}\n` +
-          `Welcome to SocietyOS!`
+          `${pin}${window}${link}\n` +
+          `Show this PIN or QR code at the security gate.`
         );
       }
       case 'VISITOR_PASS_REVOKED': {
@@ -139,7 +141,9 @@ export class WhatsappDispatcherService {
       payload,
     };
     this.mockSentStore.push(record);
-    this.logger.log(`[WHATSAPP-MOCK] Sent to ${normalizedPhone}: "${message.slice(0, 80)}..."`);
+    capMockStore(this.mockSentStore);
+    // Message bodies carry gate PINs; never write them or full phone numbers to logs.
+    this.logger.log(`[WHATSAPP-MOCK] Sent ${template} to ${maskPhone(normalizedPhone)} (${messageId})`);
     return { success: true, messageId, provider: 'mock' };
   }
 

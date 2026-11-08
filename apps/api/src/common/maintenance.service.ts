@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
+import { getEnv } from '../config';
 
 /**
  * Small, bounded maintenance loop for a pilot deployment. It never opens a
@@ -35,13 +36,17 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         data: { status: 'EXPIRED' },
       });
       if (expiredCommands.count > 0) {
-        await this.prisma.securityAlert.create({
-          data: {
-            severity: 'INFO',
-            type: 'GATE_COMMANDS_EXPIRED',
-            detail: { count: expiredCommands.count, sweptAt: now.toISOString() } as never,
-          },
-        }).catch(() => undefined);
+        try {
+          await this.prisma.securityAlert.create({
+            data: {
+              severity: 'INFO',
+              type: 'GATE_COMMANDS_EXPIRED',
+              detail: { count: expiredCommands.count, sweptAt: now.toISOString() } as never,
+            },
+          });
+        } catch (alertError) {
+          this.logger.warn(`Failed to create security alert for expired gate commands: ${String(alertError)}`);
+        }
       }
 
       await this.prisma.visitorPass.updateMany({
@@ -67,6 +72,8 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         where: {
           createdAt: { lt: retentionCutoff },
           name: { not: 'ANONYMIZED_VISITOR' },
+          // Visitor rows are reused across visits; keep anyone with a pass still inside the window.
+          passes: { none: { validUntil: { gte: retentionCutoff } } },
         },
         data: {
           name: 'ANONYMIZED_VISITOR',
@@ -74,10 +81,34 @@ export class MaintenanceService implements OnModuleInit, OnModuleDestroy {
         },
       });
 
+      // Delete credentials of passes expired, exhausted, or revoked more than N days ago (default 30)
+      const retentionDays = getEnv().credentialRetentionDays;
+      const credCutoff = new Date(now.getTime() - retentionDays * 24 * 3600 * 1000);
+      await this.prisma.visitorPassCredential.deleteMany({
+        where: {
+          pass: {
+            OR: [
+              { status: 'EXPIRED', validUntil: { lt: credCutoff } },
+              { status: 'EXHAUSTED', validUntil: { lt: credCutoff } },
+              { status: 'REVOKED', revokedAt: { lt: credCutoff } },
+            ],
+          },
+        },
+      });
+
       await this.prisma.idempotencyRecord.deleteMany({ where: { expiresAt: { lt: now } } });
       await this.prisma.session.deleteMany({
         where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600 * 1000) } },
       });
+
+      // Remove PIN and QR pass link from notifications older than 24 hours (no plaintext credentials).
+      // One set-based statement: a capped, unfiltered batch re-read the same rows every sweep
+      // and never reached older notifications that still held a PIN.
+      const notifCutoff = new Date(now.getTime() - 24 * 3600 * 1000);
+      await this.prisma.$executeRaw`
+        UPDATE "Notification" SET payload = payload - 'pin' - 'passUrl'
+        WHERE "createdAt" < ${notifCutoff} AND jsonb_typeof(payload) = 'object'
+          AND (payload ? 'pin' OR payload ? 'passUrl')`;
     } catch (error) {
       this.logger.warn(`Maintenance sweep failed: ${String(error)}`);
     } finally {

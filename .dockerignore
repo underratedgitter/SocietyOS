@@ -9,9 +9,20 @@ node_modules
 **/playwright-report
 **/blob-report
 **/*.log
-.env
-.env.*
-! .env.example
+**/*.tsbuildinfo
+# Per-app env files (e.g. apps/api/.env) must never reach `COPY . .`.
+**/.env
+**/.env.*
+!**/.env.example
 infrastructure/docker/mosquitto/passwd
 infrastructure/docker/mosquitto/acl
+infrastructure/docker/redis/password
 docs/requirements/*.pdf
+*.pdf
+# Database dumps written by backup-postgres.sh default to ./backups.
+backups
+# Local agent worktrees and tool output contain whole repo copies.
+.claude
+.commandcode
+graphify-out
+.turbo

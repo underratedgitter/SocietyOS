@@ -4,8 +4,6 @@ import { SimulatedGateAdapter } from './simulated-gate.adapter';
 import { BoomBarrierAdapter } from './boom-barrier.adapter';
 import { SlidingGateAdapter } from './sliding-gate.adapter';
 import { DoorLockAdapter } from './door-lock.adapter';
-import { SupremaAdapter } from './suprema.adapter';
-import { ZKTecoAdapter } from './zkteco.adapter';
 
 @Injectable()
 export class GateAdapterFactory {
@@ -32,12 +30,6 @@ export class GateAdapterFactory {
         return new SlidingGateAdapter(id, name);
       case 'DOOR_LOCK':
         return new DoorLockAdapter(id, name);
-      case 'SUPREMA':
-      case 'SUPREMA_BIOSTAR':
-        return new SupremaAdapter(id, name);
-      case 'ZKTECO':
-      case 'ZKTECO_ZKFINGER':
-        return new ZKTecoAdapter(id, name);
       case 'SIMULATED':
       default:
         return new SimulatedGateAdapter(id, name);

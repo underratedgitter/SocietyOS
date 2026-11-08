@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { getEnv } from '../config';
+import { validateWebPushEndpoint } from './web-push-endpoint';
+import { maskToken } from './redaction';
 
 export interface ExpoPushMessage {
   to: string;
@@ -221,7 +223,7 @@ export class PushDispatcherService {
                 await this.prisma.pushDeviceToken
                   .deleteMany({ where: { token: original.to } })
                   .catch(() => undefined);
-                this.logger.log(`Pruned unregistered device token: ${original.to}`);
+                this.logger.log(`Pruned unregistered device token: ${maskToken(original.to)}`);
               }
             }
           }
@@ -263,6 +265,7 @@ export class PushDispatcherService {
     }
 
     // Direct Web Push RFC 8291
+    validateWebPushEndpoint(endpoint);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
@@ -274,11 +277,19 @@ export class PushDispatcherService {
         },
         body: JSON.stringify({ title, body, data }),
         signal: controller.signal,
+        // Following a redirect would let an allowlisted host bounce us to an internal address.
+        redirect: 'manual',
       });
 
       if (response.status === 404 || response.status === 410) {
         // Subscription expired
         await this.prisma.pushDeviceToken.deleteMany({ where: { token } }).catch(() => undefined);
+      }
+      if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+        throw new Error(`Web push endpoint responded with redirect HTTP ${response.status}`);
+      }
+      if (!response.ok) {
+        throw new Error(`Web push endpoint returned HTTP ${response.status}`);
       }
     } finally {
       clearTimeout(timeout);

@@ -88,11 +88,3 @@ export async function apiRequest<T>(path: string, options: ApiOptions = {}): Pro
   const text = await response.text();
   return (text ? JSON.parse(text) : undefined) as T;
 }
-
-export function jsonBody(value: unknown): string {
-  return JSON.stringify(value);
-}
-
-export function isUnauthorized(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 401;
-}

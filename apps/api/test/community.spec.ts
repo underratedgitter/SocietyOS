@@ -1,8 +1,10 @@
-import { AppException } from '../src/common/app.exception';
 import { AuthzService } from '../src/common/authz.service';
 import { AuditService } from '../src/common/audit.service';
 import { CommunityService } from '../src/societies/community.service';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { CreateMaintenanceInvoiceDto } from '../src/societies/community.dto';
 
 describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amenities)', () => {
   const SOCIETY_A = 'society-aaa-111';
@@ -441,12 +443,67 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       const res = await communityService.cancelBooking(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'book-1');
       expect(res.status).toBe('CANCELLED');
     });
+
+    it('scopes bookings to resident flats and rejects listing arbitrary other flats (Issue 7)', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue({
+        societyId: SOCIETY_A,
+        userId: residentUser1.sub,
+        role: 'RESIDENT',
+        status: 'ACTIVE',
+      });
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_102,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue(null);
+
+      await expect(
+        communityService.listBookings(residentUser1, SOCIETY_A, FLAT_102),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'NOT_YOUR_FLAT' }),
+      });
+    });
+
+    it('allows resident to list bookings for their own flat', async () => {
+      mockPrisma.societyMembership.findUnique.mockResolvedValue({
+        societyId: SOCIETY_A,
+        userId: residentUser1.sub,
+        role: 'RESIDENT',
+        status: 'ACTIVE',
+      });
+      mockPrisma.flat.findUnique.mockResolvedValue({
+        id: FLAT_101,
+        building: { societyId: SOCIETY_A },
+      });
+      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue({ id: 'rfm-1' });
+      mockPrisma.amenityBooking.findMany.mockResolvedValue([
+        { id: 'book-1', societyId: SOCIETY_A, flatId: FLAT_101 },
+      ]);
+
+      const res = await communityService.listBookings(residentUser1, SOCIETY_A, FLAT_101);
+      expect(res.length).toBe(1);
+      expect(mockPrisma.amenityBooking.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ flatId: FLAT_101 }),
+        }),
+      );
+    });
   });
 
   // =========================================================================
   // 4. MAINTENANCE BILLING & INVOICING
   // =========================================================================
   describe('Maintenance Billing & Invoicing', () => {
+    it('rejects invoice amounts with sub-paisa precision so gateway charges equal the invoice', async () => {
+      const base = { flatId: '7d0c7a1e-2f43-4c5b-9a59-0d9f3f1d2a10', title: 'Q4 Maintenance', dueDate: '2026-12-01' };
+
+      const subPaisa = await validate(plainToInstance(CreateMaintenanceInvoiceDto, { ...base, amount: 1500.005 }));
+      const twoDecimals = await validate(plainToInstance(CreateMaintenanceInvoiceDto, { ...base, amount: 1500.05 }));
+
+      expect(subPaisa.map((e) => e.property)).toContain('amount');
+      expect(twoDecimals).toHaveLength(0);
+    });
+
     it('creates a maintenance invoice for a valid flat in the society', async () => {
       mockPrisma.flat.findUnique.mockResolvedValue({
         id: FLAT_101,
@@ -582,13 +639,13 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
         id: 'inv-1',
         status: 'PAID',
         paidAt: new Date(),
-        paidById: residentUser1.sub,
+        paidById: adminUser.sub,
         paymentReference: 'UPI-12345',
         flat: { id: FLAT_101, flatNumber: '101', building: { name: 'Tower A' } },
         paidBy: { id: residentUser1.sub, name: 'Resident 1', email: 'res1@a.com' },
       });
 
-      const res = await communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {
+      const res = await communityService.recordPayment(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'inv-1', {
         paymentReference: 'UPI-12345',
       });
 
@@ -601,7 +658,7 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       );
     });
 
-    it('prevents resident from paying an invoice for another flat', async () => {
+    it('forbids a resident from manually settling an invoice, even for their own flat', async () => {
       mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
         id: 'inv-1',
         societyId: SOCIETY_A,
@@ -610,15 +667,22 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
         status: 'PENDING',
         flat: { id: FLAT_101, building: { societyId: SOCIETY_A } },
       });
-      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue(null);
+      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue({
+        id: 'rfm-1',
+        flatId: FLAT_101,
+        userId: residentUser1.sub,
+      });
 
       await expect(
-        communityService.recordPayment(residentUser2, 'RESIDENT', SOCIETY_A, 'inv-1', {}),
+        communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {
+          paymentReference: 'FAKE-REF',
+        }),
       ).rejects.toThrow(
         expect.objectContaining({
-          response: expect.objectContaining({ code: 'NOT_YOUR_FLAT' }),
+          response: expect.objectContaining({ code: 'FORBIDDEN_ROLE' }),
         }),
       );
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
     });
 
     it('rejects paying an already settled invoice', async () => {
@@ -632,7 +696,7 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       });
 
       await expect(
-        communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {}),
+        communityService.recordPayment(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'inv-1', {}),
       ).rejects.toThrow(
         expect.objectContaining({
           response: expect.objectContaining({ code: 'INVOICE_ALREADY_PAID' }),
@@ -651,7 +715,7 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       });
 
       await expect(
-        communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {}),
+        communityService.recordPayment(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'inv-1', {}),
       ).rejects.toThrow(
         expect.objectContaining({
           response: expect.objectContaining({ code: 'INVOICE_CANCELLED' }),

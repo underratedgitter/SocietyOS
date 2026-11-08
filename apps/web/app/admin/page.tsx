@@ -77,6 +77,7 @@ import {
   type CredentialInfo,
 } from '@/components/admin/forms';
 import { SocietySettings } from '@/components/admin/settings';
+import { BiometricIdentities } from '@/components/admin/biometric-ids';
 
 const NAV: NavItem[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -257,8 +258,6 @@ function AdminWorkspace() {
         .includes(query);
     });
   }, [data.passes, passStatus, passQuery]);
-
-  const pendingPasses = data.passes.filter((pass) => pass.effectiveStatus === 'PENDING_APPROVAL');
 
   function finishCreate(info?: CredentialInfo) {
     setCreateModal(null);
@@ -487,12 +486,15 @@ function AdminWorkspace() {
         ) : tab === 'billing' ? (
           <AdminInvoicesManager societyId={societyId} flats={flatOptions} />
         ) : tab === 'residents' ? (
-          <ResidentsTab
-            residents={data.residents}
-            busyKey={busyKey}
-            onRemove={removeMember}
-            onAdd={() => setCreateModal('resident')}
-          />
+          <>
+            <ResidentsTab
+              residents={data.residents}
+              busyKey={busyKey}
+              onRemove={removeMember}
+              onAdd={() => setCreateModal('resident')}
+            />
+            <BiometricIdentities societyId={societyId} residents={data.residents} />
+          </>
         ) : tab === 'staff' ? (
           <StaffTab staff={data.staff} onAdd={() => setCreateModal('guard')} />
         ) : tab === 'buildings' ? (
@@ -588,6 +590,7 @@ function AdminWorkspace() {
           }
         >
           <CredentialReveal rows={credentials.rows} note={credentials.note} title="Shown once — copy now" />
+          {credentials.extra}
         </Modal>
       ) : null}
 

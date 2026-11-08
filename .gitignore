@@ -15,6 +15,7 @@ blob-report/
 .env.*.local
 infrastructure/docker/mosquitto/passwd
 infrastructure/docker/mosquitto/acl
+infrastructure/docker/redis/password
 backups/
 apps/api/prisma/migrations/dev.db*
 .turbo/

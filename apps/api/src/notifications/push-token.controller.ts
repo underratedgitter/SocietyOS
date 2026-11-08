@@ -4,6 +4,9 @@ import { JwtAuthGuard, JwtUser } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { PrismaService } from '../common/prisma.service';
 import { RegisterPushTokenDto, UnregisterPushTokenDto } from './push-token.dto';
+import { validateWebPushEndpoint } from './web-push-endpoint';
+
+export { validateWebPushEndpoint };
 
 @ApiTags('notifications')
 @ApiBearerAuth()
@@ -15,6 +18,9 @@ export class PushTokenController {
   @Post()
   @ApiOperation({ summary: 'Register or update device push token for notifications' })
   async registerToken(@CurrentUser() user: JwtUser, @Body() dto: RegisterPushTokenDto) {
+    if (dto.endpoint) {
+      validateWebPushEndpoint(dto.endpoint);
+    }
     const record = await this.prisma.pushDeviceToken.upsert({
       where: { token: dto.token },
       create: {

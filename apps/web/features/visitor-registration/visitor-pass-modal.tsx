@@ -2,8 +2,8 @@
 
 import { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Check, Copy, ExternalLink, KeyRound, MapPin, QrCode, Share2, ShieldCheck, User } from 'lucide-react';
-import { Badge, Modal } from '@/components/ui';
+import { Check, Copy, ExternalLink, MapPin, Share2, ShieldCheck } from 'lucide-react';
+import { Modal } from '@/components/ui';
 import { formatDateTime } from '@/lib/format';
 import type { SelfRegisterVisitorResponse } from './types';
 

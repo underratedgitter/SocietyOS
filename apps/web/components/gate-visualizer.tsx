@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Shield, Lock, Unlock } from 'lucide-react';
+import { Lock, Unlock } from 'lucide-react';
 
 export type VisualGateState = 'CLOSED' | 'OPENING' | 'OPEN' | 'CLOSING' | 'STOPPED' | 'FAULT';
 export type VisualGateType = 'BOOM_BARRIER' | 'SLIDING_GATE' | 'DOOR_LOCK';
@@ -34,7 +34,7 @@ export function GateVisualizer({
   const [pulseSeconds, setPulseSeconds] = useState<number | null>(null);
 
   useEffect(() => {
-    if (state === 'OPEN') {
+    if (state === 'OPEN' && !emergencyActive) {
       setPulseSeconds(6);
       const timer = window.setInterval(() => {
         setPulseSeconds((prev) => {
@@ -49,7 +49,7 @@ export function GateVisualizer({
     } else {
       setPulseSeconds(null);
     }
-  }, [state]);
+  }, [state, emergencyActive]);
 
   const isBarrier = type === 'BOOM_BARRIER';
   const isSliding = type === 'SLIDING_GATE';

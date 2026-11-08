@@ -2,8 +2,6 @@ import { SimulatedGateAdapter } from '../src/devices/adapters/simulated-gate.ada
 import { BoomBarrierAdapter } from '../src/devices/adapters/boom-barrier.adapter';
 import { SlidingGateAdapter } from '../src/devices/adapters/sliding-gate.adapter';
 import { DoorLockAdapter } from '../src/devices/adapters/door-lock.adapter';
-import { SupremaAdapter } from '../src/devices/adapters/suprema.adapter';
-import { ZKTecoAdapter } from '../src/devices/adapters/zkteco.adapter';
 import { GateAdapterFactory } from '../src/devices/adapters/gate-adapter.factory';
 
 describe('Gate Adapters and Controller State Machines (Unit)', () => {
@@ -124,53 +122,6 @@ describe('Gate Adapters and Controller State Machines (Unit)', () => {
     });
   });
 
-  describe('SupremaAdapter (BioStar Hardware Abstraction)', () => {
-    it('matches enrolled face templates and rejects spoof attacks via liveness detection', async () => {
-      const suprema = new SupremaAdapter('sup-1', 'Lobby Suprema BioStation', 'BioStation_3');
-      expect(suprema.type).toBe('SUPREMA_BIOSTAR');
-
-      suprema.enrollTemplate('resident-123', 'hash_face_template_valid_998');
-
-      // Valid template scan
-      const match = await suprema.verifyBiometricOnDevice('hash_face_template_valid_998');
-      expect(match.matched).toBe(true);
-      expect(match.residentId).toBe('resident-123');
-      expect(match.livenessPassed).toBe(true);
-      expect(match.confidenceScore).toBeGreaterThan(0.9);
-
-      // Spoof attempt (photo/presentation attack)
-      const spoofMatch = await suprema.verifyBiometricOnDevice('hash_face_template_valid_998', {
-        simulateSpoof: true,
-      });
-      expect(spoofMatch.matched).toBe(false);
-      expect(spoofMatch.livenessPassed).toBe(false);
-
-      // Unknown template
-      const unknownMatch = await suprema.verifyBiometricOnDevice('hash_unknown_intruder');
-      expect(unknownMatch.matched).toBe(false);
-    });
-  });
-
-  describe('ZKTecoAdapter (ZKFinger Hardware Abstraction)', () => {
-    it('verifies enrolled fingerprint minutiae and handles dirty sensor warnings', async () => {
-      const zk = new ZKTecoAdapter('zk-1', 'Gym Gate ZKTeco Reader');
-      expect(zk.type).toBe('ZKTECO_ZKFINGER');
-
-      zk.enrollFingerprint('res-456', 'hash_minutiae_v10_456');
-
-      const match = await zk.verifyFingerprint('hash_minutiae_v10_456');
-      expect(match.matched).toBe(true);
-      expect(match.residentId).toBe('res-456');
-      expect(match.qualityPassed).toBe(true);
-
-      // Dirty sensor detection
-      zk.setSensorDirty(true);
-      const dirtyMatch = await zk.verifyFingerprint('hash_minutiae_v10_456');
-      expect(dirtyMatch.matched).toBe(false);
-      expect(dirtyMatch.qualityPassed).toBe(false);
-    });
-  });
-
   describe('GateAdapterFactory', () => {
     it('instantiates and caches proper adapter class by gate type', () => {
       const factory = new GateAdapterFactory();
@@ -181,11 +132,8 @@ describe('Gate Adapters and Controller State Machines (Unit)', () => {
       const door = factory.getOrCreate('ap-2', 'Gym Door', 'DOOR_LOCK');
       expect(door.type).toBe('DOOR_LOCK');
 
-      const suprema = factory.getOrCreate('ap-3', 'Tower A Lobby', 'SUPREMA');
-      expect(suprema.type).toBe('SUPREMA_BIOSTAR');
-
-      const zkteco = factory.getOrCreate('ap-4', 'Tower B Lobby', 'ZKTECO');
-      expect(zkteco.type).toBe('ZKTECO_ZKFINGER');
+      const sliding = factory.getOrCreate('ap-3', 'Service Gate', 'SLIDING_GATE');
+      expect(sliding.type).toBe('SLIDING_GATE');
 
       // Returns same instance for same access point
       expect(factory.get('ap-1')).toBe(barrier);

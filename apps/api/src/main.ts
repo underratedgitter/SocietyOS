@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import express from 'express';
@@ -21,7 +21,13 @@ async function bootstrap(): Promise<void> {
       : ['error', 'warn', 'log', 'debug', 'verbose'],
   });
 
-  app.setGlobalPrefix('api/v1');
+  // ZKTeco terminals hardcode /iclock/* paths, so these routes live outside the API prefix.
+  app.setGlobalPrefix('api/v1', {
+    exclude: ['cdata', 'getrequest', 'devicecmd'].map((path) => ({
+      path: `iclock/${path}`,
+      method: RequestMethod.ALL,
+    })),
+  });
   app.disable('x-powered-by');
   if (env.isProduction) app.set('trust proxy', 1);
 
@@ -33,6 +39,9 @@ async function bootstrap(): Promise<void> {
       referrerPolicy: { policy: 'no-referrer' },
     }),
   );
+  // ADMS bodies are tab-separated text and firmwares send inconsistent Content-Types, so accept
+  // any type here. Registered before the JSON parser; body-parser skips already-parsed bodies.
+  app.use('/iclock', express.text({ type: () => true, limit: '1mb' }));
   app.use(
     express.json({
       limit: '100kb',

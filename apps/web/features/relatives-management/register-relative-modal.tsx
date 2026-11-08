@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { KeyRound, Sparkles, UserPlus, Users } from 'lucide-react';
+import { KeyRound, Sparkles } from 'lucide-react';
 import { Modal, Notice, errorMessage } from '@/components/ui';
 import { registerRelative } from './api';
-import type { QuickPassResult, RelativeMember } from './types';
+import type { RelativeMember } from './types';
 
 const RELATION_TAGS = [
   'Mother',

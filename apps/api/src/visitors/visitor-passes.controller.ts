@@ -55,7 +55,12 @@ export class VisitorPassesController {
     const cached = await this.idempotency.get(key, 'visitor-passes.create', fingerprint);
     if (cached) return cached;
     const result = await this.passes.create(user, dto);
-    await this.idempotency.save(key, 'visitor-passes.create', fingerprint, result);
+    const { credentials: _, ...sanitized } = result;
+    const toCache = {
+      ...sanitized,
+      credentialsAlreadyIssued: true,
+    };
+    await this.idempotency.save(key, 'visitor-passes.create', fingerprint, toCache, 24);
     return result;
   }
 

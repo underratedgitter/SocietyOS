@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowLeft, Clock, KeyRound, QrCode, ShieldCheck, Sparkles, UserCheck, Users } from 'lucide-react';
+import { ArrowLeft, KeyRound, ShieldCheck, UserCheck, Users } from 'lucide-react';
 import { VisitorRegistrationForm } from '@/features/visitor-registration';
 
 export default function VisitorRegisterPage() {

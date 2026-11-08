@@ -14,7 +14,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   Ticket,
-  X,
 } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
 import type {
@@ -43,7 +42,6 @@ import {
   Badge,
   DecisionBadge,
   EmptyState,
-  Modal,
   PassBadge,
   ReasonText,
   Toast,
@@ -346,37 +344,89 @@ function ConsoleTab({
   const primaryGate = data.accessPoints[0];
   const [gateVisualState, setGateVisualState] = useState<VisualGateState>('CLOSED');
   const [emergencyActive, setEmergencyActive] = useState(false);
+  const gateTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  const clearGateTimers = useCallback(() => {
+    gateTimersRef.current.forEach((t) => clearTimeout(t));
+    gateTimersRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    return () => clearGateTimers();
+  }, [clearGateTimers]);
+
+  const scheduleGateSequence = useCallback(
+    (steps: { delay: number; state: VisualGateState }[]) => {
+      clearGateTimers();
+      for (const step of steps) {
+        const timer = setTimeout(() => {
+          setGateVisualState(step.state);
+        }, step.delay);
+        gateTimersRef.current.push(timer);
+      }
+    },
+    [clearGateTimers],
+  );
 
   function handleOpenPulse() {
+    if (emergencyActive) return;
+    clearGateTimers();
     setGateVisualState('OPENING');
     playAuthorizedChime();
     notify('Gate opened for 10-second pulse');
-    setTimeout(() => setGateVisualState('OPEN'), 500);
-    setTimeout(() => setGateVisualState('CLOSING'), 8000);
-    setTimeout(() => setGateVisualState('CLOSED'), 10000);
+    scheduleGateSequence([
+      { delay: 500, state: 'OPEN' },
+      { delay: 8000, state: 'CLOSING' },
+      { delay: 10000, state: 'CLOSED' },
+    ]);
   }
 
-  function handleEmergencyHold() {
-    if (!emergencyActive) {
-      if (!window.confirm('WARNING: Activate emergency fire / egress hold? The barrier will remain open until reset.')) {
-        return;
-      }
-      playEmergencyPulse();
-      setEmergencyActive(true);
-      setGateVisualState('OPEN');
-      notify('EMERGENCY EGRESS / FIRE RELEASE ACTIVE', true);
-      void apiRequest('/api/v1/access/emergency-override', {
+  // Gate state on screen must reflect what the server accepted: if the command
+  // fails, the guard has to know the barrier may NOT have moved.
+  async function sendGateCommand(path: '/api/v1/access/emergency-override' | '/api/v1/access/emergency-reset', reason: string): Promise<boolean> {
+    if (!primaryGate?.id) {
+      notify('No gate is configured for this society', true);
+      return false;
+    }
+    try {
+      await apiRequest(path, {
         method: 'POST',
-        body: JSON.stringify({
-          accessPointId: primaryGate?.id,
-          reason: 'Security guard initiated emergency egress hold',
-        }),
-      }).catch(() => undefined);
+        body: JSON.stringify({ accessPointId: primaryGate.id, reason }),
+      });
+      return true;
+    } catch (caught) {
+      notify(`Gate command failed: ${errorMessage(caught)}. Operate the barrier manually.`, true);
+      return false;
+    }
+  }
+
+  async function activateEmergencyHold() {
+    if (!window.confirm('WARNING: Activate emergency fire / egress hold? The barrier will remain open until reset.')) {
+      return;
+    }
+    playEmergencyPulse();
+    setEmergencyActive(true);
+    setGateVisualState('OPEN');
+    if (await sendGateCommand('/api/v1/access/emergency-override', 'Security guard initiated emergency egress hold')) {
+      notify('EMERGENCY EGRESS / FIRE RELEASE ACTIVE', true);
     } else {
+      setEmergencyActive(false);
+      setGateVisualState('CLOSED');
+    }
+  }
+
+  async function releaseEmergencyHold(reason: string) {
+    if (await sendGateCommand('/api/v1/access/emergency-reset', reason)) {
       setEmergencyActive(false);
       setGateVisualState('CLOSED');
       notify('Emergency hold released. Normal access restored.');
     }
+  }
+
+  function handleEmergencyHold() {
+    clearGateTimers();
+    if (emergencyActive) void releaseEmergencyHold('Security guard released emergency hold');
+    else void activateEmergencyHold();
   }
 
   return (
@@ -418,8 +468,12 @@ function ConsoleTab({
           onOpenPulse={handleOpenPulse}
           onEmergencyHold={handleEmergencyHold}
           onResetGate={() => {
-            setGateVisualState('CLOSED');
-            setEmergencyActive(false);
+            clearGateTimers();
+            if (emergencyActive) {
+              void releaseEmergencyHold('Security guard reset gate state');
+            } else {
+              setGateVisualState('CLOSED');
+            }
           }}
         />
       </div>
@@ -428,10 +482,15 @@ function ConsoleTab({
         <VerifyPanel
           accessPoints={data.accessPoints}
           onVerified={() => {
-            setGateVisualState('OPENING');
-            setTimeout(() => setGateVisualState('OPEN'), 500);
-            setTimeout(() => setGateVisualState('CLOSING'), 5000);
-            setTimeout(() => setGateVisualState('CLOSED'), 7000);
+            if (!emergencyActive) {
+              clearGateTimers();
+              setGateVisualState('OPENING');
+              scheduleGateSequence([
+                { delay: 500, state: 'OPEN' },
+                { delay: 5000, state: 'CLOSING' },
+                { delay: 7000, state: 'CLOSED' },
+              ]);
+            }
             onVerified();
           }}
           notify={notify}

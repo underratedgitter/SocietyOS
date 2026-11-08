@@ -1,9 +1,13 @@
+import { passQrUrl } from '../src/notifications/notifications.service';
+import { Logger } from '@nestjs/common';
 import { SmsDispatcherService } from '../src/notifications/sms-dispatcher.service';
+import { MOCK_STORE_LIMIT, maskToken } from '../src/notifications/redaction';
 import { WhatsappDispatcherService } from '../src/notifications/whatsapp-dispatcher.service';
 import { PushDispatcherService } from '../src/notifications/push-dispatcher.service';
 import { NotificationsService } from '../src/notifications/notifications.service';
 import { PushTokenController } from '../src/notifications/push-token.controller';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
+import * as config from '../src/config';
 
 describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher)', () => {
   describe('SmsDispatcherService', () => {
@@ -65,6 +69,28 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       expect(store[0].to).toBe('+919876543210');
       expect(store[0].message).toContain('123456');
     });
+
+    test('mock delivery never logs the full phone number or the visitor PIN', async () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      try {
+        await sms.sendSms('9876543210', 'VISITOR_PASS_ISSUED', { flatNumber: '101', pin: '123456' });
+        const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(logged).toContain('***3210');
+        expect(logged).not.toContain('9876543210');
+        expect(logged).not.toContain('123456');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    test('mock store is bounded so the production fallback cannot leak memory', async () => {
+      for (let i = 0; i < MOCK_STORE_LIMIT + 25; i++) {
+        await sms.sendSms('9876543210', 'VISITOR_ARRIVED', { visitorName: `V${i}` });
+      }
+      const store = sms.getMockSentStore();
+      expect(store).toHaveLength(MOCK_STORE_LIMIT);
+      expect(store[store.length - 1].message).toContain(`V${MOCK_STORE_LIMIT + 24}`);
+    });
   });
 
   describe('WhatsappDispatcherService', () => {
@@ -103,6 +129,31 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       expect(store[0].to).toBe('+919888877777');
       expect(store[0].message).toContain('778899');
     });
+
+    test('mock delivery never logs the full phone number or the visitor PIN', async () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      try {
+        await whatsapp.sendWhatsapp('+919888877777', 'VISITOR_PASS_ISSUED', {
+          flatNumber: '305',
+          pin: '778899',
+        });
+        const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+        expect(logged).toContain('***7777');
+        expect(logged).not.toContain('9888877777');
+        expect(logged).not.toContain('778899');
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    test('mock store is bounded so the production fallback cannot leak memory', async () => {
+      for (let i = 0; i < MOCK_STORE_LIMIT + 25; i++) {
+        await whatsapp.sendWhatsapp('+919888877777', 'VISITOR_ARRIVED', { visitorName: `V${i}` });
+      }
+      const store = whatsapp.getMockSentStore();
+      expect(store).toHaveLength(MOCK_STORE_LIMIT);
+      expect(store[store.length - 1].message).toContain(`V${MOCK_STORE_LIMIT + 24}`);
+    });
   });
 
   describe('PushDispatcherService', () => {
@@ -118,6 +169,50 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       };
       push = new PushDispatcherService(mockPrisma);
       push.clearMockSentStore();
+    });
+
+    describe('live web push dispatch (production)', () => {
+      beforeEach(() => {
+        const realEnv = config.getEnv();
+        jest.spyOn(config, 'getEnv').mockReturnValue({ ...realEnv, nodeEnv: 'production', isProduction: true });
+      });
+
+      afterEach(() => {
+        jest.restoreAllMocks();
+      });
+
+      test('does not follow redirects and treats a 3xx response as a delivery failure', async () => {
+        const fetchSpy = jest
+          .spyOn(global, 'fetch')
+          .mockResolvedValue(new Response(null, { status: 307, headers: { location: 'http://169.254.169.254/' } }));
+
+        await expect(
+          push.sendWebPush('tok-1', 'https://fcm.googleapis.com/fcm/send/sub1', null, null, 't', 'b'),
+        ).rejects.toThrow(/redirect/i);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(fetchSpy.mock.calls[0][1]).toEqual(expect.objectContaining({ redirect: 'manual' }));
+      });
+
+      test('re-validates the stored endpoint before fetching and counts it as failed', async () => {
+        const fetchSpy = jest.spyOn(global, 'fetch');
+        mockPrisma.pushDeviceToken.findMany.mockResolvedValue([
+          // Stored before the allowlist existed; must never be fetched.
+          { id: 'dev-x', token: 'web-legacy', platform: 'web', endpoint: 'https://metadata.attacker.example/push' },
+        ]);
+
+        const res = await push.sendToUser('user-1', 'VISITOR_ARRIVED', { visitorName: 'X' });
+
+        expect(res).toEqual({ sentCount: 0, failedCount: 1 });
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+
+      test('counts non-2xx web push responses as failures', async () => {
+        jest.spyOn(global, 'fetch').mockResolvedValue(new Response(null, { status: 500 }));
+
+        await expect(
+          push.sendWebPush('tok-1', 'https://fcm.googleapis.com/fcm/send/sub1', null, null, 't', 'b'),
+        ).rejects.toThrow(/HTTP 500/);
+      });
     });
 
     test('validates Expo Push Token formats', () => {
@@ -193,6 +288,39 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       push = new PushDispatcherService(mockPrisma);
       notifications = new NotificationsService(mockPrisma, sms, whatsapp, push);
     });
+
+    test.each(['created', 'approved'] as const)(
+      'keeps PIN and QR link out of push payloads for %s passes (visitor SMS/WhatsApp only)',
+      async (kind) => {
+        const enqueue = jest.spyOn(notifications, 'enqueue').mockResolvedValue(undefined as never);
+        const params = {
+          societyId: 'soc-1',
+          flatId: 'flat-1',
+          flatNumber: '101',
+          visitorName: 'Guest',
+          visitorPhone: '+919876500000',
+          hostUserId: 'host-1',
+          pin: '123456',
+          qrToken: 'qr-token-abcdefghijklmnop',
+          validFrom: new Date(),
+          validUntil: new Date(Date.now() + 3600_000),
+          passId: 'pass-1',
+        };
+        if (kind === 'created') await notifications.notifyPassCreated(params);
+        else await notifications.notifyPassApproved(params);
+
+        const byChannel = (channel: string) =>
+          enqueue.mock.calls.map(([input]) => input).filter((input) => input.channel === channel);
+        for (const push of byChannel('PUSH')) {
+          expect(push.payload).not.toHaveProperty('pin');
+          expect(push.payload).not.toHaveProperty('passUrl');
+        }
+        for (const channel of ['SMS', 'WHATSAPP']) {
+          expect(byChannel(channel)[0].payload).toMatchObject({ pin: '123456', passUrl: expect.stringContaining('#qr=') });
+        }
+        enqueue.mockRestore();
+      },
+    );
 
     test('enqueue creates persistent outbox record', async () => {
       await notifications.enqueue({
@@ -285,6 +413,65 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
         }),
       );
     });
+
+    test('a sent notification no longer has a pin in its payload', async () => {
+      const mockPending = [
+        {
+          id: 'notif-sent-1',
+          channel: 'SMS',
+          template: 'VISITOR_PASS_ISSUED',
+          payload: { phone: '+919876543210', flatNumber: '101', pin: '998877' },
+          attempts: 0,
+        },
+      ];
+
+      mockPrisma.notification.findMany.mockResolvedValue(mockPending);
+      mockPrisma.notification.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-sent-1', status: 'SENT' });
+
+      await notifications.drain();
+
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-sent-1' },
+          data: expect.objectContaining({
+            status: 'SENT',
+            payload: { phone: '+919876543210', flatNumber: '101' },
+          }),
+        }),
+      );
+    });
+
+    test('a permanently failed notification no longer has a pin in its payload', async () => {
+      const mockPending = [
+        {
+          id: 'notif-failed-1',
+          channel: 'PUSH',
+          template: 'VISITOR_PASS_APPROVED',
+          payload: { token: 'invalid-token', flatNumber: '202', pin: '445566' },
+          attempts: 4, // 5th attempt will fail permanently
+        },
+      ];
+
+      mockPrisma.notification.findMany.mockResolvedValue(mockPending);
+      mockPrisma.notification.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.notification.update.mockResolvedValue({ id: 'notif-failed-1', status: 'FAILED' });
+
+      // Mock push delivery failure
+      jest.spyOn(push, 'sendExpoPushBatch').mockResolvedValue({ sent: 0, failed: 1 });
+
+      await notifications.drain();
+
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'notif-failed-1' },
+          data: expect.objectContaining({
+            status: 'FAILED',
+            payload: { token: 'invalid-token', flatNumber: '202' },
+          }),
+        }),
+      );
+    });
   });
 
   describe('PushTokenController', () => {
@@ -345,5 +532,107 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
         },
       });
     });
+
+    test('rejects push token registration with invalid or SSRF web push endpoints (Issue 9)', async () => {
+      const disallowedEndpoints = [
+        'http://fcm.googleapis.com/send', // Not HTTPS
+        'http://127.0.0.1:4000/api', // Localhost IPv4
+        'https://localhost:4000/api', // Localhost hostname
+        'https://169.254.169.254/latest/meta-data', // AWS/cloud metadata service
+        'https://10.0.0.5:8443/push', // RFC 1918 private network
+        'https://192.168.1.100:443/endpoint', // RFC 1918 private network
+        'https://172.16.0.10:443/endpoint', // RFC 1918 private network
+        'https://[::ffff:169.254.169.254]/latest/meta-data', // IPv6-mapped cloud metadata
+        'https://[::ffff:127.0.0.1]/push', // IPv6-mapped localhost
+        'https://[::]/push', // IPv6 unspecified address
+        'https://100.64.0.1:8443/push', // CGNAT
+        'https://api:4000/internal', // Internal docker container name
+        'not-a-url', // Malformed URL
+        'https://push.example.com/endpoint', // Public host that is not a browser push service
+        'https://internal-alias.attacker.example/push', // DNS name that may resolve to an internal IP
+        'https://fcm.googleapis.com.evil.com/fcm/send/x', // Lookalike suffix of an allowlisted host
+        'https://evilfcm.googleapis.com/fcm/send/x', // Different subdomain of an allowlisted host
+        'https://notify.windows.com/w', // Bare suffix without a regional label
+        'https://fcm.googleapis.com:8443/fcm/send/x', // Non-default port
+        'https://user:pw@fcm.googleapis.com/fcm/send/x', // Embedded credentials
+        'http://updates.push.services.mozilla.com/wpush/v2/x', // Allowlisted host over http
+      ];
+
+      for (const endpoint of disallowedEndpoints) {
+        await expect(
+          controller.registerToken(testUser, {
+            token: `token-web-${Math.random()}`,
+            platform: 'web',
+            endpoint,
+          }),
+        ).rejects.toMatchObject({
+          response: expect.objectContaining({
+            code: expect.stringMatching(/INVALID_PUSH_ENDPOINT|DISALLOWED_PUSH_ENDPOINT/),
+          }),
+        });
+      }
+    });
+
+    test('accepts valid public HTTPS web push endpoint', async () => {
+      mockPrisma.pushDeviceToken.upsert.mockResolvedValue({
+        id: 'token-rec-web',
+        platform: 'web',
+      });
+
+      const res = await controller.registerToken(testUser, {
+        token: 'token-web-valid-999',
+        platform: 'web',
+        endpoint: 'https://fcm.googleapis.com/fcm/send/token-web-valid-999',
+      });
+
+      expect(res.ok).toBe(true);
+      expect(mockPrisma.pushDeviceToken.upsert).toHaveBeenCalled();
+    });
+
+    test('accepts endpoints of every supported browser push service', async () => {
+      mockPrisma.pushDeviceToken.upsert.mockResolvedValue({ id: 'token-rec-web', platform: 'web' });
+      const allowed = [
+        'https://fcm.googleapis.com/fcm/send/abc',
+        'https://updates.push.services.mozilla.com/wpush/v2/abc',
+        'https://web.push.apple.com/QGx',
+        'https://wns2-par02p.notify.windows.com/w/?token=abc',
+      ];
+
+      for (const endpoint of allowed) {
+        await expect(
+          controller.registerToken(testUser, { token: `token-${endpoint.length}`, platform: 'web', endpoint }),
+        ).resolves.toMatchObject({ ok: true });
+      }
+    });
+  });
+});
+
+describe('maskToken', () => {
+  it('keeps only a short suffix of push tokens for logs', () => {
+    const token = 'ExponentPushToken[abcdefghijklmnopqrstuv]';
+    expect(maskToken(token)).toBe('***rstuv]');
+    expect(maskToken(token)).not.toContain('abcdef');
+    expect(maskToken('short')).toBe('****');
+  });
+});
+
+describe('visitor QR pass link', () => {
+  it('keeps the QR token in the URL fragment so it never reaches a server log', () => {
+    const url = new URL(passQrUrl('pass-1', 'tok/en+=='));
+    expect(url.pathname).toBe('/p/pass-1');
+    expect(url.search).toBe('');
+    expect(decodeURIComponent(url.hash)).toBe('#qr=tok/en+==');
+  });
+
+  it('includes the QR link in the approval SMS and WhatsApp messages', async () => {
+    const sms = new SmsDispatcherService();
+    const whatsapp = new WhatsappDispatcherService();
+    const passUrl = 'https://app.example/p/pass-1#qr=abc';
+
+    await sms.sendSms('+919876500000', 'VISITOR_PASS_APPROVED', { pin: '123456', passUrl });
+    await whatsapp.sendWhatsapp('+919876500000', 'VISITOR_PASS_APPROVED', { pin: '123456', passUrl });
+
+    expect(sms.getMockSentStore().at(-1)?.message).toContain(passUrl);
+    expect(whatsapp.getMockSentStore().at(-1)?.message).toContain(passUrl);
   });
 });

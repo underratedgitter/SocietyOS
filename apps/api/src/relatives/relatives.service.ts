@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma, VisitorPass } from '@prisma/client';
 import { AppException } from '../common/app.exception';
 import { PrismaService } from '../common/prisma.service';
 import { AuthzService } from '../common/authz.service';
@@ -117,6 +118,15 @@ export class RelativesService {
       throw AppException.unprocessable('NO_GATES_CONFIGURED', 'No active gates configured for this society');
     }
 
+    // Automatically issue an initial 72-hour pass for the newly registered relative so they can visit immediately!
+    const society = await this.prisma.society.findUnique({
+      where: { id: context.societyId },
+      select: { settings: true },
+    });
+    const policy = visitorPolicy(society?.settings);
+    // Checked before creating the visitor so a rejected request leaves no orphaned record.
+    await this.assertDailyPassCapacity(flatId, policy.maxPassesPerFlatPerDay);
+
     const visitor = await this.prisma.visitor.create({
       data: {
         societyId: context.societyId,
@@ -125,13 +135,6 @@ export class RelativesService {
         category: 'RELATIVE',
       },
     });
-
-    // Automatically issue an initial 72-hour pass for the newly registered relative so they can visit immediately!
-    const society = await this.prisma.society.findUnique({
-      where: { id: context.societyId },
-      select: { settings: true },
-    });
-    const policy = visitorPolicy(society?.settings);
 
     const now = new Date();
     const validHours = Math.min(72, policy.maxPassDurationHours);
@@ -145,7 +148,7 @@ export class RelativesService {
     let pass: any;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        pass = await this.prisma.visitorPass.create({
+        pass = await this.createPassWithinCap(flatId, policy.maxPassesPerFlatPerDay, {
           data: {
             societyId: context.societyId,
             flatId,
@@ -162,11 +165,15 @@ export class RelativesService {
                   type: pin.type,
                   credentialHash: this.credentials.hash(pin.plaintext),
                   keyId: this.credentials.keyVersion,
+                  // Scopes the per-society PIN uniqueness index; NULL would bypass it.
+                  societyId: context.societyId,
                 },
                 {
                   type: qr.type,
                   credentialHash: this.credentials.hash(qr.plaintext),
                   keyId: this.credentials.keyVersion,
+                  // Scopes the per-society PIN uniqueness index; NULL would bypass it.
+                  societyId: context.societyId,
                 },
               ],
             },
@@ -240,6 +247,7 @@ export class RelativesService {
       select: { settings: true },
     });
     const policy = visitorPolicy(society?.settings);
+    await this.assertDailyPassCapacity(flatId, policy.maxPassesPerFlatPerDay);
 
     const accessPoints = await this.prisma.accessPoint.findMany({
       where: { societyId: context.societyId },
@@ -261,7 +269,7 @@ export class RelativesService {
     let pass: any;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        pass = await this.prisma.visitorPass.create({
+        pass = await this.createPassWithinCap(flatId, policy.maxPassesPerFlatPerDay, {
           data: {
             societyId: context.societyId,
             flatId,
@@ -278,11 +286,15 @@ export class RelativesService {
                   type: pin.type,
                   credentialHash: this.credentials.hash(pin.plaintext),
                   keyId: this.credentials.keyVersion,
+                  // Scopes the per-society PIN uniqueness index; NULL would bypass it.
+                  societyId: context.societyId,
                 },
                 {
                   type: qr.type,
                   credentialHash: this.credentials.hash(qr.plaintext),
                   keyId: this.credentials.keyVersion,
+                  // Scopes the per-society PIN uniqueness index; NULL would bypass it.
+                  societyId: context.societyId,
                 },
               ],
             },
@@ -333,6 +345,40 @@ export class RelativesService {
         qrToken: qr.plaintext,
       },
     };
+  }
+
+  /**
+   * Relative passes count toward the same per-flat daily cap as passes issued through the
+   * visitor-pass flow; otherwise quick-pass would let a resident mint unlimited gate credentials.
+   */
+  private async assertDailyPassCapacity(flatId: string, maxPassesPerFlatPerDay: number): Promise<void> {
+    const recent = await this.prisma.visitorPass.count({
+      where: { flatId, createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) } },
+    });
+    if (recent >= maxPassesPerFlatPerDay) {
+      throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
+    }
+  }
+
+  /**
+   * Re-checks the cap and inserts under the same per-flat advisory lock as the visitor-pass flow,
+   * so parallel quick-pass requests cannot all pass the count and exceed the cap together.
+   */
+  private createPassWithinCap(
+    flatId: string,
+    maxPassesPerFlatPerDay: number,
+    args: Prisma.VisitorPassCreateArgs,
+  ): Promise<VisitorPass> {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('visitor-pass-create'), hashtext(${flatId}))`;
+      const recent = await tx.visitorPass.count({
+        where: { flatId, createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) } },
+      });
+      if (recent >= maxPassesPerFlatPerDay) {
+        throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
+      }
+      return tx.visitorPass.create(args);
+    });
   }
 
   async deleteRelative(callerSub: string, flatId: string, visitorId: string) {

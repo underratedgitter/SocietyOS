@@ -6,7 +6,6 @@ import request from 'supertest';
 import {
   Agent,
   USERS,
-  cookieValue,
   createTestApp,
   login,
   testSlug,

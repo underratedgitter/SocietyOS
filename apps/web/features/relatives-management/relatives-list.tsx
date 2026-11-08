@@ -2,27 +2,18 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Calendar,
-  Check,
-  Clock,
-  KeyRound,
   Phone,
-  Plus,
   RefreshCw,
-  Share2,
-  ShieldCheck,
   Trash2,
-  UserCheck,
   UserPlus,
-  Users,
   Zap,
 } from 'lucide-react';
 import { Badge, EmptyState, Notice, Toast, errorMessage } from '@/components/ui';
-import { formatDateTime, relativeTime } from '@/lib/format';
+import { relativeTime } from '@/lib/format';
 import { fetchRelatives, removeRelative } from './api';
 import { RegisterRelativeModal } from './register-relative-modal';
 import { QuickPassModal } from './quick-pass-modal';
-import type { QuickPassResult, RelativeMember } from './types';
+import type { RelativeMember } from './types';
 
 export function RelativesManagementView({
   flatId,

@@ -195,11 +195,21 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Only ACTIVE devices may report. A disabled or revoked controller (decommissioned,
+   * stolen, or with a leaked broker credential) must not keep writing events or looking
+   * healthy via lastSeenAt; the HTTP device API already enforces the same rule.
+   */
   private async loadDevice(parsed: ParsedDeviceTopic) {
-    return this.prisma.device.findFirst({
+    const device = await this.prisma.device.findFirst({
       where: { id: parsed.deviceId, societyId: parsed.societyId },
       select: { id: true, societyId: true, status: true },
     });
+    if (device && device.status !== 'ACTIVE') {
+      this.logger.warn(`Ignored ${parsed.kind} from ${device.status} device ${device.id}`);
+      return null;
+    }
+    return device;
   }
 
   private async onAcknowledgement(parsed: ParsedDeviceTopic, body: Record<string, unknown>): Promise<void> {

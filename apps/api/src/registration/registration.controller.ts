@@ -6,7 +6,7 @@ import { AppException } from '../common/app.exception';
 import { setAuthCookies } from '../auth/cookie.helper';
 import { paramStr } from '../common/params';
 import { RegisterUserDto, SelfRegisterVisitorDto } from './registration.dto';
-import { RegistrationService } from './registration.service';
+import { publicIpRateLimit, RegistrationService } from './registration.service';
 
 @ApiTags('registration')
 @Controller()
@@ -34,13 +34,7 @@ export class RegistrationController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const ip = req.ip || 'unknown';
-    const isLoopback =
-      ip === '127.0.0.1' ||
-      ip === '::1' ||
-      ip === '::ffff:127.0.0.1' ||
-      ip === 'localhost' ||
-      ip === 'unknown';
-    const limit = await this.rateLimit.hit(`auth:register:ip:${ip}`, isLoopback ? 500 : 10, 15 * 60);
+    const limit = await this.rateLimit.hit(`auth:register:ip:${ip}`, publicIpRateLimit(ip, 10, 500), 15 * 60, { failClosed: true });
     if (!limit.allowed) {
       throw AppException.tooMany('Too many registration attempts. Please try again later.');
     }

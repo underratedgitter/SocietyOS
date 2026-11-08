@@ -104,6 +104,12 @@ export interface PassWithCredentials {
   credentials: { pin: string; qrToken: string };
 }
 
+/**
+ * A retried create (same Idempotency-Key) replays the pass without credentials: they are only
+ * ever returned once and are stored hashed, so they cannot be shown again.
+ */
+export type CreatePassResponse = PassWithCredentials | { pass: PassView; credentialsAlreadyIssued: true };
+
 export interface HouseholdMember {
   userId: string;
   name: string;
@@ -124,19 +130,6 @@ export interface Building {
   id: string;
   name: string;
   flats: { id: string; flatNumber: string; residentCount: number }[];
-}
-
-export interface Flat {
-  id: string;
-  flatNumber: string;
-  building: { id: string; name: string };
-  residents: {
-    userId: string;
-    name: string;
-    email?: string;
-    phone?: string | null;
-    relationship: string;
-  }[];
 }
 
 export interface Resident {
@@ -239,6 +232,24 @@ export interface DeviceCredentials {
   deviceToken: string;
   commandSecret: string;
   note: string;
+}
+
+export type DeviceProtocol =
+  | 'NATIVE'
+  | 'GENERIC_WEBHOOK'
+  | 'ZKTECO_ADMS'
+  | 'HIKVISION_ISAPI'
+  | 'DAHUA_HTTP'
+  | 'SUPREMA_BIOSTAR2'
+  | 'MATRIX_COSEC';
+
+export interface BiometricIdentity {
+  id: string;
+  societyId: string;
+  userId: string;
+  deviceUserId: string;
+  createdAt: string;
+  revokedAt: string | null;
 }
 
 export interface DeviceProvisionResult {

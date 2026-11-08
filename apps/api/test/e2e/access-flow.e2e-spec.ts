@@ -10,7 +10,7 @@ import { HttpExceptionFilter } from '../../src/common/http-exception.filter';
 
 // Integration tests exercise the HTTP decision engine without broker or rate-limit interference.
 process.env.DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgresql://societyos:societyos@localhost:5432/societyos';
+  process.env.DATABASE_URL ?? 'postgresql://societyos:societyos@localhost:5432/societyos?schema=public';
 
 type Agent = ReturnType<typeof request.agent>;
 

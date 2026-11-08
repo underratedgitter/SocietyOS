@@ -3,7 +3,6 @@ import {
   IsDateString,
   IsIn,
   IsInt,
-  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
@@ -117,7 +116,9 @@ export class CreateMaintenanceInvoiceDto {
   @MaxLength(1000)
   description?: string;
 
-  @IsNumber()
+  // Gateways settle in paise; sub-paisa amounts would be rounded at checkout and the
+  // charged amount would no longer equal the invoice.
+  @IsNumber({ maxDecimalPlaces: 2 })
   @Min(1)
   amount!: number;
 

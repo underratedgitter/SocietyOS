@@ -45,6 +45,7 @@ export interface AppEnv {
   stripeSecretKey?: string;
   stripePublishableKey?: string;
   stripeWebhookSecret?: string;
+  credentialRetentionDays: number;
 }
 
 const logger = new Logger('Config');
@@ -62,8 +63,9 @@ function str(name: string, fallback?: string): string {
 }
 
 function int(name: string, fallback: number): number {
-  const raw = process.env[name];
+  const raw = process.env[name]?.trim();
   if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) fail(`${name} must be a positive integer`);
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) fail(`${name} must be a positive integer`);
   return parsed;
@@ -81,6 +83,21 @@ function secret(name: string, devFallback: string, minLength = 32): string {
   const value = process.env[name]?.trim() || devFallback;
   if (value.length < minLength) fail(`${name} must be at least ${minLength} characters`);
   return value;
+}
+
+function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  const match = allowed.find((value) => value === raw);
+  if (!match) return fail(`${name} must be one of ${allowed.join(', ')}`);
+  return match;
+}
+
+/** A selected real provider must have its credentials at boot, not at first send. */
+function requireInProduction(isProduction: boolean, reason: string, names: string[]): void {
+  if (!isProduction) return;
+  const missing = names.filter((name) => !process.env[name]?.trim());
+  if (missing.length > 0) fail(`${missing.join(', ')} required in production when ${reason}`);
 }
 
 function httpUrl(name: string, fallback: string): string {
@@ -142,6 +159,38 @@ export function loadEnv(): AppEnv {
       .digest();
   }
 
+  const rateLimitEnabled = bool('RATE_LIMIT_ENABLED', true);
+  if (rateLimitEnabled) {
+    // Per-process fallback counters are not shared across replicas.
+    requireInProduction(isProduction, 'rate limiting is enabled', ['REDIS_URL']);
+  } else if (isProduction) {
+    logger.warn('RATE_LIMIT_ENABLED=false: login, OTP and public endpoints are unthrottled.');
+  }
+
+  const smsProvider = oneOf('SMS_PROVIDER', ['twilio', 'msg91', 'mock'] as const, 'mock');
+  if (smsProvider === 'twilio') {
+    requireInProduction(isProduction, 'SMS_PROVIDER=twilio', [
+      'TWILIO_ACCOUNT_SID',
+      'TWILIO_AUTH_TOKEN',
+      'TWILIO_FROM_PHONE',
+    ]);
+  } else if (smsProvider === 'msg91') {
+    requireInProduction(isProduction, 'SMS_PROVIDER=msg91', ['MSG91_AUTH_KEY', 'MSG91_SENDER_ID']);
+  }
+  const whatsappProvider = oneOf('WHATSAPP_PROVIDER', ['meta', 'twilio', 'mock'] as const, 'mock');
+  if (whatsappProvider === 'meta') {
+    requireInProduction(isProduction, 'WHATSAPP_PROVIDER=meta', [
+      'WHATSAPP_API_TOKEN',
+      'WHATSAPP_PHONE_NUMBER_ID',
+    ]);
+  } else if (whatsappProvider === 'twilio') {
+    requireInProduction(isProduction, 'WHATSAPP_PROVIDER=twilio', [
+      'TWILIO_ACCOUNT_SID',
+      'TWILIO_AUTH_TOKEN',
+      'TWILIO_WHATSAPP_FROM',
+    ]);
+  }
+
   const corsOrigins = new Set<string>([webUrl]);
   for (const origin of (process.env.CORS_ORIGINS || '').split(',')) {
     const trimmed = origin.trim();
@@ -175,16 +224,16 @@ export function loadEnv(): AppEnv {
     corsOrigins: [...corsOrigins],
     cookieSecure: bool('COOKIE_SECURE', isProduction),
     swaggerEnabled: bool('ENABLE_SWAGGER', !isProduction),
-    rateLimitEnabled: bool('RATE_LIMIT_ENABLED', true),
+    rateLimitEnabled,
     notificationWebhookUrl: process.env.NOTIFICATION_WEBHOOK_URL?.trim() || undefined,
     notificationWebhookSecret: process.env.NOTIFICATION_WEBHOOK_SECRET?.trim() || undefined,
-    smsProvider: (process.env.SMS_PROVIDER?.trim().toLowerCase() as AppEnv['smsProvider']) || 'mock',
+    smsProvider,
     twilioAccountSid: process.env.TWILIO_ACCOUNT_SID?.trim() || undefined,
     twilioAuthToken: process.env.TWILIO_AUTH_TOKEN?.trim() || undefined,
     twilioFromPhone: process.env.TWILIO_FROM_PHONE?.trim() || undefined,
     msg91AuthKey: process.env.MSG91_AUTH_KEY?.trim() || undefined,
     msg91SenderId: process.env.MSG91_SENDER_ID?.trim() || undefined,
-    whatsappProvider: (process.env.WHATSAPP_PROVIDER?.trim().toLowerCase() as AppEnv['whatsappProvider']) || 'mock',
+    whatsappProvider,
     whatsappApiToken: process.env.WHATSAPP_API_TOKEN?.trim() || undefined,
     whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() || undefined,
     twilioWhatsappFrom: process.env.TWILIO_WHATSAPP_FROM?.trim() || undefined,
@@ -198,6 +247,7 @@ export function loadEnv(): AppEnv {
     stripeSecretKey: process.env.STRIPE_SECRET_KEY?.trim() || undefined,
     stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY?.trim() || undefined,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET?.trim() || undefined,
+    credentialRetentionDays: int('CREDENTIAL_RETENTION_DAYS', 30),
   };
 
   if (!isProduction && jwtAccessSecret.includes('dev-only')) {

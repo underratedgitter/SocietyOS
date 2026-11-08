@@ -5,7 +5,6 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { getEnv } from '../../src/config';
 import {
-  Agent,
   USERS,
   cookieValue,
   createTestApp,

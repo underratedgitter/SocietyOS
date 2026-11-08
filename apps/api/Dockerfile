@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22-alpine AS base
+# Builder and runtime must share one image so Prisma engines built for its
+# libc/OpenSSL match at runtime. Bump the patch tag deliberately.
+ARG NODE_IMAGE=node:22.23.4-alpine3.24
+
+FROM ${NODE_IMAGE} AS base
 RUN corepack enable && corepack prepare pnpm@12.15.0 --activate
 WORKDIR /app
 
@@ -18,7 +22,7 @@ COPY . .
 RUN pnpm --filter @societyos/api exec prisma generate \
   && pnpm --filter @societyos/api build
 
-FROM node:22-alpine AS runner
+FROM ${NODE_IMAGE} AS runner
 RUN apk add --no-cache openssl \
   && addgroup -S societyos \
   && adduser -S societyos -G societyos
@@ -37,4 +41,6 @@ WORKDIR /app/apps/api
 EXPOSE 4000
 
 # Migrations are idempotent and run once per container start before serving.
-CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && node dist/main.js"]
+# `exec` makes node PID 1 so SIGTERM reaches Nest's shutdown hooks instead of
+# being swallowed by sh (which would force a SIGKILL after the stop timeout).
+CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && exec node dist/main.js"]

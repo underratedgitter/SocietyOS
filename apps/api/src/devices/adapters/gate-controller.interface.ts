@@ -9,8 +9,6 @@ export type GateState =
   | 'FAULT'
   | 'UNKNOWN';
 
-export type GateCommandType = 'OPEN' | 'CLOSE' | 'STOP' | 'EMERGENCY_OVERRIDE';
-
 export interface GateTelemetry {
   state: GateState;
   obstructionDetected: boolean;
@@ -34,4 +32,5 @@ export interface GateController {
   getTelemetry(): Promise<GateTelemetry>;
   simulateObstruction?(obstructed: boolean): void;
   simulateFault?(fault: boolean): void;
+  clearEmergency?(): void;
 }

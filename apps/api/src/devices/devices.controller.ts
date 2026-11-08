@@ -133,6 +133,24 @@ export class DevicesController {
     );
   }
 
+  @Post('societies/:societyId/access-points/:accessPointId/emergency-reset')
+  @UseGuards(SocietyScopeGuard)
+  @RequireRoles('SOCIETY_ADMIN', 'GUARD')
+  emergencyReset(
+    @CurrentUser() user: JwtUser,
+    @Req() req: AuthedRequest,
+    @Param('accessPointId') accessPointId: string,
+    @Body() dto: EmergencyOverrideDto,
+  ) {
+    return this.biometrics.resetEmergencyOverride(
+      paramStr(req.params.societyId),
+      user.sub,
+      req.membership!.role,
+      paramStr(accessPointId),
+      dto.reason,
+    );
+  }
+
   @Get('societies/:societyId/access-points/:accessPointId/telemetry')
   @UseGuards(SocietyScopeGuard)
   @RequireRoles('SOCIETY_ADMIN', 'GUARD')

@@ -19,16 +19,6 @@ export function formatDate(value: string | Date, timezone?: string): string {
   }).format(date);
 }
 
-export function formatTime(value: string | Date, timezone?: string): string {
-  const date = typeof value === 'string' ? new Date(value) : value;
-  if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('en-IN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: timezone || 'Asia/Kolkata',
-  }).format(date);
-}
-
 export function formatWindow(from: string, until: string, timezone?: string): string {
   return `${formatDateTime(from, timezone)} → ${formatDateTime(until, timezone)}`;
 }

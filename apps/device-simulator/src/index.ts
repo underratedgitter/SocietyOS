@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -43,6 +42,20 @@ interface VerifyResponse {
   accessEventId: string;
   commandId?: string;
   expiresAt?: string;
+}
+
+// dotenv is not a dependency of this package (the import crashed with MODULE_NOT_FOUND);
+// Node's built-in loader has the same semantics: existing env vars win over .env values.
+try {
+  process.loadEnvFile();
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+}
+
+// The simulator ships demo secrets and seeds a test PIN; it must never run as a production controller.
+if (process.env.NODE_ENV === 'production') {
+  console.error('device-simulator is a development tool and refuses to start with NODE_ENV=production.');
+  process.exit(1);
 }
 
 const env = {
@@ -375,6 +388,7 @@ let isOffline = false;
 let eventSequence = 1;
 const offlineQueue: QueuedEvent[] = [];
 const credentialCache = new Map<string, CachedCredential>();
+const revokedHashes = new Set<string>();
 
 const CACHE_FILE = path.join(process.cwd(), '.controller_cache.json');
 
@@ -384,6 +398,7 @@ function persistCache(): void {
       eventSequence,
       offlineQueue,
       credentials: Array.from(credentialCache.entries()),
+      revokedHashes: Array.from(revokedHashes),
     };
     fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8');
   } catch {
@@ -391,7 +406,20 @@ function persistCache(): void {
   }
 }
 
-function loadPersistedCache(): void {
+const MAX_OFFLINE_BUFFER = 1000;
+
+function enqueueOfflineEvent(event: QueuedEvent): void {
+  if (offlineQueue.length >= MAX_OFFLINE_BUFFER) {
+    const dropped = offlineQueue.shift();
+    log(
+      `[BOUNDED QUEUE POLICY] Dropped oldest offline event #${dropped?.sequence} (buffer capacity ${MAX_OFFLINE_BUFFER} reached).`,
+    );
+  }
+  offlineQueue.push(event);
+  persistCache();
+}
+
+function loadPersistedCache(): boolean {
   try {
     if (fs.existsSync(CACHE_FILE)) {
       const raw = fs.readFileSync(CACHE_FILE, 'utf8');
@@ -401,32 +429,36 @@ function loadPersistedCache(): void {
       }
       if (Array.isArray(parsed.offlineQueue)) {
         offlineQueue.length = 0;
-        offlineQueue.push(...parsed.offlineQueue);
+        offlineQueue.push(...parsed.offlineQueue.slice(-MAX_OFFLINE_BUFFER));
       }
-      if (Array.isArray(parsed.credentials)) {
-        for (const [key, val] of parsed.credentials) {
-          credentialCache.set(key, val);
+      if (Array.isArray(parsed.revokedHashes)) {
+        for (const h of parsed.revokedHashes) {
+          revokedHashes.add(h);
         }
       }
-      log(`[PERSISTENCE] Restored ${credentialCache.size} credentials and ${offlineQueue.length} queued events from disk.`);
+      if (Array.isArray(parsed.credentials)) {
+        credentialCache.clear();
+        for (const [key, val] of parsed.credentials) {
+          if (!revokedHashes.has(key)) {
+            credentialCache.set(key, val);
+          }
+        }
+        log(`[PERSISTENCE] Restored ${credentialCache.size} credentials and ${offlineQueue.length} queued events from disk.`);
+        return true;
+      }
     }
   } catch (err) {
     log(`[PERSISTENCE] Cache recovery warning: ${String(err)}`);
   }
+  return false;
 }
 
 function populateInitialCache(): void {
-  // Seed cached resident biometric templates (Suprema/ZKTeco edge cache)
-  credentialCache.set('FINGERPRINT_RESIDENT_101', {
-    credentialHash: 'FINGERPRINT_RESIDENT_101',
-    kind: 'BIOMETRIC',
-    visitorName: 'Ananya Rao (Resident)',
-    flatNumber: '101',
-    validFrom: 0,
-    validUntil: Date.now() + 365 * 86400_000,
-    maxUses: 999999,
-    usedCount: 0,
-  });
+  const hasPersisted = loadPersistedCache();
+  if (hasPersisted) {
+    return;
+  }
+
   // Sample offline-usable PIN (HMAC hashed)
   const pinHash = hashCredential('888999');
   credentialCache.set(pinHash, {
@@ -440,22 +472,46 @@ function populateInitialCache(): void {
     maxUses: 3,
     usedCount: 0,
   });
-  loadPersistedCache();
 }
 
 async function pullEdgeCache(): Promise<void> {
   try {
     const res = await fetch(`${env.apiUrl}/api/v1/device-api/edge-sync`, {
       headers: { authorization: `Bearer ${env.deviceToken}` },
+      signal: AbortSignal.timeout(10_000),
     });
     if (res.ok) {
-      const data = (await res.json()) as { credentials?: CachedCredential[] };
+      const data = (await res.json()) as {
+        credentials?: CachedCredential[];
+        revokedHashes?: string[];
+      };
       if (Array.isArray(data.credentials)) {
+        const activeHashes = new Set(data.credentials.map((c) => c.credentialHash));
+        const revokedList = Array.isArray(data.revokedHashes) ? data.revokedHashes : [];
+        for (const h of revokedList) {
+          revokedHashes.add(h);
+        }
+
+        // Evict revoked credentials or stale entries no longer returned as active
+        for (const [key] of credentialCache.entries()) {
+          if (revokedHashes.has(key) || !activeHashes.has(key)) {
+            credentialCache.delete(key);
+          }
+        }
+
         for (const cred of data.credentials) {
-          credentialCache.set(cred.credentialHash, cred);
+          if (!revokedHashes.has(cred.credentialHash)) {
+            const existing = credentialCache.get(cred.credentialHash);
+            credentialCache.set(cred.credentialHash, {
+              ...cred,
+              usedCount: existing ? Math.max(existing.usedCount, cred.usedCount) : cred.usedCount,
+            });
+          }
         }
         persistCache();
-        log(`[EDGE SYNC] Loaded ${data.credentials.length} credentials into local controller cache.`);
+        log(
+          `[EDGE SYNC] Loaded ${data.credentials.length} credentials into local controller cache (purged stale/revoked entries).`,
+        );
       }
     }
   } catch (err) {
@@ -470,25 +526,31 @@ function verifyOffline(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): vo
     return;
   }
   const lookupKey = kind === 'BIOMETRIC' ? credential : hashCredential(credential);
-  const cached = credentialCache.get(lookupKey);
   const now = Date.now();
   let decision: 'AUTHORIZED' | 'DENIED' = 'DENIED';
   let reason = 'INVALID_CREDENTIAL';
 
-  if (cached) {
-    if (now < cached.validFrom) {
-      reason = 'PASS_SCHEDULED';
-    } else if (now > cached.validUntil) {
-      reason = 'PASS_EXPIRED';
-    } else if (cached.usedCount >= cached.maxUses) {
-      reason = 'PASS_EXHAUSTED';
-    } else {
-      decision = 'AUTHORIZED';
-      reason = 'VALID_OFFLINE_CACHE';
-      cached.usedCount += 1;
+  if (revokedHashes.has(lookupKey)) {
+    decision = 'DENIED';
+    reason = 'PASS_REVOKED';
+  } else {
+    const cached = credentialCache.get(lookupKey);
+    if (cached) {
+      if (now < cached.validFrom) {
+        reason = 'PASS_SCHEDULED';
+      } else if (now > cached.validUntil) {
+        reason = 'PASS_EXPIRED';
+      } else if (cached.usedCount >= cached.maxUses) {
+        reason = 'PASS_EXHAUSTED';
+      } else {
+        decision = 'AUTHORIZED';
+        reason = 'VALID_OFFLINE_CACHE';
+        cached.usedCount += 1;
+      }
     }
   }
 
+  const cached = credentialCache.get(lookupKey);
   const event: QueuedEvent = {
     sequence: eventSequence++,
     accessPointId: gate.id,
@@ -497,17 +559,9 @@ function verifyOffline(kind: 'PIN' | 'QR' | 'BIOMETRIC', credential: string): vo
     reasonCode: reason,
     timestamp: new Date().toISOString(),
     passId: cached?.passId,
-    credentialHash: cached?.credentialHash || (cached ? lookupKey : undefined),
+    credentialHash: cached?.credentialHash || (cached || revokedHashes.has(lookupKey) ? lookupKey : undefined),
   };
-  const MAX_OFFLINE_BUFFER = 1000;
-  if (offlineQueue.length >= MAX_OFFLINE_BUFFER) {
-    const dropped = offlineQueue.shift();
-    log(
-      `[BOUNDED QUEUE POLICY] Dropped oldest offline event #${dropped?.sequence} (buffer capacity ${MAX_OFFLINE_BUFFER} reached).`,
-    );
-  }
-  offlineQueue.push(event);
-  persistCache();
+  enqueueOfflineEvent(event);
 
   log(
     `[OFFLINE EVAL #${event.sequence}] ${decision} at ${gate.name} · ${reason} (${offlineQueue.length} events queued)`,
@@ -548,6 +602,7 @@ async function syncOfflineQueue(): Promise<void> {
           'content-type': 'application/json',
         },
         body: JSON.stringify({ events: chunk }),
+        signal: AbortSignal.timeout(10_000),
       });
       if (res.ok) {
         chunk.forEach((ev) => successfullySynced.add(ev.sequence));
@@ -580,6 +635,7 @@ async function syncOfflineQueue(): Promise<void> {
                 bufferedAt: event.timestamp,
               },
             }),
+            signal: AbortSignal.timeout(10_000),
           });
           if (res.ok) {
             successfullySynced.add(event.sequence);
@@ -693,8 +749,7 @@ function startConsole(): void {
           reasonCode: 'EMERGENCY_OVERRIDE',
           timestamp: new Date().toISOString(),
         };
-        offlineQueue.push(event);
-        persistCache();
+        enqueueOfflineEvent(event);
         if (!isOffline) {
           void syncOfflineQueue();
         }

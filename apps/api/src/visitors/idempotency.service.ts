@@ -44,7 +44,18 @@ export class IdempotencyService {
         },
       });
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return;
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        await this.prisma.idempotencyRecord.updateMany({
+          where: { key, expiresAt: { lte: new Date() } },
+          data: {
+            endpoint,
+            requestHash: fingerprint,
+            responseBody: body as Prisma.InputJsonValue,
+            expiresAt: new Date(Date.now() + ttlHours * 3600 * 1000),
+          },
+        });
+        return;
+      }
       throw error;
     }
   }

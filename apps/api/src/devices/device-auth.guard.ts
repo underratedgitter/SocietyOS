@@ -34,6 +34,7 @@ export class DeviceAuthGuard implements CanActivate {
       deviceUid: credential.device.deviceUid,
       societyId: credential.device.societyId,
       name: credential.device.name,
+      protocol: credential.device.protocol,
     };
     request.authSource = 'bearer';
     return true;

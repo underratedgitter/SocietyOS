@@ -18,9 +18,6 @@
         "backgroundColor": "#f6f4ee"
       },
       "package": "dev.societyos.resident"
-    },
-    "extra": {
-      "apiUrl": "http://localhost:80/api/v1"
     }
   }
 }

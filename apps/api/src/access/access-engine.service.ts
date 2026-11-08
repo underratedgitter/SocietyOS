@@ -86,40 +86,50 @@ export class AccessEngineService {
   ) {}
 
   async verify(ctx: VerifyContext): Promise<VerifyResponse> {
-    if (
-      ctx.credentialType === 'BIOMETRIC' ||
-      ctx.credentialType === 'FINGERPRINT' ||
-      ctx.credentialType === 'FACE'
-    ) {
-      const bioResult = await this.biometrics.verifyResidentBiometric(ctx.societyId, {
-        accessPointId: ctx.accessPointId,
-        templateHash: ctx.credential,
-        type: ctx.credentialType === 'FACE' ? 'FACE' : 'FINGERPRINT',
-      });
-      return {
-        decision: bioResult.decision as 'AUTHORIZED' | 'DENIED',
-        reasonCode: bioResult.reasonCode,
-        accessEventId: bioResult.accessEventId,
-      };
-    }
-
     const actor = ctx.deviceId ?? ctx.actorUserId ?? 'anon';
     const idemKey = `access-verify:${actor}:${ctx.requestId}`;
     const credentialHash = this.credentials.hash(ctx.credential);
 
     const cached = await this.prisma.idempotencyRecord.findUnique({ where: { key: idemKey } });
     if (cached && (!cached.expiresAt || cached.expiresAt > new Date())) {
-      if (cached.requestHash && cached.requestHash !== credentialHash) {
-        throw AppException.conflict(
-          'IDEMPOTENCY_PAYLOAD_MISMATCH',
-          'This request ID was already used with a different credential',
-        );
-      }
-      return cached.responseBody as unknown as VerifyResponse;
+      return this.replay(cached, credentialHash);
+    }
+    if (cached) {
+      // Expired record for a reused requestId: clear it so this evaluation can claim the key.
+      await this.prisma.idempotencyRecord.deleteMany({
+        where: { key: idemKey, expiresAt: { lte: new Date() } },
+      });
     }
 
     const deviceLimit = await this.rateLimit.hit(`verify:device:${actor}`, 60, 60);
     if (!deviceLimit.allowed) return this.denyImmediate(ctx, REASON.RATE_LIMIT, idemKey, credentialHash);
+
+    if (
+      ctx.credentialType === 'BIOMETRIC' ||
+      ctx.credentialType === 'FINGERPRINT' ||
+      ctx.credentialType === 'FACE'
+    ) {
+      // Biometric scans go through the same replay cache and device flood limit as PIN/QR:
+      // a reader retrying the same requestId must not actuate the gate twice.
+      const bioResult = await this.biometrics.verifyResidentBiometric(
+        ctx.societyId,
+        {
+          accessPointId: ctx.accessPointId,
+          templateHash: ctx.credential,
+          type: ctx.credentialType === 'FACE' ? 'FACE' : 'FINGERPRINT',
+        },
+        ctx.source === 'DEVICE' && ctx.deviceId
+          ? { deviceId: ctx.deviceId, requestId: ctx.requestId }
+          : undefined,
+      );
+      const bioResponse: VerifyResponse = {
+        decision: bioResult.decision,
+        reasonCode: bioResult.reasonCode,
+        accessEventId: bioResult.accessEventId,
+      };
+      await this.remember(idemKey, bioResponse, credentialHash);
+      return bioResponse;
+    }
 
     const credentialLimit = await this.rateLimit.hit(`verify:credential:${credentialHash}`, 15, 15 * 60);
     if (!credentialLimit.allowed) {
@@ -134,35 +144,37 @@ export class AccessEngineService {
       return this.denyImmediate(ctx, REASON.RATE_LIMIT, idemKey, credentialHash);
     }
 
-    const outcome = await this.prisma.$transaction((tx) => this.evaluateAndConsume(tx, ctx, credentialHash));
-    if (outcome.kind === 'DENIED') {
-      const response: VerifyResponse = {
-        decision: 'DENIED',
-        reasonCode: outcome.reasonCode,
-        accessEventId: outcome.accessEventId,
-      };
-      await this.remember(idemKey, response, credentialHash);
-      return response;
+    let outcome: TxOutcome;
+    try {
+      outcome = await this.prisma.$transaction(async (tx) => {
+        const evaluated = await this.evaluateAndConsume(tx, ctx, credentialHash);
+        // The replay record is written in the same transaction as the redemption. A concurrent
+        // duplicate of this requestId (device retry while the first call is in flight) blocks on
+        // the unique key, fails, and rolls back its own redemption instead of consuming the pass
+        // and opening the gate a second time.
+        await tx.idempotencyRecord.create({
+          data: this.idempotencyData(idemKey, this.toResponse(evaluated, ctx), credentialHash),
+        });
+        return evaluated;
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const winner = await this.prisma.idempotencyRecord.findUnique({ where: { key: idemKey } });
+        if (winner) return this.replay(winner, credentialHash);
+      }
+      throw error;
     }
+    const response = this.toResponse(outcome, ctx);
+    if (outcome.kind === 'DENIED') return response;
 
     if (ctx.source === 'DEVICE') {
       try {
         await this.mqtt.publishCommand(outcome.commandId);
       } catch (error) {
         this.logger.warn(`Gate command ${outcome.commandId} could not be dispatched: ${String(error)}`);
-        return this.compensate(outcome, ctx, idemKey, credentialHash);
+        return this.compensate(outcome, ctx, idemKey);
       }
     }
-
-    const response: VerifyResponse = {
-      decision: 'AUTHORIZED',
-      reasonCode: REASON.VALID,
-      accessEventId: outcome.accessEventId,
-      ...(ctx.source === 'DEVICE'
-        ? { commandId: outcome.commandId, expiresAt: outcome.expiresAt.toISOString() }
-        : {}),
-    };
-    await this.remember(idemKey, response, credentialHash);
 
     await this.notifications
       .notifyGateArrival({
@@ -175,6 +187,43 @@ export class AccessEngineService {
       .catch((error) => this.logger.warn(`Notification enqueue failed: ${String(error)}`));
 
     return response;
+  }
+
+  private toResponse(outcome: TxOutcome, ctx: VerifyContext): VerifyResponse {
+    if (outcome.kind === 'DENIED') {
+      return { decision: 'DENIED', reasonCode: outcome.reasonCode, accessEventId: outcome.accessEventId };
+    }
+    return {
+      decision: 'AUTHORIZED',
+      reasonCode: REASON.VALID,
+      accessEventId: outcome.accessEventId,
+      ...(ctx.source === 'DEVICE'
+        ? { commandId: outcome.commandId, expiresAt: outcome.expiresAt.toISOString() }
+        : {}),
+    };
+  }
+
+  private replay(
+    record: { requestHash: string | null; responseBody: Prisma.JsonValue },
+    credentialHash: string,
+  ): VerifyResponse {
+    if (record.requestHash && record.requestHash !== credentialHash) {
+      throw AppException.conflict(
+        'IDEMPOTENCY_PAYLOAD_MISMATCH',
+        'This request ID was already used with a different credential',
+      );
+    }
+    return record.responseBody as unknown as VerifyResponse;
+  }
+
+  private idempotencyData(key: string, response: VerifyResponse, requestHash: string) {
+    return {
+      key,
+      endpoint: 'access.verify',
+      responseBody: response as unknown as Prisma.InputJsonValue,
+      requestHash,
+      expiresAt: new Date(Date.now() + IDEMPOTENCY_TTL_MINUTES * 60 * 1000),
+    };
   }
 
   private async evaluateAndConsume(
@@ -231,8 +280,19 @@ export class AccessEngineService {
       }
     }
 
-    const credential = await tx.visitorPassCredential.findUnique({
-      where: { credentialHash },
+    const credential = await tx.visitorPassCredential.findFirst({
+      where: {
+        credentialHash,
+        type: ctx.credentialType as CredentialType,
+        ...(ctx.credentialType === 'PIN'
+          ? {
+              OR: [
+                { societyId: ctx.societyId },
+                { pass: { societyId: ctx.societyId } },
+              ],
+            }
+          : {}),
+      },
       include: {
         pass: {
           include: {
@@ -429,9 +489,8 @@ export class AccessEngineService {
     outcome: AuthorizedOutcome,
     ctx: VerifyContext,
     idemKey: string,
-    credentialHash: string,
   ): Promise<VerifyResponse> {
-    const denial = await this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction(async (tx) => {
       await tx.gateCommand.updateMany({
         where: { id: outcome.commandId, status: 'ISSUED' },
         data: { status: 'EXPIRED' },
@@ -454,15 +513,19 @@ export class AccessEngineService {
           requestId: ctx.requestId,
         },
       });
-      return event;
+      const response: VerifyResponse = {
+        decision: 'DENIED',
+        reasonCode: REASON.CONTROLLER,
+        accessEventId: event.id,
+      };
+      // The AUTHORIZED replay record was committed with the redemption; a retry must now see
+      // the denial, not a command that never reached the gate.
+      await tx.idempotencyRecord.update({
+        where: { key: idemKey },
+        data: { responseBody: response as unknown as Prisma.InputJsonValue },
+      });
+      return response;
     });
-    const response: VerifyResponse = {
-      decision: 'DENIED',
-      reasonCode: REASON.CONTROLLER,
-      accessEventId: denial.id,
-    };
-    await this.remember(idemKey, response, credentialHash);
-    return response;
   }
 
   private async denyImmediate(
@@ -489,14 +552,8 @@ export class AccessEngineService {
   }
 
   private async remember(key: string, response: VerifyResponse, requestHash: string): Promise<void> {
-    await this.prisma.idempotencyRecord.create({
-      data: {
-        key,
-        endpoint: 'access.verify',
-        responseBody: response as never,
-        requestHash,
-        expiresAt: new Date(Date.now() + IDEMPOTENCY_TTL_MINUTES * 60 * 1000),
-      },
-    }).catch(() => undefined);
+    await this.prisma.idempotencyRecord
+      .create({ data: this.idempotencyData(key, response, requestHash) })
+      .catch(() => undefined);
   }
 }

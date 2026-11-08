@@ -8,7 +8,20 @@ import { CredentialsService } from '../visitors/credentials.service';
 import { RateLimitService } from '../common/rate-limit.service';
 import { AuditService } from '../common/audit.service';
 import { visitorPolicy } from '../societies/policy';
+import { getEnv } from '../config';
 import { RegisterUserDto, SelfRegisterVisitorDto } from './registration.dto';
+
+const LOOPBACK_IPS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost']);
+
+/**
+ * Local e2e runs hammer these public endpoints from loopback, so dev/test get a relaxed
+ * limit. In production a loopback or unresolved ('unknown') address means a same-host
+ * proxy or a missing client IP, so relaxing there would lift the limit for everyone.
+ */
+export function publicIpRateLimit(ip: string, strictLimit: number, relaxedLimit: number): number {
+  if (getEnv().isProduction) return strictLimit;
+  return LOOPBACK_IPS.has(ip) || ip === 'unknown' ? relaxedLimit : strictLimit;
+}
 
 const BCRYPT_ROUNDS = 12;
 
@@ -147,13 +160,7 @@ export class RegistrationService {
 
   async selfRegisterVisitor(dto: SelfRegisterVisitorDto, ip = 'unknown') {
     const rateLimitKey = `visitor:self-register:ip:${ip}`;
-    const isLoopback =
-      ip === '127.0.0.1' ||
-      ip === '::1' ||
-      ip === '::ffff:127.0.0.1' ||
-      ip === 'localhost' ||
-      ip === 'unknown';
-    const limit = await this.rateLimit.hit(rateLimitKey, isLoopback ? 500 : 15, 15 * 60);
+    const limit = await this.rateLimit.hit(rateLimitKey, publicIpRateLimit(ip, 15, 500), 15 * 60, { failClosed: true });
     if (!limit.allowed) {
       throw AppException.tooMany('Too many visitor registration attempts. Please wait a few minutes.');
     }
@@ -232,8 +239,8 @@ export class RegistrationService {
       throw AppException.unprocessable('NO_GATES_CONFIGURED', 'No active gates configured for this society');
     }
 
-    const requiresApproval = policy.approvalCategories.includes(dto.category as VisitorCategory);
-    const status = requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE';
+    const requiresApproval = true;
+    const status = 'PENDING_APPROVAL';
 
     const trimmedName = dto.visitorName.trim();
     const trimmedVehicle = dto.vehicle?.trim().toUpperCase();
@@ -244,8 +251,6 @@ export class RegistrationService {
 
     const maxUses = dto.category === 'RELATIVE' ? Math.min(policy.maxUsesPerPass, 5) : 1;
 
-    let pin = this.credentials.generatePin();
-    let qr = this.credentials.generateQrToken();
     let pass: any;
 
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -281,20 +286,6 @@ export class RegistrationService {
               validFrom,
               validUntil,
               maxUses,
-              credentials: {
-                create: [
-                  {
-                    type: pin.type,
-                    credentialHash: this.credentials.hash(pin.plaintext),
-                    keyId: this.credentials.keyVersion,
-                  },
-                  {
-                    type: qr.type,
-                    credentialHash: this.credentials.hash(qr.plaintext),
-                    keyId: this.credentials.keyVersion,
-                  },
-                ],
-              },
               accessPoints: {
                 create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
               },
@@ -329,9 +320,7 @@ export class RegistrationService {
         });
         break;
       } catch (err: any) {
-        if ((err?.code === 'P2002' || String(err).includes('credentialHash')) && attempt < 4) {
-          pin = this.credentials.generatePin();
-          qr = this.credentials.generateQrToken();
+        if (err?.code === 'P2002' && attempt < 4) {
           continue;
         }
         throw err;
@@ -352,17 +341,11 @@ export class RegistrationService {
       validFrom: pass.validFrom.toISOString(),
       validUntil: pass.validUntil.toISOString(),
       maxUses: pass.maxUses,
-      credentials: requiresApproval || pass.status === 'PENDING_APPROVAL'
-        ? null
-        : {
-            pin: pin.plaintext,
-            qrToken: qr.plaintext,
-          },
+      credentials: null,
       accessPoints,
-      requiresHostApproval: requiresApproval,
-      message: requiresApproval
-        ? 'Pass registered and pending resident approval. You will receive entry access once approved.'
-        : 'Pass successfully issued! Use your 6-digit PIN or scan the QR token at any gate.',
+      requiresHostApproval: true,
+      message:
+        'Pass registered and pending resident approval. You will receive entry access once approved.',
     };
   }
 }

@@ -19,16 +19,6 @@ export function formatDate(value: string | Date, timezone?: string): string {
   }).format(date);
 }
 
-export function formatTime(value: string | Date, timezone?: string): string {
-  const date = typeof value === 'string' ? new Date(value) : value;
-  if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('en-IN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: timezone || 'Asia/Kolkata',
-  }).format(date);
-}
-
 export function formatWindow(from: string, until: string, timezone?: string): string {
   return `${formatDateTime(from, timezone)} → ${formatDateTime(until, timezone)}`;
 }
@@ -87,13 +77,6 @@ export function passTone(status: PassStatus | string): string {
     default:
       return 'neutral';
   }
-}
-
-export function gateLabel(type: string): string {
-  if (type === 'BOOM_BARRIER') return 'Boom barrier';
-  if (type === 'SLIDING_GATE') return 'Sliding gate';
-  if (type === 'DOOR_LOCK') return 'Door lock';
-  return titleCase(type);
 }
 
 export function copyText(value: string): Promise<void> {

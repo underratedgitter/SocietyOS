@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -10,8 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { api, ApiError, getApiUrl, setApiUrl } from '../api/client';
-import { mobileStorage } from '../api/storage';
+import { api, ApiError, getApiUrl, getDefaultApiUrl, setApiUrl } from '../api/client';
 import type { PublicFlat, PublicSociety } from '../api/types';
 import { DEMO_RESIDENTS, useAuth } from '../context/AuthContext';
 import { colors } from '../styles/theme';
@@ -40,16 +39,6 @@ export function LoginScreen() {
   const [apiUrl, setLocalApiUrl] = useState(getApiUrl());
   const [showConfig, setShowConfig] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-
-  useEffect(() => {
-    void (async () => {
-      const saved = await mobileStorage.loadApiUrl();
-      if (saved) {
-        setLocalApiUrl(saved);
-        setApiUrl(saved);
-      }
-    })();
-  }, []);
 
   // Fetch societies when entering register mode
   useEffect(() => {
@@ -436,7 +425,7 @@ export function LoginScreen() {
                   autoCorrect={false}
                 />
                 <Text style={styles.configHelp}>
-                  Default: http://localhost:80/api/v1 (use LAN IP for physical phone)
+                  Default: {getDefaultApiUrl()} (HTTPS is required in release builds)
                 </Text>
               </View>
             ) : null}

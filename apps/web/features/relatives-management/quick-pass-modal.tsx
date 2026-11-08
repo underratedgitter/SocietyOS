@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Check, Copy, ExternalLink, KeyRound, QrCode, Share2, ShieldCheck, Zap } from 'lucide-react';
+import { Check, Copy, Share2, Zap } from 'lucide-react';
 import { Modal, Notice, errorMessage } from '@/components/ui';
 import { formatDateTime } from '@/lib/format';
 import { issueQuickPass } from './api';

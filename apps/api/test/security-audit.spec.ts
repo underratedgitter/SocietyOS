@@ -1,6 +1,6 @@
 import { ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Prisma, VisitorCategory } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { AppException } from '../src/common/app.exception';
 import { AuthzService } from '../src/common/authz.service';
@@ -61,7 +61,6 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
   const userA_Admin: JwtUser = { sub: 'user-admin-a', email: 'admin@a.com', name: 'Admin A', isPlatformAdmin: false, mustChangePassword: false };
   const userA_Resident: JwtUser = { sub: 'user-resident-a', email: 'resident@a.com', name: 'Resident A', isPlatformAdmin: false, mustChangePassword: false };
   const userA_Guard: JwtUser = { sub: 'user-guard-a', email: 'guard@a.com', name: 'Guard A', isPlatformAdmin: false, mustChangePassword: false };
-  const userB_Admin: JwtUser = { sub: 'user-admin-b', email: 'admin@b.com', name: 'Admin B', isPlatformAdmin: false, mustChangePassword: false };
   const userB_Resident: JwtUser = { sub: 'user-resident-b', email: 'resident@b.com', name: 'Resident B', isPlatformAdmin: false, mustChangePassword: false };
 
   beforeEach(() => {
@@ -673,6 +672,7 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
     });
 
     it('swallows concurrent duplicate insertion (race condition P2002) gracefully', async () => {
+      mockPrisma.idempotencyRecord.updateMany = jest.fn().mockResolvedValue({ count: 1 });
       const duplicateError = new Prisma.PrismaClientKnownRequestError('duplicate', {
         code: 'P2002',
         clientVersion: '6.16.0',
@@ -756,6 +756,41 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
         code: 'RATE_LIMIT_EXCEEDED',
         status: 429,
       });
+    });
+
+    it('AuthController keeps strict login/refresh IP limits for loopback and unknown IPs in production', async () => {
+      const saved = { ...process.env };
+      Object.assign(process.env, {
+        NODE_ENV: 'production',
+        WEB_URL: 'https://society.example.com',
+        JWT_ACCESS_SECRET: 'prod-access-secret-0123456789abcdef0123456789',
+        CREDENTIAL_HMAC_KEY: 'prod-credential-key-0123456789abcdef0123456789',
+        REDIS_URL: 'redis://:secret@redis:6379',
+      });
+      resetEnvCacheForTests();
+      try {
+        const hit = jest.fn().mockResolvedValue({ allowed: false, count: 0, limit: 0 });
+        const controller = new AuthController({} as any, { hit } as unknown as RateLimitService);
+        const res: any = { cookie: jest.fn() };
+
+        for (const ip of [undefined, '127.0.0.1', '::1']) {
+          hit.mockClear();
+          const req: any = { ip, headers: {}, cookies: {} };
+          await expect(
+            controller.login({ email: 'a@societyos.local', password: 'Password#123' }, req, res),
+          ).rejects.toMatchObject({ status: 429 });
+          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:login:ip:/), 20, 900, { failClosed: true });
+
+          hit.mockClear();
+          await expect(controller.refresh({ refreshToken: 'x' } as any, req, res)).rejects.toMatchObject({
+            status: 429,
+          });
+          expect(hit).toHaveBeenCalledWith(expect.stringMatching(/^auth:refresh:ip:/), 60, 900, { failClosed: true });
+        }
+      } finally {
+        process.env = saved;
+        resetEnvCacheForTests();
+      }
     });
 
     it('AccessEngineService triggers RATE_LIMIT_EXCEEDED and emits CREDENTIAL_BRUTE_FORCE alert', async () => {

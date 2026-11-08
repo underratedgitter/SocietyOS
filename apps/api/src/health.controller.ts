@@ -29,6 +29,8 @@ export class HealthController {
       components.database = 'down';
       databaseReady = false;
     }
+    // Redis loss degrades (auth endpoints fail closed; gates fall back to per-process limits) but
+    // must not pull every replica from the load balancer at once and take the gates down with it.
     components.redis = this.rateLimit.redisReady ? 'ok' : 'degraded';
     components.mqtt = this.mqtt.connected ? 'ok' : 'degraded';
 
@@ -50,9 +52,10 @@ export class HealthController {
         ? 'stripe'
         : 'mock';
 
-    res.status(databaseReady ? 200 : 503);
+    const ready = databaseReady;
+    res.status(ready ? 200 : 503);
     return {
-      status: databaseReady ? 'ready' : 'not-ready',
+      status: ready ? 'ready' : 'not-ready',
       components,
       time: new Date().toISOString(),
     };

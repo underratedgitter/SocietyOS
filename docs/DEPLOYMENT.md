@@ -29,9 +29,11 @@ Internet / society LAN
 ```
 
 Only Nginx publishes a host port (`80` by default). PostgreSQL, Redis and
-Mosquitto are reachable only on the compose network. The API trusts the first
-proxy hop (`trust proxy = 1`) so client IPs and secure-cookie decisions are
-correct behind Nginx.
+Mosquitto are reachable only on the compose network. Nginx restores the client
+address from the TLS terminator's `X-Forwarded-For` (see
+[Client IPs](#client-ips-behind-the-terminator)) and forwards a single
+resolved address; the API trusts that one hop (`trust proxy = 1`) so client
+IPs, rate limits and secure-cookie decisions are correct.
 
 ## Prerequisites
 
@@ -54,7 +56,7 @@ openssl rand -hex 32   # JWT_ACCESS_SECRET
 openssl rand -hex 32   # CREDENTIAL_HMAC_KEY
 openssl rand -base64 32 # DEVICE_SECRET_ENC_KEY (must decode to exactly 32 bytes)
 openssl rand -hex 24   # POSTGRES_PASSWORD
-openssl rand -hex 24   # REDIS_PASSWORD (if you enable Redis auth)
+openssl rand -hex 24   # Redis password (secret file + REDIS_URL, below)
 openssl rand -hex 24   # MQTT_API_PASSWORD
 openssl rand -hex 24   # MQTT_DEVICE_PASSWORD
 openssl rand -hex 32   # NOTIFICATION_WEBHOOK_SECRET
@@ -68,6 +70,21 @@ Rules enforced by the API at startup:
 - `DEVICE_SECRET_ENC_KEY`, when set, must be 32 bytes of base64. If it is
   omitted the key is derived from `CREDENTIAL_HMAC_KEY`; set it explicitly so
   rotating the HMAC key does not make stored device secrets unreadable.
+
+Redis requires a password. It is read from a secret file so the Redis
+container never sees the other values in `.env.production`; the API reads the
+same password from `REDIS_URL`:
+
+```bash
+mkdir -p infrastructure/docker/redis
+openssl rand -hex 24 > infrastructure/docker/redis/password
+chmod 600 infrastructure/docker/redis/password
+# in .env.production (hex passwords need no URL escaping):
+# REDIS_URL=redis://:<contents of the password file>@redis:6379
+```
+
+If the two disagree the API logs `NOAUTH`/`WRONGPASS`, `readyz` reports
+`redis: degraded` and rate limiting silently falls back to per-process memory.
 
 Keep `.env.production` out of git (it is ignored). Back it up in your secret
 manager; losing `CREDENTIAL_HMAC_KEY` invalidates every issued credential hash,
@@ -83,10 +100,11 @@ unreadable.
 | `WEB_URL` | yes | Public HTTPS origin; used for CORS, cookies and links |
 | `APP_BASE_URL` | no | Base URL in notifications; defaults to `WEB_URL` |
 | `JWT_ACCESS_SECRET` | yes | Signs access tokens (32+ chars) |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | no | Token `iss`/`aud`; default `societyos-api` / `societyos-clients` |
 | `CREDENTIAL_HMAC_KEY` | yes | Keyed hash for PIN/QR credentials (32+ chars) |
 | `CREDENTIAL_HMAC_KEY_ID` | no | Key version stored with each hash; default `v1` |
 | `DEVICE_SECRET_ENC_KEY` | recommended | Base64 32-byte key that encrypts device command secrets |
-| `REDIS_URL` | no | Enables the shared rate limiter; falls back to memory |
+| `REDIS_URL` | yes (prod stack) | `redis://:<password>@redis:6379`; password must match `infrastructure/docker/redis/password`. Unset or wrong falls back to per-process rate limiting |
 | `MQTT_URL` | no | Broker URL, e.g. `mqtt://mosquitto:1883`; devices degrade without it |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | with MQTT | Broker identity for the API |
 | `MQTT_TLS_REJECT_UNAUTHORIZED` | no | Set `false` only for a self-signed broker certificate |
@@ -98,9 +116,17 @@ unreadable.
 | `SMS_PROVIDER` / `TWILIO_*` / `MSG91_*` | no | Automated SMS delivery (`twilio`, `msg91`, or `mock`) |
 | `WHATSAPP_PROVIDER` / `WHATSAPP_*` | no | WhatsApp Business / Twilio WhatsApp delivery |
 | `EXPO_ACCESS_TOKEN` / `WEB_PUSH_*` | no | Mobile Expo Push and Web Push notification delivery |
-| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | no | Razorpay online order creation & signature verification |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | no | Stripe payment intent creation & webhook processing |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET` | no | Razorpay order creation, signature verification and webhook verification |
+| `STRIPE_SECRET_KEY` / `STRIPE_PUBLISHABLE_KEY` / `STRIPE_WEBHOOK_SECRET` | no | Stripe payment intent creation & webhook processing |
 | `API_PORT` | no | API listen port, `4000` in the image |
+| `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_NAME` | no | Defaults for `dist/cli/bootstrap-admin.js` when flags are omitted |
+
+Set outside `.env.production`:
+
+| Variable | Where | Purpose |
+| --- | --- | --- |
+| `API_INTERNAL_URL` | web image build arg (compose sets `http://api:4000`) | Target of the Next.js `/api/v1` rewrite. Baked in at build time; changing it at runtime has no effect |
+| `NGINX_HTTP_BIND` | shell or `./.env` when running compose | Host bind for Nginx, default `80`. Use `127.0.0.1:80` when the TLS terminator runs on the same host |
 
 ## 2. Generate broker credentials
 
@@ -113,7 +139,9 @@ MQTT_API_PASSWORD='...' MQTT_DEVICE_PASSWORD='...' \
 ```
 
 The script writes `infrastructure/docker/mosquitto/passwd` and `acl` with mode
-`600`; both are git-ignored. The ACL gives the API read/write on `society/#`
+`600`, owned by the broker's `mosquitto` user (uid 1883) so the broker can read
+them after dropping root; both are git-ignored. Use `sudo` to copy them into
+your secret manager. The ACL gives the API read/write on `society/#`
 and gives devices access only to their own command, acknowledgement, event,
 health and telemetry topics.
 
@@ -130,7 +158,8 @@ docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps
 ```
 
-The API image applies `prisma migrate deploy` on start, then serves. No seed
+The API image applies `prisma migrate deploy` on start, then serves. It never
+runs `prisma migrate dev`. No seed
 runs in production; demo accounts and fixture credentials must never be created
 there. Create the first platform administrator explicitly:
 
@@ -167,9 +196,47 @@ port 80:
 Keep `WEB_URL` set to the public `https://` origin. Secure cookies are enabled
 by default in production; the browser sees only the TLS origin, so they work.
 
-If you must terminate TLS on the compose Nginx itself, add a `443` server block
-with your certificate mounts and publish `443:443`; keep the HTTP block as a
-redirect.
+When the terminator runs on the same host, bind Nginx to loopback so plaintext
+`:80` is not reachable from the internet:
+
+```bash
+echo 'NGINX_HTTP_BIND=127.0.0.1:80' >> .env   # compose interpolation file
+```
+
+### Client IPs behind the terminator
+
+`infrastructure/nginx/nginx.conf` trusts `X-Forwarded-For` only from private
+ranges (`10/8`, `172.16/12`, `192.168/16`, `127.0.0.1`), which covers Docker
+bridges, `cloudflared` and VPC load balancers. Narrow `set_real_ip_from` to
+your terminator's address if clients on the society LAN reach Nginx directly,
+since they could otherwise spoof their address and dodge per-IP rate limits.
+If a CDN proxies to a public IP, add the CDN's published ranges. Verify by
+checking that `/api/` access log lines show real client IPs, not the
+terminator's.
+
+### Terminating TLS on the compose Nginx
+
+If you must terminate TLS on the compose Nginx itself, mount the certificate,
+publish `443:443`, turn the port 80 server into a redirect and add:
+
+```nginx
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name app.example.com;
+  ssl_certificate     /etc/nginx/certs/fullchain.pem;
+  ssl_certificate_key /etc/nginx/certs/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_cache shared:TLS:10m;
+  ssl_session_tickets off;
+  # ...same add_header and location blocks as the port 80 server...
+}
+```
+
+HSTS (`max-age=31536000; includeSubDomains`) is sent by Nginx for web routes
+and by the API (helmet) for `/api/`; it only takes effect once browsers reach
+the site over HTTPS.
 
 ## 5. Backups
 
@@ -178,8 +245,17 @@ BACKUP_DIR=/var/backups/societyos RETENTION_DAYS=30 \
   sh infrastructure/scripts/backup-postgres.sh
 ```
 
-The script writes a custom-format `pg_dump` with mode `600` and prunes dumps
-older than the retention window. Schedule it from cron or a systemd timer and
+The script writes a custom-format `pg_dump` to a `.partial` file, checks it
+with `pg_restore --list`, then renames it (mode `600`, directory `700`) and
+prunes dumps older than the retention window. A failed or truncated dump
+exits non-zero and never replaces or prunes existing backups. The database
+user and name come from `.env.production` (`POSTGRES_USER`/`POSTGRES_DB`).
+Example cron entry (cron has a minimal `PATH`, so make sure `docker` is on it):
+
+```cron
+15 2 * * * cd /opt/societyos && BACKUP_DIR=/var/backups/societyos RETENTION_DAYS=30 /bin/sh infrastructure/scripts/backup-postgres.sh >> /var/log/societyos-backup.log 2>&1
+```
+ Schedule it from cron or a systemd timer and
 copy dumps off the host. Redis is a cache and Mosquitto persistence only holds
 in-flight broker state, so PostgreSQL is the only data that must be backed up.
 
@@ -190,8 +266,9 @@ CONFIRM_RESTORE=yes sh infrastructure/scripts/restore-postgres.sh \
   /var/backups/societyos/societyos-20261030T020000Z.dump
 ```
 
-It stops `api` and `web`, runs `pg_restore --clean --if-exists`, then restarts
-them. Rehearse a restore before go-live and after every schema change.
+It stops `api` and `web`, runs `pg_restore --clean --if-exists` in a single
+transaction, then restarts them. If any statement fails the whole restore rolls
+back to the previous state and `api`/`web` stay stopped until you start them. Rehearse a restore before go-live and after every schema change.
 
 ## 6. Upgrades and rollback
 
@@ -249,7 +326,8 @@ To exercise the real images locally without TLS:
 
 ```bash
 cp .env.production.example .env.production
-# set real secrets in .env.production, then generate broker credentials
+# set real secrets in .env.production, generate broker credentials and the
+# Redis password file (steps 1 and 2)
 docker compose -f docker-compose.prod.yml -f docker-compose.preview.yml \
   up -d --build
 docker compose -f docker-compose.prod.yml -f docker-compose.preview.yml \

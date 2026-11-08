@@ -149,11 +149,13 @@ async function ensurePass(input: {
       type: 'PIN' as const,
       credentialHash: credentialHash(input.pin),
       keyId: env.credentialHmacKeyId,
+      societyId: input.societyId,
     },
     {
       type: 'QR' as const,
       credentialHash: credentialHash(input.qrToken),
       keyId: env.credentialHmacKeyId,
+      societyId: input.societyId,
     },
   ];
 
@@ -332,6 +334,34 @@ async function main() {
     });
     residentsB.push({ user: resident, flat: flatsB[index] });
   }
+
+  const demoBiometricHash = '6988d91038b8bdf0c0c39ee90cff9457c5beeb8d6d24c5a1ae01f0b81aeb7772';
+  await prisma.biometricTemplate.upsert({
+    where: { templateHash: demoBiometricHash },
+    create: {
+      societyId: societyA.id,
+      userId: residentsA[0].user.id,
+      type: 'FINGERPRINT',
+      templateHash: demoBiometricHash,
+      encryptedTemplate: encryptSecret('demo-fingerprint-payload'),
+      algorithm: 'ZKFINGER_V10',
+      consentGivenAt: new Date(),
+      lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
+      consentText: 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+      enrolledBy: adminA.id,
+    },
+    update: {
+      societyId: societyA.id,
+      userId: residentsA[0].user.id,
+      type: 'FINGERPRINT',
+      encryptedTemplate: encryptSecret('demo-fingerprint-payload'),
+      algorithm: 'ZKFINGER_V10',
+      consentGivenAt: new Date(),
+      lawfulBasis: 'DPDP_2023_SECTION_6_EXPLICIT_CONSENT',
+      consentText: 'India DPDP Act 2023 Section 6 explicit resident biometric processing consent',
+      enrolledBy: adminA.id,
+    },
+  });
 
   const mainGateA = await ensureAccessPoint(societyA.id, 'Main Vehicle Gate', 'BOOM_BARRIER');
   const pedestrianA = await ensureAccessPoint(societyA.id, 'Pedestrian Gate', 'SLIDING_GATE');

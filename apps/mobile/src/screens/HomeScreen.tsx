@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -34,6 +34,9 @@ export function HomeScreen({
 }: HomeScreenProps) {
   const { session, selectedFlat, selectedSociety, isOffline } = useAuth();
   const [passes, setPasses] = useState<PassView[]>([]);
+  // Read via ref so the loader isn't recreated (and re-fired) whenever the list length changes.
+  const passesCountRef = useRef(0);
+  passesCountRef.current = passes.length;
   const [accessPoints, setAccessPoints] = useState<AccessPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -86,7 +89,7 @@ export function HomeScreen({
     } catch (err) {
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
         // If passes already exist from local cache, keep showing them gracefully
-        if (passes.length === 0) {
+        if (passesCountRef.current === 0) {
           const cached = await mobileStorage.loadCachedPasses<PassView[]>();
           if (cached && cached.length > 0) {
             setPasses(cached);
@@ -102,7 +105,7 @@ export function HomeScreen({
       setLoading(false);
       setRefreshing(false);
     }
-  }, [societyId, flatId, passes.length]);
+  }, [societyId, flatId]);
 
   useEffect(() => {
     void loadData();
@@ -116,8 +119,17 @@ export function HomeScreen({
   const handleApprove = async (pass: PassView) => {
     setActionBusyId(pass.id);
     try {
-      await api.approvePass(pass.id, 'APPROVED');
-      Alert.alert('Pass Approved', `${pass.visitor.name} has been approved for gate entry.`);
+      const approved = await api.approvePass(pass.id, 'APPROVED');
+      if (approved.credentials) {
+        // Shown once: the same PIN and QR the visitor receives, cached like a newly created pass.
+        const { credentials, ...approvedPass } = approved;
+        const nextCreds = { ...issuedCredentials, [approvedPass.id]: credentials };
+        setIssuedCredentials(nextCreds);
+        void mobileStorage.saveCachedCredentials(nextCreds);
+        setSelectedPassModal({ passWithCredentials: { pass: approvedPass, credentials } });
+      } else {
+        Alert.alert('Pass Approved', `${pass.visitor.name} has been approved for gate entry.`);
+      }
       await loadData();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'Failed to approve pass.';

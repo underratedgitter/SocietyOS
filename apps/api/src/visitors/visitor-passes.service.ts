@@ -5,7 +5,7 @@ import { AuthzService } from '../common/authz.service';
 import { AppException } from '../common/app.exception';
 import { AuditService } from '../common/audit.service';
 import { JwtUser } from '../auth/jwt-auth.guard';
-import { CredentialsService } from './credentials.service';
+import { CredentialsService, GeneratedCredential } from './credentials.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { visitorPolicy } from '../societies/policy';
 import { CreateVisitorPassDto, ListPassesQueryDto } from './visitor-passes.dto';
@@ -29,6 +29,10 @@ export interface PassView {
   requiresApproval: boolean;
   createdAt: Date;
   revokedAt?: Date | null;
+}
+
+export interface ApprovedPassResult extends PassView {
+  credentials?: { pin: string; qrToken: string };
 }
 
 @Injectable()
@@ -99,13 +103,6 @@ export class VisitorPassesService {
       );
     }
 
-    const recent = await this.prisma.visitorPass.count({
-      where: { flatId: dto.flatId, createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) } },
-    });
-    if (recent >= policy.maxPassesPerFlatPerDay) {
-      throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
-    }
-
     const accessPoints = await this.prisma.accessPoint.findMany({
       where: { id: { in: dto.accessPointIds }, societyId: context.societyId },
       select: { id: true },
@@ -127,6 +124,16 @@ export class VisitorPassesService {
       const qr = this.credentials.generateQrToken();
       try {
         const pass = await this.prisma.$transaction(async (tx) => {
+          // Count and insert under a per-flat lock: checked outside the transaction, parallel
+          // requests all saw the same count and together blew through the daily invitation cap.
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('visitor-pass-create'), hashtext(${dto.flatId}))`;
+          const recent = await tx.visitorPass.count({
+            where: { flatId: dto.flatId, createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) } },
+          });
+          if (recent >= policy.maxPassesPerFlatPerDay) {
+            throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
+          }
+
           let visitor = await tx.visitor.findFirst({
             where: {
               societyId: context.societyId,
@@ -162,6 +169,7 @@ export class VisitorPassesService {
                     type: pin.type,
                     credentialHash: this.credentials.hash(pin.plaintext),
                     keyId: this.credentials.keyVersion,
+                    societyId: context.societyId,
                   },
                   {
                     type: qr.type,
@@ -204,6 +212,7 @@ export class VisitorPassesService {
               visitorPhone: phone,
               hostUserId: caller.sub,
               pin: pin.plaintext,
+              qrToken: qr.plaintext,
               validFrom,
               validUntil,
               passId: pass.id,
@@ -268,19 +277,64 @@ export class VisitorPassesService {
       }
     }
 
-    const rows = await this.prisma.visitorPass.findMany({
-      where,
-      include: passInclude,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-      take: Math.min(limit * 3, 300),
-    });
-    let views = rows.map((pass) => this.toView(pass));
-    if (query.status) views = views.filter((view) => view.effectiveStatus === query.status);
-    const items = views.slice(0, limit);
+    const items: PassView[] = [];
+    let currentCursor = query.cursor;
+    let nextCursor: string | null = null;
+    const batchSize = Math.max(limit * 2, 50);
+    const maxScan = 500;
+    let totalScanned = 0;
+    let hasMoreInDb = false;
+
+    while (items.length < limit && totalScanned < maxScan) {
+      const takeCount = Math.min(batchSize, maxScan - totalScanned) + 1;
+      const rows = await this.prisma.visitorPass.findMany({
+        where,
+        include: passInclude,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(currentCursor ? { cursor: { id: currentCursor }, skip: 1 } : {}),
+        take: takeCount,
+      });
+
+      if (rows.length === 0) {
+        hasMoreInDb = false;
+        break;
+      }
+
+      hasMoreInDb = rows.length === takeCount;
+      const candidates = hasMoreInDb ? rows.slice(0, -1) : rows;
+      totalScanned += candidates.length;
+
+      let stoppedAtRowId: string | null = null;
+      for (const row of candidates) {
+        const view = this.toView(row);
+        if (!query.status || view.effectiveStatus === query.status) {
+          items.push(view);
+          if (items.length === limit) {
+            stoppedAtRowId = row.id;
+            break;
+          }
+        }
+      }
+
+      if (items.length === limit) {
+        const stoppedIndex = candidates.findIndex((r) => r.id === stoppedAtRowId);
+        const remainingInCandidates = candidates.slice(stoppedIndex + 1);
+        const hasMoreAfterStopped = remainingInCandidates.length > 0 || hasMoreInDb;
+        nextCursor = hasMoreAfterStopped ? stoppedAtRowId : null;
+        break;
+      }
+
+      currentCursor = candidates[candidates.length - 1]?.id;
+      if (!hasMoreInDb) break;
+    }
+
+    if (items.length < limit && hasMoreInDb && currentCursor) {
+      nextCursor = currentCursor;
+    }
+
     return {
       items,
-      nextCursor: rows.length > limit ? rows[limit - 1]?.id ?? null : null,
+      nextCursor,
     };
   }
 
@@ -294,88 +348,162 @@ export class VisitorPassesService {
     caller: JwtUser,
     passId: string,
     dto: { decision: 'APPROVED' | 'REJECTED'; reason?: string },
-  ) {
+  ): Promise<ApprovedPassResult> {
     const pass = await this.loadPassOr404(passId);
     const context = await this.assertCanManage(caller, pass);
     if (pass.status !== 'PENDING_APPROVAL') {
       throw AppException.conflict('NOT_PENDING', 'Pass is not awaiting approval');
     }
     const nextStatus = dto.decision === 'APPROVED' ? 'ACTIVE' : 'REVOKED';
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const changed = await tx.visitorPass.updateMany({
-        where: { id: passId, status: 'PENDING_APPROVAL' },
-        data: {
-          status: nextStatus,
-          ...(nextStatus === 'REVOKED' ? { revokedAt: new Date(), revokedBy: caller.sub } : {}),
-        },
-      });
-      if (changed.count !== 1) {
-        throw AppException.conflict('NOT_PENDING', 'Pass is no longer awaiting approval');
+
+    for (let attempt = 0; attempt < MAX_CREDENTIAL_ATTEMPTS; attempt += 1) {
+      let pin: GeneratedCredential | null = null;
+      let qr: GeneratedCredential | null = null;
+      if (dto.decision === 'APPROVED') {
+        pin = this.credentials.generatePin();
+        qr = this.credentials.generateQrToken();
       }
-      await tx.visitorApproval.create({
-        data: {
-          passId,
-          decidedById: caller.sub,
-          decision: dto.decision,
-          reason: dto.reason?.trim() || null,
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          societyId: pass.societyId,
-          actorUserId: caller.sub,
-          actorRole: context.role,
-          action: `VISITOR_PASS_${dto.decision}`,
-          entityType: 'VisitorPass',
-          entityId: passId,
-          meta: { reason: dto.reason || null },
-        },
-      });
-      return tx.visitorPass.findUniqueOrThrow({ where: { id: passId }, include: passInclude });
-    });
 
-    const view = this.toView(updated);
+      try {
+        const { updated, newCredentials } = await this.prisma.$transaction(
+          async (tx) => {
+            const changed = await tx.visitorPass.updateMany({
+              where: { id: passId, status: 'PENDING_APPROVAL' },
+              data: {
+                status: nextStatus,
+                ...(nextStatus === 'REVOKED' ? { revokedAt: new Date(), revokedBy: caller.sub } : {}),
+              },
+            });
+            if (changed.count !== 1) {
+              throw AppException.conflict('NOT_PENDING', 'Pass is no longer awaiting approval');
+            }
 
-    if (this.notifications) {
-      if (nextStatus === 'ACTIVE') {
-        this.notifications
-          .notifyPassApproved({
-            societyId: view.societyId,
-            flatNumber: view.flat.flatNumber,
-            visitorName: view.visitor.name,
-            visitorPhone: view.visitor.phone,
-            hostUserId: pass.hostUserId,
-            validFrom: view.validFrom,
-            validUntil: view.validUntil,
-            passId: view.id,
-          })
-          .catch((err) => this.logger.warn(`Failed to notify pass approved: ${String(err)}`));
-      } else {
-        this.notifications
-          .notifyPassRevoked({
-            societyId: view.societyId,
-            flatNumber: view.flat.flatNumber,
-            visitorName: view.visitor.name,
-            visitorPhone: view.visitor.phone,
-            hostUserId: pass.hostUserId,
-            passId: view.id,
-          })
-          .catch((err) => this.logger.warn(`Failed to notify pass rejected: ${String(err)}`));
+            let newCredentials: { pin: string; qrToken: string } | null = null;
+            if (dto.decision === 'APPROVED' && pin && qr) {
+              const existingCredsCount = await tx.visitorPassCredential.count({ where: { passId } });
+              if (existingCredsCount === 0) {
+                await tx.visitorPassCredential.createMany({
+                  data: [
+                    {
+                      passId,
+                      type: pin.type,
+                      credentialHash: this.credentials.hash(pin.plaintext),
+                      keyId: this.credentials.keyVersion,
+                      societyId: pass.societyId,
+                    },
+                    {
+                      passId,
+                      type: qr.type,
+                      credentialHash: this.credentials.hash(qr.plaintext),
+                      keyId: this.credentials.keyVersion,
+                      societyId: pass.societyId,
+                    },
+                  ],
+                });
+                newCredentials = { pin: pin.plaintext, qrToken: qr.plaintext };
+              }
+            }
+
+            const updatedPass = await tx.visitorPass.findUniqueOrThrow({
+              where: { id: passId },
+              include: passInclude,
+            });
+
+            await tx.visitorApproval.create({
+              data: {
+                passId,
+                decidedById: caller.sub,
+                decision: dto.decision,
+                reason: dto.reason?.trim() || null,
+              },
+            });
+
+            await tx.auditLog.create({
+              data: {
+                societyId: pass.societyId,
+                actorUserId: caller.sub,
+                actorRole: context.role,
+                action: `VISITOR_PASS_${dto.decision}`,
+                entityType: 'VisitorPass',
+                entityId: passId,
+                meta: {
+                  reason: dto.reason || null,
+                  // Credentials are returned once to the approver and sent to the visitor.
+                  ...(newCredentials ? { credentialsReturnedToApprover: true } : {}),
+                },
+              },
+            });
+
+            return { updated: updatedPass, newCredentials };
+          },
+        );
+
+        const view = this.toView(updated);
+
+        if (this.notifications) {
+          if (nextStatus === 'ACTIVE') {
+            this.notifications
+              .notifyPassApproved({
+                societyId: view.societyId,
+                flatNumber: view.flat.flatNumber,
+                visitorName: view.visitor.name,
+                visitorPhone: view.visitor.phone,
+                hostUserId: pass.hostUserId,
+                pin: newCredentials?.pin,
+                qrToken: newCredentials?.qrToken,
+                validFrom: view.validFrom,
+                validUntil: view.validUntil,
+                passId: view.id,
+              })
+              .catch((err) => this.logger.warn(`Failed to notify pass approved: ${String(err)}`));
+          } else {
+            this.notifications
+              .notifyPassRevoked({
+                societyId: view.societyId,
+                flatNumber: view.flat.flatNumber,
+                visitorName: view.visitor.name,
+                visitorPhone: view.visitor.phone,
+                hostUserId: pass.hostUserId,
+                passId: view.id,
+              })
+              .catch((err) => this.logger.warn(`Failed to notify pass rejected: ${String(err)}`));
+          }
+        }
+
+        // Both sides see the credentials: the approver here (once; only hashes are stored) and
+        // the visitor via SMS/WhatsApp (PIN plus a link that renders the QR).
+        if (newCredentials) {
+          return {
+            ...view,
+            credentials: newCredentials,
+          };
+        }
+
+        return view;
+      } catch (error) {
+        if (this.isCredentialCollision(error) && attempt < MAX_CREDENTIAL_ATTEMPTS - 1) {
+          continue;
+        }
+        throw error;
       }
     }
-
-    return view;
+    throw AppException.conflict(
+      'CREDENTIAL_GENERATION_FAILED',
+      'Could not allocate a unique pass credential. Try again.',
+    );
   }
 
   async revoke(caller: JwtUser, passId: string, reason?: string) {
     const pass = await this.loadPassOr404(passId);
     const context = await this.assertCanManage(caller, pass);
     if (pass.status === 'REVOKED') return this.viewPass(passId);
-    await this.prisma.$transaction(async (tx) => {
-      await tx.visitorPass.update({
-        where: { id: passId },
+    const revokedNow = await this.prisma.$transaction(async (tx) => {
+      // Conditional so a concurrent revoke cannot overwrite the first revoker or double-audit/notify.
+      const changed = await tx.visitorPass.updateMany({
+        where: { id: passId, status: { not: 'REVOKED' } },
         data: { status: 'REVOKED', revokedAt: new Date(), revokedBy: caller.sub },
       });
+      if (changed.count !== 1) return false;
       await tx.auditLog.create({
         data: {
           societyId: pass.societyId,
@@ -387,11 +515,12 @@ export class VisitorPassesService {
           meta: { reason: reason?.trim() || null },
         },
       });
+      return true;
     });
 
     const view = await this.viewPass(passId);
 
-    if (this.notifications) {
+    if (revokedNow && this.notifications) {
       this.notifications
         .notifyPassRevoked({
           societyId: view.societyId,
@@ -477,7 +606,7 @@ export class VisitorPassesService {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
     const target = error.meta?.target;
     const fields = Array.isArray(target) ? target.join(',') : String(target ?? '');
-    return fields.includes('credentialHash');
+    return fields.includes('credentialHash') || (typeof error.message === 'string' && error.message.includes('credentialHash'));
   }
 }
 
