@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 const RESIDENT = { email: 'resident.a1@societyos.dev', password: 'Society#2026' };
 
 test.describe('Visitor Self-Registration & Relatives Management Flows', () => {
-  test('visitor self-registration portal issues active pass with PIN and QR code', async ({ page }) => {
+  test('visitor self-registration portal issues a pass pending resident approval', async ({ page }) => {
     await page.goto('/visitor-register');
 
     // Verify page loaded
@@ -16,9 +16,10 @@ test.describe('Visitor Self-Registration & Relatives Management Flows', () => {
     // Submit self-registration
     await page.getByRole('button', { name: /Generate Visitor Pass & PIN/i }).click();
 
-    // Verify modal with PIN and QR code appears
+    // Public self-registration needs resident approval; credentials are withheld until then.
     await expect(page.getByRole('heading', { name: /Gate Entry Pass Issued/i })).toBeVisible();
-    await expect(page.getByText(/6-Digit Touchscreen Keypad PIN/i)).toBeVisible();
+    await expect(page.getByText(/Pass Pending Resident Approval/i)).toBeVisible();
+    await expect(page.getByText(/6-Digit Touchscreen Keypad PIN/i)).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Done/i })).toBeVisible();
 
     await page.getByRole('button', { name: /Done/i }).click();
