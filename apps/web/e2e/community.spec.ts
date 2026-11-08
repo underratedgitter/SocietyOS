@@ -174,7 +174,8 @@ test('society operations lifecycle: notice board circulars, maintenance tickets,
   await expect(settleBtn).toBeVisible({ timeout: 15_000 });
   await settleBtn.click();
   await expect(page.getByRole('dialog', { name: /Settle Bill/ })).toBeVisible();
-  await page.getByRole('button', { name: /Confirm (Payment|Manual Ref)/i }).click();
+  // Residents pay through the gateway flow; manual settlement is admin-only.
+  await page.getByRole('button', { name: /Pay Online/i }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByText('PAID').first()).toBeVisible();
 
