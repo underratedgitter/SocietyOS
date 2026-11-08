@@ -639,13 +639,13 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
         id: 'inv-1',
         status: 'PAID',
         paidAt: new Date(),
-        paidById: residentUser1.sub,
+        paidById: adminUser.sub,
         paymentReference: 'UPI-12345',
         flat: { id: FLAT_101, flatNumber: '101', building: { name: 'Tower A' } },
         paidBy: { id: residentUser1.sub, name: 'Resident 1', email: 'res1@a.com' },
       });
 
-      const res = await communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {
+      const res = await communityService.recordPayment(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'inv-1', {
         paymentReference: 'UPI-12345',
       });
 
@@ -658,7 +658,7 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       );
     });
 
-    it('prevents resident from paying an invoice for another flat', async () => {
+    it('forbids a resident from manually settling an invoice, even for their own flat', async () => {
       mockPrisma.maintenanceInvoice.findUnique.mockResolvedValue({
         id: 'inv-1',
         societyId: SOCIETY_A,
@@ -667,15 +667,22 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
         status: 'PENDING',
         flat: { id: FLAT_101, building: { societyId: SOCIETY_A } },
       });
-      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue(null);
+      mockPrisma.residentFlatMembership.findFirst.mockResolvedValue({
+        id: 'rfm-1',
+        flatId: FLAT_101,
+        userId: residentUser1.sub,
+      });
 
       await expect(
-        communityService.recordPayment(residentUser2, 'RESIDENT', SOCIETY_A, 'inv-1', {}),
+        communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {
+          paymentReference: 'FAKE-REF',
+        }),
       ).rejects.toThrow(
         expect.objectContaining({
-          response: expect.objectContaining({ code: 'NOT_YOUR_FLAT' }),
+          response: expect.objectContaining({ code: 'FORBIDDEN_ROLE' }),
         }),
       );
+      expect(mockPrisma.maintenanceInvoice.update).not.toHaveBeenCalled();
     });
 
     it('rejects paying an already settled invoice', async () => {
@@ -689,7 +696,7 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       });
 
       await expect(
-        communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {}),
+        communityService.recordPayment(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'inv-1', {}),
       ).rejects.toThrow(
         expect.objectContaining({
           response: expect.objectContaining({ code: 'INVOICE_ALREADY_PAID' }),
@@ -708,7 +715,7 @@ describe('Stage 6 Community Life Service Suite (Announcements, Maintenance, Amen
       });
 
       await expect(
-        communityService.recordPayment(residentUser1, 'RESIDENT', SOCIETY_A, 'inv-1', {}),
+        communityService.recordPayment(adminUser, 'SOCIETY_ADMIN', SOCIETY_A, 'inv-1', {}),
       ).rejects.toThrow(
         expect.objectContaining({
           response: expect.objectContaining({ code: 'INVOICE_CANCELLED' }),

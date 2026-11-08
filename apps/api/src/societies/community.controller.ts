@@ -170,7 +170,7 @@ export class CommunityController {
   }
 
   @Post('invoices/:invoiceId/pay')
-  @RequireRoles('SOCIETY_ADMIN', 'RESIDENT')
+  @RequireRoles('SOCIETY_ADMIN')
   payInvoice(
     @CurrentUser() user: JwtUser,
     @Req() req: AuthedRequest,

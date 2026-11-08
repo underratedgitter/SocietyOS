@@ -256,7 +256,7 @@ describe('Concurrency & Scale Stress Suite (Stage 10)', () => {
 
     for (let i = 0; i < CONCURRENCY; i++) {
       promises.push(
-        communityService.recordPayment(residentUser, 'RESIDENT', 'soc-alpha', 'inv-race-1', {
+        communityService.recordPayment(residentUser, 'SOCIETY_ADMIN', 'soc-alpha', 'inv-race-1', {
           paidAt: new Date().toISOString(),
           paymentReference: `REF-${i + 1}`,
         }),

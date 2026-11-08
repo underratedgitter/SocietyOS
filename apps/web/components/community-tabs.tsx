@@ -1139,7 +1139,6 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [payingInvoice, setPayingInvoice] = useState<MaintenanceInvoice | null>(null);
-  const [paymentRef, setPaymentRef] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const load = async () => {
@@ -1165,15 +1164,25 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
     if (!payingInvoice) return;
     setSubmitting(true);
     try {
-      await apiRequest(`/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/pay`, {
-        method: 'POST',
-        body: JSON.stringify({ paymentReference: paymentRef.trim() || undefined }),
-      });
+      const order = await apiRequest<{ orderId: string }>(
+        `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/order`,
+        { method: 'POST' },
+      );
+      await apiRequest(
+        `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/verify`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            razorpayOrderId: order.orderId,
+            razorpayPaymentId: `pay_${Date.now()}`,
+            razorpaySignature: 'mock_sig_ok',
+          }),
+        },
+      );
       setPayingInvoice(null);
-      setPaymentRef('');
       await load();
     } catch (err: any) {
-      alert(err?.message || 'Payment failed');
+      alert(err?.message || 'Payment gateway failed');
     } finally {
       setSubmitting(false);
     }
@@ -1241,10 +1250,7 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
                     <button
                       className="btn btn-primary btn-small"
                       type="button"
-                      onClick={() => {
-                        setPayingInvoice(inv);
-                        setPaymentRef(`UPI-${Date.now().toString().slice(-6)}`);
-                      }}
+                      onClick={() => setPayingInvoice(inv)}
                     >
                       <CreditCard size={14} /> Settle Bill
                     </button>
@@ -1267,57 +1273,12 @@ export function ResidentInvoicesView({ societyId }: { societyId: string }) {
                 Pay maintenance dues for <strong>{getFlatDisplay(payingInvoice.flat)}</strong>.
               </p>
             </div>
-            <div className="field">
-              <label className="label" htmlFor="payment-ref">Payment Reference / UPI Transaction ID</label>
-              <input
-                id="payment-ref"
-                className="input"
-                type="text"
-                placeholder="e.g. UPI-987654-SBI"
-                value={paymentRef}
-                onChange={(e) => setPaymentRef(e.target.value)}
-              />
-            </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button className="btn btn-ghost" type="button" onClick={() => setPayingInvoice(null)}>
                 Cancel
               </button>
-              <button
-                className="btn btn-primary"
-                type="button"
-                disabled={submitting}
-                onClick={async () => {
-                  if (!payingInvoice) return;
-                  setSubmitting(true);
-                  try {
-                    const order = await apiRequest<{ orderId: string }>(
-                      `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/order`,
-                      { method: 'POST' },
-                    );
-                    await apiRequest(
-                      `/api/v1/societies/${societyId}/invoices/${payingInvoice.id}/payment/razorpay/verify`,
-                      {
-                        method: 'POST',
-                        body: JSON.stringify({
-                          razorpayOrderId: order.orderId,
-                          razorpayPaymentId: `pay_${Date.now()}`,
-                          razorpaySignature: 'mock_sig_ok',
-                        }),
-                      },
-                    );
-                    setPayingInvoice(null);
-                    await load();
-                  } catch (err: any) {
-                    alert(err?.message || 'Payment gateway failed');
-                  } finally {
-                    setSubmitting(false);
-                  }
-                }}
-              >
+              <button className="btn btn-primary" type="submit" disabled={submitting}>
                 {submitting ? 'Processing...' : 'Pay Online (Razorpay / UPI)'}
-              </button>
-              <button className="btn" type="submit" disabled={submitting} aria-label="Confirm Payment">
-                {submitting ? 'Confirming...' : 'Confirm Payment'}
               </button>
             </div>
           </form>

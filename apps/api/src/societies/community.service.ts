@@ -480,6 +480,11 @@ export class CommunityService {
     invoiceId: string,
     dto: RecordInvoicePaymentDto,
   ) {
+    // Manual settlement bypasses the payment gateway; residents must pay via the payments module.
+    if (role !== 'SOCIETY_ADMIN') {
+      throw AppException.forbidden('FORBIDDEN_ROLE', 'Only society administrators can manually settle invoices');
+    }
+
     const existing = await this.prisma.maintenanceInvoice.findUnique({
       where: { id: invoiceId },
       include: { flat: { include: { building: true } } },
@@ -494,14 +499,6 @@ export class CommunityService {
 
     if (existing.status === 'CANCELLED') {
       throw AppException.unprocessable('INVOICE_CANCELLED', 'Cannot pay a cancelled invoice');
-    }
-
-    if (role !== 'SOCIETY_ADMIN' && role !== 'RESIDENT') {
-      throw AppException.forbidden('FORBIDDEN_ROLE', 'Only residents and administrators can settle invoices');
-    }
-
-    if (role === 'RESIDENT') {
-      await this.authz.assertResidentOfFlat(user.sub, existing.flatId);
     }
 
     const paidAt = dto.paidAt ? new Date(dto.paidAt) : new Date();
