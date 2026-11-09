@@ -24,6 +24,69 @@ export function assertReadOnlySelect(query: string): void {
   if (hit) throw new ConfigError(`query is not read-only (found "${hit[0]}")`);
 }
 
+/**
+ * Validates that the outer query contains an ORDER BY clause with the cursor column
+ * ascending as its first ordering key.
+ */
+export function assertCursorOrderBy(query: string, cursorColumn: string): void {
+  const withoutLiterals = query.replace(/'(?:[^']|'')*'/g, '0');
+  let depth = 0;
+  let lastOuterOrderByIndex = -1;
+
+  for (let i = 0; i < withoutLiterals.length; i++) {
+    const ch = withoutLiterals[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0) {
+      const match = withoutLiterals.slice(i).match(/^order\s+by\b/i);
+      if (match) {
+        lastOuterOrderByIndex = i + match[0].length;
+      }
+    }
+  }
+
+  if (lastOuterOrderByIndex === -1) {
+    throw new ConfigError('query must contain ORDER BY on the cursor column');
+  }
+
+  let end = withoutLiterals.length;
+  depth = 0;
+  for (let i = lastOuterOrderByIndex; i < withoutLiterals.length; i++) {
+    const ch = withoutLiterals[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0) {
+      if (ch === ',' || ch === ';') {
+        end = i;
+        break;
+      }
+      const rem = withoutLiterals.slice(i);
+      if (/^\b(limit|offset|fetch)\b/i.test(rem)) {
+        end = i;
+        break;
+      }
+    }
+  }
+
+  const firstKey = withoutLiterals.slice(lastOuterOrderByIndex, end).trim();
+  if (!firstKey) {
+    throw new ConfigError('query must contain ORDER BY on the cursor column');
+  }
+
+  if (/\bdesc\b/i.test(firstKey)) {
+    throw new ConfigError(`query must order cursor column "${cursorColumn}" ascending, found DESC`);
+  }
+
+  const colExpr = firstKey.replace(/\basc\b/i, '').trim();
+  const parts = colExpr.split('.');
+  const lastPart = (parts[parts.length - 1] ?? '').trim();
+  const cleanCol = lastPart.replace(/^[\["`]|[\s\]"`]+$/g, '').trim();
+
+  if (!/^[A-Za-z0-9_]+$/.test(cleanCol) || cleanCol.toLowerCase() !== cursorColumn.toLowerCase()) {
+    throw new ConfigError(`query must order cursor column "${cursorColumn}" ascending as the first ordering key`);
+  }
+}
+
 export type Dialect = 'mssql' | 'mysql' | 'postgres';
 
 export interface RewrittenQuery {

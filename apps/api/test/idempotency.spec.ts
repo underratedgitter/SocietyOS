@@ -1,8 +1,12 @@
 import { Prisma } from '@prisma/client';
 import { AppException } from '../src/common/app.exception';
-import { IdempotencyService } from '../src/visitors/idempotency.service';
 import { VisitorPassesController } from '../src/visitors/visitor-passes.controller';
 import { VisitorPassesService } from '../src/visitors/visitor-passes.service';
+import { IdempotencyService, writeIdempotent } from '../src/visitors/idempotency.service';
+import { CredentialsService } from '../src/visitors/credentials.service';
+import { PrismaService } from '../src/common/prisma.service';
+import { AuthzService } from '../src/common/authz.service';
+import { AuditService } from '../src/common/audit.service';
 import { CreateVisitorPassDto } from '../src/visitors/visitor-passes.dto';
 import { JwtUser } from '../src/auth/jwt-auth.guard';
 
@@ -82,118 +86,28 @@ describe('IdempotencyService', () => {
     ).rejects.toBeInstanceOf(AppException);
   });
 
-  it('swallows a concurrent duplicate insert', async () => {
-    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
-      code: 'P2002',
-      clientVersion: '6.16.0',
-    });
-    const { service } = serviceWith({
-      findUnique: jest.fn(),
-      create: jest.fn().mockRejectedValue(duplicate),
-    });
-
-    await expect(
-      service.save('key', 'visitor-passes.create', 'abc', { ok: true }),
-    ).resolves.toBeUndefined();
-  });
-
-  it('does not swallow unrelated database errors', async () => {
-    const { service } = serviceWith({
-      findUnique: jest.fn(),
-      create: jest.fn().mockRejectedValue(new Error('database down')),
-    });
-
-    await expect(
-      service.save('key', 'visitor-passes.create', 'abc', { ok: true }),
-    ).rejects.toThrow('database down');
-  });
-
-  it('treats expired record as absent even if payload or endpoint differs', async () => {
-    const expiredRecord = {
-      endpoint: 'visitor-passes.create',
-      requestHash: 'hash-original',
-      responseBody: {},
-      expiresAt: new Date(Date.now() - 10_000),
-    };
-    const { service } = serviceWith({
-      findUnique: jest.fn().mockResolvedValue(expiredRecord),
-      create: jest.fn(),
-    });
-
-    await expect(
-      service.get('key', 'visitor-passes.create', 'hash-different'),
-    ).resolves.toBeNull();
-
-    await expect(
-      service.get('key', 'other.endpoint', 'hash-original'),
-    ).resolves.toBeNull();
-  });
-
-  it('refreshes expired record on P2002 to prevent repeated duplicate creations', async () => {
-    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
-      code: 'P2002',
-      clientVersion: '6.16.0',
-    });
-    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
-    const { service } = serviceWith({
-      findUnique: jest.fn(),
-      create: jest.fn().mockRejectedValue(duplicate),
-      updateMany,
-    });
-
-    await service.save('key', 'visitor-passes.create', 'abc', { ok: true });
-    expect(updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ key: 'key' }),
-        data: expect.objectContaining({ requestHash: 'abc' }),
-      }),
+  it('writeIdempotent upserts so an expired row for the key cannot abort the transaction', async () => {
+    const upsert = jest.fn().mockResolvedValue({});
+    await writeIdempotent(
+      { idempotencyRecord: { upsert } } as unknown as Prisma.TransactionClient,
+      'key',
+      'visitor-passes.create',
+      'abc',
+      { ok: true },
+      24,
     );
-  });
-
-  it('propagates error when updateMany fails during P2002 conflict handling', async () => {
-    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
-      code: 'P2002',
-      clientVersion: '6.16.0',
-    });
-    const updateMany = jest.fn().mockRejectedValue(new Error('updateMany failed'));
-    const { service } = serviceWith({
-      findUnique: jest.fn(),
-      create: jest.fn().mockRejectedValue(duplicate),
-      updateMany,
-    });
-
-    await expect(
-      service.save('key', 'visitor-passes.create', 'abc', { ok: true }),
-    ).rejects.toThrow('updateMany failed');
-  });
-
-  it('calls updateMany directly on idempotencyRecord without delegate guard', async () => {
-    const duplicate = new Prisma.PrismaClientKnownRequestError('duplicate', {
-      code: 'P2002',
-      clientVersion: '6.16.0',
-    });
-    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
-    const { service } = serviceWith({
-      findUnique: jest.fn(),
-      create: jest.fn().mockRejectedValue(duplicate),
-      updateMany,
-    });
-
-    await service.save('key-regression', 'visitor-passes.create', 'fingerprint-123', { ok: true });
-    expect(updateMany).toHaveBeenCalledWith({
-      where: { key: 'key-regression', expiresAt: { lte: expect.any(Date) } },
-      data: {
-        endpoint: 'visitor-passes.create',
-        requestHash: 'fingerprint-123',
-        responseBody: { ok: true },
-        expiresAt: expect.any(Date),
-      },
-    });
+    const args = upsert.mock.calls[0][0];
+    expect(args.where).toEqual({ key: 'key' });
+    expect(args.create).toMatchObject({ key: 'key', endpoint: 'visitor-passes.create', requestHash: 'abc', responseBody: { ok: true } });
+    expect(args.update).toMatchObject({ endpoint: 'visitor-passes.create', requestHash: 'abc', responseBody: { ok: true } });
+    const ttlMs = (args.create.expiresAt as Date).getTime() - Date.now();
+    expect(ttlMs).toBeGreaterThan(23.9 * 3600 * 1000);
+    expect(ttlMs).toBeLessThanOrEqual(24 * 3600 * 1000);
   });
 });
 
 describe('VisitorPassesController Idempotency Credential Protection', () => {
-  it('saves responseBody without credentials or pin/qrToken and sets 24h TTL', async () => {
+  it('delegates a fresh key to the transactional create with a 24h TTL and returns credentials once', async () => {
     const mockPasses = {
       create: jest.fn().mockResolvedValue({
         pass: { id: 'pass-999', status: 'ACTIVE' },
@@ -203,35 +117,24 @@ describe('VisitorPassesController Idempotency Credential Protection', () => {
     const mockIdempotency = {
       fingerprint: jest.fn().mockReturnValue('mock-fingerprint'),
       get: jest.fn().mockResolvedValue(null),
-      save: jest.fn().mockResolvedValue(undefined),
     };
     const controller = new VisitorPassesController(
       mockPasses as unknown as VisitorPassesService,
       mockIdempotency as unknown as IdempotencyService,
     );
     const user = { sub: 'user-1' } as unknown as JwtUser;
-    const dto = {
-      flatId: 'flat-1',
-      validUntil: new Date(Date.now() + 72 * 3600 * 1000).toISOString(),
-    } as unknown as CreateVisitorPassDto;
+    const dto = { flatId: 'flat-1' } as unknown as CreateVisitorPassDto;
 
     const result = (await controller.create(user, dto, 'idem-key-12345')) as {
-      pass: { id: string; status: string };
       credentials?: { pin?: string; qrToken?: string };
     };
 
-    // First call returns credentials to creator
     expect(result.credentials).toEqual({ pin: '654321', qrToken: 'qr-secret-123' });
-
-    // But idempotency.save must NOT contain pin or qrToken and must have 24h TTL
-    expect(mockIdempotency.save).toHaveBeenCalledTimes(1);
-    const [savedKey, savedEndpoint, savedFingerprint, savedBody, savedTtl] = mockIdempotency.save.mock.calls[0];
-    expect(savedKey).toBe('visitor-passes:user-1:idem-key-12345');
-    expect(savedTtl).toBe(24);
-    expect(savedBody.credentials).toBeUndefined();
-    expect(JSON.stringify(savedBody)).not.toContain('654321');
-    expect(JSON.stringify(savedBody)).not.toContain('qr-secret-123');
-    expect(savedBody.credentialsAlreadyIssued).toBe(true);
+    expect(mockPasses.create).toHaveBeenCalledWith(user, dto, {
+      key: 'visitor-passes:user-1:idem-key-12345',
+      fingerprint: 'mock-fingerprint',
+      ttlHours: 24,
+    });
   });
 
   it('on replay returns pass without credentials and credentialsAlreadyIssued: true', async () => {
@@ -263,3 +166,147 @@ describe('VisitorPassesController Idempotency Credential Protection', () => {
   });
 });
 
+describe('VisitorPassesService idempotent create', () => {
+  const SOCIETY = '11111111-1111-4111-8111-111111111111';
+  const FLAT = '22222222-2222-4222-8222-222222222222';
+  const AP = '33333333-3333-4333-8333-333333333333';
+  const PASS = '55555555-5555-4555-8555-555555555555';
+  const caller: JwtUser = {
+    sub: '44444444-4444-4444-8444-444444444444',
+    email: 'resident@example.com',
+    name: 'Resident',
+    isPlatformAdmin: false,
+    mustChangePassword: false,
+  };
+  const idem = { key: 'visitor-passes:u:idem-key-12345', fingerprint: 'fp-1', ttlHours: 24 };
+  const dto = (): CreateVisitorPassDto => ({
+    flatId: FLAT,
+    visitor: { name: 'Guest' },
+    category: 'FRIEND' as CreateVisitorPassDto['category'],
+    validFrom: new Date(Date.now() + 60_000).toISOString(),
+    validUntil: new Date(Date.now() + 3_600_000).toISOString(),
+    accessPointIds: [AP],
+  });
+  const passRow = {
+    id: PASS,
+    societyId: SOCIETY,
+    flatId: FLAT,
+    hostUserId: caller.sub,
+    status: 'ACTIVE',
+    category: 'FRIEND',
+    validFrom: new Date(Date.now() + 60_000),
+    validUntil: new Date(Date.now() + 3_600_000),
+    maxUses: 1,
+    usedCount: 0,
+    createdAt: new Date(),
+    revokedAt: null,
+    visitor: { id: 'v-1', name: 'Guest', phone: null },
+    flat: { id: FLAT, flatNumber: '101', building: { name: 'A' } },
+    host: { id: caller.sub, name: 'Resident' },
+    accessPoints: [],
+  };
+
+  function build(existing: unknown) {
+    const calls: string[] = [];
+    let inTx = false;
+    const tx = {
+      $executeRaw: jest.fn(async (sql: TemplateStringsArray, ...values: unknown[]) => {
+        calls.push(`lock:${sql.join('?').includes("'idempotency'") ? 'key' : 'flat'}:${String(values[0])}`);
+        return 1;
+      }),
+      idempotencyRecord: {
+        findUnique: jest.fn(async () => {
+          calls.push(`read:${inTx}`);
+          return existing;
+        }),
+        upsert: jest.fn(async () => {
+          calls.push(`write:${inTx}`);
+          return {};
+        }),
+      },
+      visitorPass: {
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn(async () => {
+          calls.push(`create:${inTx}`);
+          return { id: PASS };
+        }),
+        findUnique: jest.fn(async () => {
+          calls.push(`view:${inTx}`);
+          return passRow;
+        }),
+      },
+      visitor: { findFirst: jest.fn().mockResolvedValue({ id: 'v-1' }), create: jest.fn() },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      society: { findUnique: jest.fn().mockResolvedValue({ settings: {} }) },
+      accessPoint: { findMany: jest.fn().mockResolvedValue([{ id: AP }]) },
+      visitorPass: { findUnique: jest.fn(async () => { calls.push('view:outside'); return passRow; }) },
+      $transaction: jest.fn(async (cb: (client: unknown) => Promise<unknown>) => {
+        inTx = true;
+        try {
+          return await cb(tx);
+        } finally {
+          inTx = false;
+        }
+      }),
+    };
+    const authz = { flat: jest.fn().mockResolvedValue({ role: 'RESIDENT', societyId: SOCIETY, flat: { flatNumber: '101' } }) };
+    const service = new VisitorPassesService(
+      prisma as unknown as PrismaService,
+      authz as unknown as AuthzService,
+      new CredentialsService(),
+      {} as AuditService,
+    );
+    return { service, tx, calls };
+  }
+
+  it('locks the key, creates the pass and stores the sanitized response in one transaction', async () => {
+    const { service, tx, calls } = build(null);
+
+    const result = (await service.create(caller, dto(), idem)) as { pass: { id: string }; credentials: { pin: string; qrToken: string } };
+
+    expect(result.pass.id).toBe(PASS);
+    expect(result.credentials.pin).toMatch(/^\d+$/);
+    expect(calls).toEqual([
+      `lock:key:${idem.key}`,
+      'read:true',
+      `lock:flat:${FLAT}`,
+      'create:true',
+      'view:true',
+      'write:true',
+    ]);
+    const stored = (tx.idempotencyRecord.upsert.mock.calls[0] as unknown as [{ create: { responseBody: unknown; requestHash: string } }])[0].create;
+    expect(stored.requestHash).toBe('fp-1');
+    expect(stored.responseBody).toMatchObject({ pass: { id: PASS }, credentialsAlreadyIssued: true });
+    const serialized = JSON.stringify(stored.responseBody);
+    expect(serialized).not.toContain(result.credentials.pin);
+    expect(serialized).not.toContain(result.credentials.qrToken);
+  });
+
+  it('replays a response committed by a concurrent request instead of creating a duplicate pass', async () => {
+    const cached = { pass: { id: PASS }, credentialsAlreadyIssued: true };
+    const { service, tx } = build({
+      endpoint: 'visitor-passes.create',
+      requestHash: 'fp-1',
+      responseBody: cached,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await expect(service.create(caller, dto(), idem)).resolves.toEqual(cached);
+    expect(tx.visitorPass.create).not.toHaveBeenCalled();
+    expect(tx.idempotencyRecord.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects a different payload under the lock', async () => {
+    const { service, tx } = build({
+      endpoint: 'visitor-passes.create',
+      requestHash: 'other-fp',
+      responseBody: {},
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await expect(service.create(caller, dto(), idem)).rejects.toMatchObject({ code: 'IDEMPOTENCY_PAYLOAD_MISMATCH' });
+    expect(tx.visitorPass.create).not.toHaveBeenCalled();
+  });
+});

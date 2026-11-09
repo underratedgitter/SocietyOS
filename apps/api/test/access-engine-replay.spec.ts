@@ -223,8 +223,42 @@ describe('AccessEngineService replay protection', () => {
       { deviceId: DEVICE, requestId: 'req-bio-1' },
     );
     expect(prisma.idempotencyRecord.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ key: `access-verify:${DEVICE}:req-bio-1`, responseBody: res }),
+      data: expect.objectContaining({ key: `access-verify:${DEVICE}:req-bio-1`, responseBody: { pending: true } }),
     });
+  });
+
+  it('dispatches exactly once for simultaneous identical biometric requests', async () => {
+    const prisma = buildPrisma();
+    let claimed = false;
+    prisma.idempotencyRecord.create.mockImplementation(async () => {
+      if (claimed) throw new Prisma.PrismaClientKnownRequestError('Unique key', { code: 'P2002', clientVersion: '6.16.0' });
+      claimed = true;
+      return {};
+    });
+    prisma.idempotencyRecord.findUnique.mockImplementation(async () => claimed ? {
+      requestHash: credentials.hash('same-face'), responseBody: { pending: true },
+      expiresAt: new Date(Date.now() + 60_000),
+    } : null);
+    const { engine, biometrics } = buildEngine(prisma);
+    const ctx = deviceCtx('parallel-bio', { credentialType: 'FACE', credential: 'same-face' });
+    const results = await Promise.allSettled([engine.verify(ctx), engine.verify(ctx)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(biometrics.verifyResidentBiometric).toHaveBeenCalledTimes(1);
+  });
+
+  it('claims a biometric request before concurrent callers can actuate', async () => {
+    const prisma = buildPrisma();
+    prisma.idempotencyRecord.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique key', { code: 'P2002', clientVersion: '6.16.0' }),
+    );
+    prisma.idempotencyRecord.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      requestHash: credentials.hash('face-template'), responseBody: { pending: true },
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const { engine, biometrics } = buildEngine(prisma);
+    await expect(engine.verify(deviceCtx('bio-race', { credentialType: 'FACE', credential: 'face-template' })))
+      .rejects.toMatchObject({ code: 'REQUEST_IN_PROGRESS' });
+    expect(biometrics.verifyResidentBiometric).not.toHaveBeenCalled();
   });
 
   it('does not reach the biometric reader once the device flood limit is exceeded', async () => {

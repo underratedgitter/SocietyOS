@@ -36,6 +36,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 2 }),
       },
       gateCommand: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: data.id, ...data })),
       },
       biometricTemplate: {
@@ -102,7 +103,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     mockPrisma.user.findUnique.mockResolvedValue({
@@ -132,7 +133,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
     });
 
     const adapter = adapterFactory.get('ap-gate-1');
-    expect(await adapter?.getState()).toBe('OPEN');
+    expect(await adapter?.getState()).not.toBe('OPEN');
     expect(mockPrisma.gateCommand.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -143,6 +144,20 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       }),
     );
     expect(mockMqtt.publishCommand).toHaveBeenCalled();
+  });
+
+  it('rejects a fingerprint enrollment presented as a face', async () => {
+    mockPrisma.biometricTemplate.findFirst.mockResolvedValue({
+      userId: 'user-1', societyId: 'soc-1', type: 'FINGERPRINT',
+      templateHash: 'fingerprint-mismatch', algorithm: 'test', consentGivenAt: new Date(), lawfulBasis: 'consent',
+    });
+    mockPrisma.accessPoint.findFirst.mockResolvedValue({ id: 'ap-gate-1', devices: [] });
+    const result = await biometricsService.verifyResidentBiometric('soc-1', {
+      accessPointId: 'ap-gate-1', type: 'FACE', templateHash: 'fingerprint-mismatch',
+    });
+    expect(result.decision).toBe('DENIED');
+    expect(mockPrisma.gateCommand.create).not.toHaveBeenCalled();
+    expect(mockPrisma.user.findUnique).not.toHaveBeenCalled();
   });
 
   it('returns gateCommand status FAILED with error when GateCommand insertion fails during biometric verify', async () => {
@@ -164,7 +179,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     mockPrisma.user.findUnique.mockResolvedValue({
@@ -193,6 +208,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       error: 'PostgreSQL command write failed',
     });
     expect(mockMqtt.publishCommand).not.toHaveBeenCalled();
+    expect(await adapterFactory.get('ap-gate-1')?.getState()).not.toBe('OPEN');
   });
 
   it('returns gateCommand status FAILED with error when MQTT publish fails during biometric verify', async () => {
@@ -214,7 +230,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     mockPrisma.user.findUnique.mockResolvedValue({
@@ -298,7 +314,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     const verifyResult = await biometricsService.verifyResidentBiometric('soc-1', {
@@ -317,7 +333,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     const overrideResult = await biometricsService.triggerEmergencyOverride(
@@ -356,7 +372,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     const resetResult = await biometricsService.resetEmergencyOverride(
@@ -395,7 +411,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
     mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Database write failure'));
 
@@ -418,7 +434,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
     mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Database write failure'));
 
@@ -463,7 +479,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
     mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Hardware controller offline'));
 
@@ -524,7 +540,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     const adapter = adapterFactory.getOrCreate('ap-gate-1', 'Main Perimeter Boom Barrier', 'BOOM_BARRIER');
@@ -678,7 +694,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
     mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Hardware offline'));
     mockPrisma.accessEvent.create.mockRejectedValueOnce(new Error('AccessEvent database connection lost'));
@@ -710,7 +726,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Main Perimeter Boom Barrier',
       type: 'BOOM_BARRIER',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
     mockPrisma.gateCommand.create.mockRejectedValueOnce(new Error('Reset bus error'));
     mockPrisma.accessEvent.create.mockRejectedValueOnce(new Error('AccessEvent database connection lost'));
@@ -753,7 +769,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     mockPrisma.user.findUnique.mockResolvedValue({
@@ -819,7 +835,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     });
 
     const resultBio = await biometricsService.verifyResidentBiometric('soc-1', {
@@ -873,7 +889,7 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       name: 'Tower A Entrance',
       type: 'DOOR_LOCK',
       societyId: 'soc-1',
-      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } }],
+      devices: [{ deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } }],
     };
 
     it('denies a resident whose only active flat is in another society', async () => {
@@ -980,8 +996,8 @@ describe('Biometrics Service & DPDP Act 2023 Compliance (Unit)', () => {
       mockPrisma.accessPoint.findFirst.mockResolvedValue({
         ...gate,
         devices: [
-          { deviceId: 'dev-controller-1', device: { id: 'dev-controller-1' } },
-          { deviceId: 'dev-reader-2', device: { id: 'dev-reader-2' } },
+          { deviceId: 'dev-controller-1', device: { id: 'dev-controller-1', status: 'ACTIVE' } },
+          { deviceId: 'dev-reader-2', device: { id: 'dev-reader-2', status: 'ACTIVE' } },
         ],
       });
       mockPrisma.user.findUnique.mockResolvedValue({

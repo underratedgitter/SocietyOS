@@ -388,6 +388,18 @@ describe('Notifications Subsystem Suite (SMS, WhatsApp, Push & Outbox Dispatcher
       expect(mockPrisma.notification.create).toHaveBeenCalledTimes(3);
     });
 
+    test.each(['SMS', 'WHATSAPP'])('does not mark %s without a recipient as SENT', async (channel) => {
+      mockPrisma.notification.findMany.mockResolvedValue([{
+        id: 'missing-recipient', channel, template: 'TEST', payload: {}, attempts: 0,
+      }]);
+      mockPrisma.notification.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.user.findUnique.mockResolvedValue(null);
+      await notifications.drain();
+      expect(mockPrisma.notification.update).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ status: 'PENDING', lastError: expect.stringContaining('NO_RECIPIENT') }),
+      }));
+    });
+
     test('drain delivers pending notifications and marks SENT', async () => {
       const mockPending = [
         {

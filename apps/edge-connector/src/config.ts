@@ -1,6 +1,6 @@
 import * as fs from 'fs';
-import { Dialect, assertReadOnlySelect } from './sql-guard';
-import { isValidTimeZone } from './time';
+import { Dialect, assertCursorOrderBy, assertReadOnlySelect } from './sql-guard';
+import { isValidTimeZone, toIsoWithOffset } from './time';
 import { ConfigError, MAX_EVENTS_PER_CALL, VERIFY_METHODS, VerifyMethod } from './types';
 
 export const PLACEHOLDER = 'VERIFY_ON_SITE';
@@ -151,25 +151,41 @@ function parseSql(c: Collector, s: Obj, path: string, env: NodeJS.ProcessEnv, na
     c.add(`${path}.dialect`, 'must be mssql, mysql or postgres');
   }
   const connectionString = secretFromEnv(c, s, 'connectionStringEnv', path, env);
+  const cursorColumn = str(c, s, 'cursorColumn', path);
+  const cursorType = s.cursorType === undefined ? 'number' : s.cursorType;
+  if (cursorType !== 'number' && cursorType !== 'datetime') c.add(`${path}.cursorType`, 'must be "number" or "datetime"');
+  const timezone = str(c, s, 'timezone', path);
+  if (timezone && !isValidTimeZone(timezone)) c.add(`${path}.timezone`, 'is not a valid IANA time zone');
+
   const query = str(c, s, 'query', path);
   if (query && query !== PLACEHOLDER) {
     try {
       assertReadOnlySelect(query);
       if (!/@cursor\b/i.test(query)) c.add(`${path}.query`, 'must reference @cursor');
       if (!/@limit\b/i.test(query)) c.add(`${path}.query`, 'must reference @limit (use TOP (@limit) or LIMIT @limit)');
-      if (!/\border\s+by\b/i.test(query)) c.add(`${path}.query`, 'must contain ORDER BY on the cursor column');
+      if (cursorColumn) {
+        assertCursorOrderBy(query, cursorColumn);
+      } else if (!/\border\s+by\b/i.test(query)) {
+        c.add(`${path}.query`, 'must contain ORDER BY on the cursor column');
+      }
     } catch (e) {
       c.add(`${path}.query`, (e as Error).message);
     }
   }
-  const cursorColumn = str(c, s, 'cursorColumn', path);
-  const cursorType = s.cursorType === undefined ? 'number' : s.cursorType;
-  if (cursorType !== 'number' && cursorType !== 'datetime') c.add(`${path}.cursorType`, 'must be "number" or "datetime"');
-  const timezone = str(c, s, 'timezone', path);
-  if (timezone && !isValidTimeZone(timezone)) c.add(`${path}.timezone`, 'is not a valid IANA time zone');
+
   const initial = s.initialCursor;
-  if (initial !== undefined && typeof initial !== 'string' && typeof initial !== 'number') {
-    c.add(`${path}.initialCursor`, 'must be a string or number');
+  if (initial !== undefined) {
+    if (cursorType === 'datetime') {
+      if (typeof initial !== 'string' || !toIsoWithOffset(initial, timezone && isValidTimeZone(timezone) ? timezone : 'UTC')) {
+        c.add(`${path}.initialCursor`, 'must be a valid datetime string matching the cursor type');
+      }
+    } else if (cursorType === 'number') {
+      const isNum = typeof initial === 'number' && Number.isFinite(initial);
+      const isNumStr = typeof initial === 'string' && initial.trim() !== '' && Number.isFinite(Number(initial));
+      if (!isNum && !isNumStr) {
+        c.add(`${path}.initialCursor`, 'must be a finite number or numeric string matching the cursor type');
+      }
+    }
   }
   const cols = s.columns;
   let columns: SqlSourceConfig['columns'] | null = null;

@@ -15,7 +15,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { JwtUser } from '../auth/jwt-auth.guard';
 import { paramStr } from '../common/params';
 import { AppException } from '../common/app.exception';
-import { VisitorPassesService } from './visitor-passes.service';
+import { PASS_CREATE_ENDPOINT, VisitorPassesService } from './visitor-passes.service';
 import { IdempotencyService } from './idempotency.service';
 import {
   CreateVisitorPassDto,
@@ -52,16 +52,10 @@ export class VisitorPassesController {
     }
     const key = `visitor-passes:${user.sub}:${idempotencyKey}`;
     const fingerprint = this.idempotency.fingerprint(dto);
-    const cached = await this.idempotency.get(key, 'visitor-passes.create', fingerprint);
+    // Fast path for replays; the authoritative check runs again under a lock inside the create transaction.
+    const cached = await this.idempotency.get(key, PASS_CREATE_ENDPOINT, fingerprint);
     if (cached) return cached;
-    const result = await this.passes.create(user, dto);
-    const { credentials: _, ...sanitized } = result;
-    const toCache = {
-      ...sanitized,
-      credentialsAlreadyIssued: true,
-    };
-    await this.idempotency.save(key, 'visitor-passes.create', fingerprint, toCache, 24);
-    return result;
+    return this.passes.create(user, dto, { key, fingerprint, ttlHours: 24 });
   }
 
   @Get('visitor-passes')

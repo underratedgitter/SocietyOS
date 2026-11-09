@@ -8,6 +8,8 @@ import { JwtUser } from '../auth/jwt-auth.guard';
 import { CredentialsService, GeneratedCredential } from './credentials.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { visitorPolicy } from '../societies/policy';
+import { COUNTS_TOWARD_HOST_CAP, lockFlatPassCreation } from './pass-cap';
+import { lockIdempotencyKey, readIdempotent, writeIdempotent } from './idempotency.service';
 import { CreateVisitorPassDto, ListPassesQueryDto } from './visitor-passes.dto';
 
 const MAX_CREDENTIAL_ATTEMPTS = 5;
@@ -30,6 +32,20 @@ export interface PassView {
   createdAt: Date;
   revokedAt?: Date | null;
 }
+
+/** Response replayed for a repeated Idempotency-Key: the pass without its one-time credentials. */
+export interface ReplayedPassResult {
+  pass: PassView;
+  credentialsAlreadyIssued: true;
+}
+
+export interface IdempotentCreate {
+  key: string;
+  fingerprint: string;
+  ttlHours: number;
+}
+
+export const PASS_CREATE_ENDPOINT = 'visitor-passes.create';
 
 export interface ApprovedPassResult extends PassView {
   credentials?: { pin: string; qrToken: string };
@@ -66,7 +82,11 @@ export class VisitorPassesService {
     return 'ACTIVE';
   }
 
-  async create(caller: JwtUser, dto: CreateVisitorPassDto) {
+  async create(
+    caller: JwtUser,
+    dto: CreateVisitorPassDto,
+    idempotency?: IdempotentCreate,
+  ): Promise<{ pass: PassView; credentials: { pin: string; qrToken: string } } | ReplayedPassResult> {
     const context = await this.authz.flat(caller.sub, dto.flatId, ['SOCIETY_ADMIN', 'RESIDENT']);
     const society = await this.prisma.society.findUnique({
       where: { id: context.societyId },
@@ -123,12 +143,24 @@ export class VisitorPassesService {
       const pin = this.credentials.generatePin();
       const qr = this.credentials.generateQrToken();
       try {
-        const pass = await this.prisma.$transaction(async (tx) => {
+        const outcome = await this.prisma.$transaction(async (tx) => {
+          // The key check, the pass and its cached (credential-free) response commit together, so a
+          // retried request either replays that response or waits for the first one to finish.
+          if (idempotency) {
+            await lockIdempotencyKey(tx, idempotency.key);
+            const replay = await readIdempotent<ReplayedPassResult>(
+              tx,
+              idempotency.key,
+              PASS_CREATE_ENDPOINT,
+              idempotency.fingerprint,
+            );
+            if (replay) return { replay };
+          }
           // Count and insert under a per-flat lock: checked outside the transaction, parallel
           // requests all saw the same count and together blew through the daily invitation cap.
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('visitor-pass-create'), hashtext(${dto.flatId}))`;
+          await lockFlatPassCreation(tx, dto.flatId);
           const recent = await tx.visitorPass.count({
-            where: { flatId: dto.flatId, createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) } },
+            where: { flatId: dto.flatId, createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) }, ...COUNTS_TOWARD_HOST_CAP },
           });
           if (recent >= policy.maxPassesPerFlatPerDay) {
             throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
@@ -194,11 +226,25 @@ export class VisitorPassesService {
               meta: { flatId: dto.flatId, category: dto.category, requiresApproval: approvalRequired },
             },
           });
-          return created;
+          const view = await this.viewPass(created.id, tx);
+          if (idempotency) {
+            const cached: ReplayedPassResult = { pass: view, credentialsAlreadyIssued: true };
+            await writeIdempotent(
+              tx,
+              idempotency.key,
+              PASS_CREATE_ENDPOINT,
+              idempotency.fingerprint,
+              cached,
+              idempotency.ttlHours,
+            );
+          }
+          return { pass: created, view };
         });
+        if (outcome.replay) return outcome.replay;
+        const { pass } = outcome;
 
         const result = {
-          pass: await this.viewPass(pass.id),
+          pass: outcome.view,
           credentials: { pin: pin.plaintext, qrToken: qr.plaintext },
         };
 
@@ -270,7 +316,13 @@ export class VisitorPassesService {
       if (scopes.length === 0) return { items: [], nextCursor: null };
       where.OR = scopes;
       if (query.flatId) {
-        if (!ownFlatIds.includes(query.flatId)) {
+        // Staff may filter by any flat of a society they actively serve; anyone else only by their own.
+        const inStaffSociety =
+          staffSocieties.length > 0 &&
+          (await this.prisma.flat.count({
+            where: { id: query.flatId, building: { societyId: { in: staffSocieties } } },
+          })) > 0;
+        if (!inStaffSociety && !ownFlatIds.includes(query.flatId)) {
           throw AppException.forbidden('NOT_YOUR_FLAT', 'You can only view passes for your own flats');
         }
         where.flatId = query.flatId;
@@ -545,8 +597,8 @@ export class VisitorPassesService {
     });
   }
 
-  async viewPass(passId: string): Promise<PassView> {
-    const pass = await this.prisma.visitorPass.findUnique({
+  async viewPass(passId: string, db: Prisma.TransactionClient | PrismaService = this.prisma): Promise<PassView> {
+    const pass = await db.visitorPass.findUnique({
       where: { id: passId },
       include: passInclude,
     });

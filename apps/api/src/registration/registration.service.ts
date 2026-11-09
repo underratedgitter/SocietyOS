@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { VisitorCategory } from '@prisma/client';
+import { Prisma, VisitorCategory } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { AppException } from '../common/app.exception';
 import { PrismaService } from '../common/prisma.service';
@@ -8,6 +8,7 @@ import { CredentialsService } from '../visitors/credentials.service';
 import { RateLimitService } from '../common/rate-limit.service';
 import { AuditService } from '../common/audit.service';
 import { visitorPolicy } from '../societies/policy';
+import { SELF_REGISTER_MAX_PER_FLAT_PER_DAY, SELF_REGISTERED_UNAPPROVED, lockFlatPassCreation } from '../visitors/pass-cap';
 import { getEnv } from '../config';
 import { RegisterUserDto, SelfRegisterVisitorDto } from './registration.dto';
 
@@ -24,6 +25,20 @@ export function publicIpRateLimit(ip: string, strictLimit: number, relaxedLimit:
 }
 
 const BCRYPT_ROUNDS = 12;
+
+/** The email/phone pre-checks race; a concurrent duplicate surfaces as a unique violation, not a 500. */
+function rethrowDuplicateUser(err: unknown): never {
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+    const target = String(err.meta?.target ?? '');
+    if (target.includes('email')) {
+      throw AppException.conflict('EMAIL_IN_USE', 'An account with this email address already exists');
+    }
+    if (target.includes('phone')) {
+      throw AppException.conflict('PHONE_IN_USE', 'An account with this phone number already exists');
+    }
+  }
+  throw err;
+}
 
 @Injectable()
 export class RegistrationService {
@@ -134,7 +149,7 @@ export class RegistrationService {
 
       const tokens = await this.auth.issueSessionTokens(user, userAgent, tx);
       return { user, tokens };
-    });
+    }).catch(rethrowDuplicateUser);
 
     await this.audit.record({
       societyId: dto.societyId,
@@ -184,16 +199,6 @@ export class RegistrationService {
     const policy = visitorPolicy(society.settings);
 
     const now = new Date();
-    const recentPasses = await this.prisma.visitorPass.count({
-      where: {
-        flatId: dto.flatId,
-        createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) },
-      },
-    });
-    if (recentPasses >= policy.maxPassesPerFlatPerDay) {
-      throw AppException.unprocessable('INVITATION_LIMIT', 'Daily visitor pass capacity reached for this flat');
-    }
-
     // Determine duration based on category or requested duration
     let durationMinutes = 240; // 4 hours default
     if (dto.category === 'RELATIVE') {
@@ -256,6 +261,20 @@ export class RegistrationService {
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         pass = await this.prisma.$transaction(async (tx) => {
+          // Anonymous registrations get their own per-flat cap (they must not consume the host's
+          // invite quota), counted and inserted under the same per-flat lock as host-created passes.
+          await lockFlatPassCreation(tx, dto.flatId);
+          const recentSelfRegistered = await tx.visitorPass.count({
+            where: {
+              flatId: dto.flatId,
+              createdAt: { gte: new Date(now.getTime() - 24 * 3600 * 1000) },
+              ...SELF_REGISTERED_UNAPPROVED,
+            },
+          });
+          if (recentSelfRegistered >= SELF_REGISTER_MAX_PER_FLAT_PER_DAY) {
+            throw AppException.unprocessable('INVITATION_LIMIT', 'Daily visitor pass capacity reached for this flat');
+          }
+
           let visitor = await tx.visitor.findFirst({
             where: {
               societyId: dto.societyId,

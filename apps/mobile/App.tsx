@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   SafeAreaView,
@@ -16,9 +16,11 @@ import { RelativesScreen } from './src/screens/RelativesScreen';
 import { colors } from './src/styles/theme';
 
 function MainNavigator() {
-  const { session, loading } = useAuth();
+  const { session, loading, selectedSociety, selectedFlat } = useAuth();
   const [activeTab, setActiveTab] = useState<'passes' | 'relatives' | 'notices'>('passes');
   const [registerModalOpen, setRegisterModalOpen] = useState(false);
+  const scopeKey = `${session?.user.id ?? ''}:${selectedSociety?.id ?? ''}:${selectedFlat?.id ?? ''}`;
+  useEffect(() => setRegisterModalOpen(false), [scopeKey]);
 
   if (loading) {
     return (
@@ -51,13 +53,14 @@ function MainNavigator() {
       />
       {activeTab === 'passes' ? (
         <HomeScreen
+          key={scopeKey}
           registerModalOpen={registerModalOpen}
           setRegisterModalOpen={setRegisterModalOpen}
         />
       ) : activeTab === 'relatives' ? (
-        <RelativesScreen />
+        <RelativesScreen key={scopeKey} />
       ) : (
-        <NoticesScreen />
+        <NoticesScreen key={scopeKey} />
       )}
     </SafeAreaView>
   );

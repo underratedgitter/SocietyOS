@@ -171,3 +171,52 @@ describe('VisitorPassesService Filtered Pagination', () => {
   });
 });
 
+
+describe('VisitorPassesService list flatId filter without societyId', () => {
+  const caller: JwtUser = {
+    sub: 'guard-user-id',
+    email: 'guard@society.org',
+    name: 'Guard',
+    isPlatformAdmin: false,
+    mustChangePassword: false,
+  };
+
+  function build(staffSocietyFlats: string[]) {
+    const prisma = {
+      residentFlatMembership: { findMany: jest.fn().mockResolvedValue([]) },
+      societyMembership: {
+        findMany: jest.fn().mockResolvedValue([{ societyId: 'soc-staff', role: 'GUARD' }]),
+      },
+      flat: {
+        count: jest.fn(async (args: { where: { id: string; building: { societyId: { in: string[] } } } }) =>
+          args.where.building.societyId.in.includes('soc-staff') && staffSocietyFlats.includes(args.where.id) ? 1 : 0,
+        ),
+      },
+      visitorPass: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const service = new VisitorPassesService(prisma as never, {} as never, {} as never, {} as never);
+    return { service, prisma };
+  }
+
+  it('lets staff filter by a flat in a society they actively serve', async () => {
+    const { service, prisma } = build(['flat-in-staff-society']);
+
+    await expect(service.list(caller, { flatId: 'flat-in-staff-society' })).resolves.toEqual({ items: [], nextCursor: null });
+    expect(prisma.societyMembership.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: caller.sub, status: 'ACTIVE' } }),
+    );
+    const where = prisma.visitorPass.findMany.mock.calls[0][0].where;
+    expect(where.flatId).toBe('flat-in-staff-society');
+    expect(where.OR).toEqual([{ societyId: { in: ['soc-staff'] } }]);
+  });
+
+  it('rejects a flat from another tenant', async () => {
+    const { service, prisma } = build(['flat-in-staff-society']);
+
+    await expect(service.list(caller, { flatId: 'flat-in-other-society' })).rejects.toMatchObject({
+      code: 'NOT_YOUR_FLAT',
+      status: 403,
+    });
+    expect(prisma.visitorPass.findMany).not.toHaveBeenCalled();
+  });
+});

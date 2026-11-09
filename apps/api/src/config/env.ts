@@ -39,6 +39,7 @@ export interface AppEnv {
   webPushContactEmail?: string;
   webPushPublicKey?: string;
   webPushPrivateKey?: string;
+  paymentsMockMode: boolean;
   razorpayKeyId?: string;
   razorpayKeySecret?: string;
   razorpayWebhookSecret?: string;
@@ -159,6 +160,12 @@ export function loadEnv(): AppEnv {
       .digest();
   }
 
+  const cookieSecure = bool('COOKIE_SECURE', isProduction);
+  if (isProduction && !cookieSecure) fail('COOKIE_SECURE must not be disabled in production');
+
+  const paymentsMockMode = bool('PAYMENTS_MOCK_MODE', false);
+  if (isProduction && paymentsMockMode) fail('PAYMENTS_MOCK_MODE must not be enabled in production');
+
   const rateLimitEnabled = bool('RATE_LIMIT_ENABLED', true);
   if (rateLimitEnabled) {
     // Per-process fallback counters are not shared across replicas.
@@ -222,7 +229,7 @@ export function loadEnv(): AppEnv {
     webUrl,
     appBaseUrl: httpUrl('APP_BASE_URL', webUrl),
     corsOrigins: [...corsOrigins],
-    cookieSecure: bool('COOKIE_SECURE', isProduction),
+    cookieSecure,
     swaggerEnabled: bool('ENABLE_SWAGGER', !isProduction),
     rateLimitEnabled,
     notificationWebhookUrl: process.env.NOTIFICATION_WEBHOOK_URL?.trim() || undefined,
@@ -241,6 +248,7 @@ export function loadEnv(): AppEnv {
     webPushContactEmail: process.env.WEB_PUSH_CONTACT_EMAIL?.trim() || undefined,
     webPushPublicKey: process.env.WEB_PUSH_PUBLIC_KEY?.trim() || undefined,
     webPushPrivateKey: process.env.WEB_PUSH_PRIVATE_KEY?.trim() || undefined,
+    paymentsMockMode,
     razorpayKeyId: process.env.RAZORPAY_KEY_ID?.trim() || undefined,
     razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET?.trim() || undefined,
     razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined,

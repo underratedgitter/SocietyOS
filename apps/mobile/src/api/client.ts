@@ -94,6 +94,18 @@ export class ApiError extends Error {
   }
 }
 
+/** True only when the server definitively rejected the credentials; outages and 5xx keep the session. */
+export function isSessionRejected(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 401 || err.status === 403);
+}
+
+let sessionExpiredHandler: (() => void) | null = null;
+
+/** Lets the UI leave the signed-in state when a refresh is rejected mid-session. */
+export function setSessionExpiredHandler(handler: (() => void) | null): void {
+  sessionExpiredHandler = handler;
+}
+
 // In-memory token & cookie storage
 let storedAccessToken: string | null = null;
 let storedRefreshToken: string | null = null;
@@ -331,6 +343,7 @@ export async function refreshSession(): Promise<boolean> {
           // Cached passes/PINs are purged too so the next account on this device never sees them.
           setAuthTokens(null, null);
           await Promise.all([mobileStorage.clearTokens(), mobileStorage.clearAllCache()]);
+          sessionExpiredHandler?.();
         }
         return false;
       }
@@ -411,9 +424,27 @@ export const api = {
     }
   },
 
-  async listPasses(societyId?: string, limit = 100): Promise<PassPage> {
-    const query = societyId ? `?societyId=${societyId}&limit=${limit}` : `?limit=${limit}`;
+  async listPasses(societyId?: string, limit = 100, cursor?: string): Promise<PassPage> {
+    const params = new URLSearchParams();
+    if (societyId) params.set('societyId', societyId);
+    params.set('limit', String(limit));
+    if (cursor) params.set('cursor', cursor);
+    const query = `?${params.toString()}`;
     return request<PassPage>(`/visitor-passes${query}`);
+  },
+
+  async listAllPasses(societyId?: string): Promise<PassView[]> {
+    const items: PassView[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    while (true) {
+      const page = await api.listPasses(societyId, 100, cursor);
+      items.push(...page.items);
+      if (!page.nextCursor) return items;
+      if (seen.has(page.nextCursor)) throw new Error('Pass pagination returned a repeated cursor. Please retry.');
+      seen.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
   },
 
   async getPass(passId: string): Promise<PassView> {

@@ -24,6 +24,8 @@ export interface AuthedRequest extends Request {
   device?: { id: string; deviceUid: string; societyId: string; name: string; protocol: DeviceProtocol };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const PASSWORD_CHANGE_ALLOWED_PATHS = [
   '/api/v1/auth/me',
   '/api/v1/auth/logout',
@@ -69,23 +71,48 @@ export class JwtAuthGuard implements CanActivate {
     } catch {
       throw AppException.unauthorized('UNAUTHENTICATED', 'Authentication required');
     }
-    if (!payload.sub || payload.typ !== 'access') {
+    if (
+      !payload.sub ||
+      payload.typ !== 'access' ||
+      typeof payload.sid !== 'string' ||
+      !UUID_RE.test(payload.sid)
+    ) {
       throw AppException.unauthorized('UNAUTHENTICATED', 'Authentication required');
     }
 
-    // Reload server-side state so disabled accounts, role changes and forced
-    // password changes take effect without waiting for token expiry.
-    const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
+    // Reload server-side state so revoked sessions (logout, rotation, password change),
+    // disabled accounts, role changes and forced password changes take effect without
+    // waiting for token expiry.
+    const session = await this.prisma.session.findUnique({
+      where: { id: payload.sid },
       select: {
-        id: true,
-        email: true,
-        name: true,
-        isPlatformAdmin: true,
-        mustChangePassword: true,
+        userId: true,
+        revokedAt: true,
+        expiresAt: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            isPlatformAdmin: true,
+            mustChangePassword: true,
+            memberships: { where: { status: 'ACTIVE' }, select: { id: true }, take: 1 },
+          },
+        },
       },
     });
-    if (!user) throw AppException.unauthorized('UNAUTHENTICATED', 'Authentication required');
+    if (
+      !session ||
+      session.userId !== payload.sub ||
+      session.revokedAt ||
+      session.expiresAt <= new Date()
+    ) {
+      throw AppException.unauthorized('UNAUTHENTICATED', 'Authentication required');
+    }
+    const { user } = session;
+    if (!user.isPlatformAdmin && user.memberships.length === 0) {
+      throw AppException.forbidden('ACCOUNT_DISABLED', 'This account has no active society membership');
+    }
 
     req.user = {
       sub: user.id,

@@ -206,3 +206,9 @@ pnpm --filter @societyos/edge-connector test
 ```
 
 Tests use fake DB and HTTP layers only.
+
+### BioStar checkpoints and door commands
+
+BioStar event batches use Suprema's [pagination hints](https://support.supremainc.com/en/support/solutions/articles/24000106474--biostar-2-api-how-to-implement-pagination-for-event-search) to advance through events sharing a timestamp. A full batch without a hint fails explicitly instead of repeatedly forwarding the same rows. Verify hint support on the installed BioStar version.
+
+The source state file now also journals `OPEN_DOOR` claims and results. Keep this file across restarts and run one connector per source/state file. Lost acknowledgements replay the recorded result without opening the door again. A crash between claiming and recording the result reports `EXECUTION_UNCERTAIN`; inspect the door before issuing a new command ID. Do not clear the journal to retry a command.

@@ -269,6 +269,13 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
     }
 
     const now = new Date();
+    if (command.expiresAt <= now) {
+      await this.prisma.gateCommand.updateMany({
+        where: { id: commandId, status: { in: ['ISSUED', 'ACKNOWLEDGED'] } },
+        data: { status: 'EXPIRED' },
+      });
+      return;
+    }
     const data =
       status === 'FAILED'
         ? { status: 'FAILED' as const, ackAt: now }
@@ -284,6 +291,7 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
       where: {
         id: commandId,
         deviceId: parsed.deviceId,
+        expiresAt: { gt: now },
         status: { in: ['ISSUED', 'ACKNOWLEDGED'] },
       },
       data,

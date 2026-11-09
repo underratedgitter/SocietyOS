@@ -109,8 +109,18 @@ export class AccessEngineService {
       ctx.credentialType === 'FINGERPRINT' ||
       ctx.credentialType === 'FACE'
     ) {
-      // Biometric scans go through the same replay cache and device flood limit as PIN/QR:
-      // a reader retrying the same requestId must not actuate the gate twice.
+      // Claim before dispatch: a database unique key protects across API workers.
+      try {
+        await this.prisma.idempotencyRecord.create({
+          data: this.idempotencyData(idemKey, { pending: true }, credentialHash),
+        });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          const winner = await this.prisma.idempotencyRecord.findUnique({ where: { key: idemKey } });
+          if (winner) return this.replay(winner, credentialHash);
+        }
+        throw error;
+      }
       const bioResult = await this.biometrics.verifyResidentBiometric(
         ctx.societyId,
         {
@@ -127,7 +137,10 @@ export class AccessEngineService {
         reasonCode: bioResult.reasonCode,
         accessEventId: bioResult.accessEventId,
       };
-      await this.remember(idemKey, bioResponse, credentialHash);
+      await this.prisma.idempotencyRecord.update({
+        where: { key: idemKey },
+        data: { responseBody: bioResponse as unknown as Prisma.InputJsonValue },
+      });
       return bioResponse;
     }
 
@@ -213,10 +226,18 @@ export class AccessEngineService {
         'This request ID was already used with a different credential',
       );
     }
+    if (
+      record.responseBody &&
+      typeof record.responseBody === 'object' &&
+      !Array.isArray(record.responseBody) &&
+      record.responseBody.pending === true
+    ) {
+      throw AppException.conflict('REQUEST_IN_PROGRESS', 'This request is still being processed');
+    }
     return record.responseBody as unknown as VerifyResponse;
   }
 
-  private idempotencyData(key: string, response: VerifyResponse, requestHash: string) {
+  private idempotencyData(key: string, response: VerifyResponse | { pending: true }, requestHash: string) {
     return {
       key,
       endpoint: 'access.verify',

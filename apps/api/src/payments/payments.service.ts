@@ -41,6 +41,46 @@ export class PaymentsService {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val);
   }
 
+  /** Mock gateway behaviour is only ever allowed when explicitly enabled outside production. */
+  private mockAllowed(env: ReturnType<typeof getEnv>): boolean {
+    return env.paymentsMockMode && !env.isProduction;
+  }
+
+  private notConfigured(gateway: string, what: string): AppException {
+    return AppException.badGateway('GATEWAY_NOT_CONFIGURED', `${gateway} ${what} is not configured`);
+  }
+
+  private isValidAmount(amount: unknown, expected: number): boolean {
+    return typeof amount === 'number' && Number.isFinite(amount) && amount === expected;
+  }
+
+  /**
+   * Money was captured at the gateway but could not be settled against the invoice.
+   * Log at error level and raise a SecurityAlert so an admin can reconcile or refund.
+   */
+  private async flagUnsettledPayment(
+    invoice: { id: string; societyId: string },
+    gateway: string,
+    reason: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    this.logger.error(
+      `Unsettled ${gateway} payment for invoice ${invoice.id} (${reason}): ${JSON.stringify(detail)}`,
+    );
+    try {
+      await this.prisma.securityAlert.create({
+        data: {
+          societyId: this.isUuid(invoice.societyId) ? invoice.societyId : null,
+          severity: 'HIGH',
+          type: 'PAYMENT_UNSETTLED',
+          detail: { invoiceId: invoice.id, gateway, reason, ...detail },
+        },
+      });
+    } catch (err) {
+      this.logger.error(`Failed to record unsettled payment alert for invoice ${invoice.id}: ${String(err)}`);
+    }
+  }
+
   // =========================================================================
   // RAZORPAY INTEGRATION
   // =========================================================================
@@ -74,9 +114,14 @@ export class PaymentsService {
     const amountInPaise = Math.round(invoice.amount * 100);
     const env = getEnv();
 
+    // Reuse the open order so an earlier checkout is never orphaned by a newer one.
+    const existingOrderId =
+      invoice.paymentGateway === 'RAZORPAY' && invoice.gatewayOrderId ? invoice.gatewayOrderId : null;
     let orderId: string;
 
-    if (env.razorpayKeyId && env.razorpayKeySecret) {
+    if (existingOrderId) {
+      orderId = existingOrderId;
+    } else if (env.razorpayKeyId && env.razorpayKeySecret) {
       // Live Razorpay API call
       const authHeader = `Basic ${Buffer.from(`${env.razorpayKeyId}:${env.razorpayKeySecret}`).toString('base64')}`;
       const payload = {
@@ -117,20 +162,22 @@ export class PaymentsService {
       } finally {
         clearTimeout(timeout);
       }
-    } else {
-      // Mock / Dev fallback
+    } else if (this.mockAllowed(env)) {
       orderId = `order_${Date.now()}_${randomBytes(4).toString('hex')}`;
       this.logger.log(`[RAZORPAY-MOCK] Generated order ${orderId} for invoice ${invoice.id} (₹${invoice.amount})`);
+    } else {
+      throw this.notConfigured('Razorpay', 'API keys');
     }
 
-    // Save gatewayOrderId on invoice
-    await this.prisma.maintenanceInvoice.update({
-      where: { id: invoice.id },
-      data: {
-        gatewayOrderId: orderId,
-        paymentGateway: 'RAZORPAY',
-      },
-    });
+    if (orderId !== existingOrderId) {
+      await this.prisma.maintenanceInvoice.update({
+        where: { id: invoice.id },
+        data: {
+          gatewayOrderId: orderId,
+          paymentGateway: 'RAZORPAY',
+        },
+      });
+    }
 
     return {
       orderId,
@@ -176,16 +223,20 @@ export class PaymentsService {
         throw AppException.badRequest('INVALID_PAYMENT_SIGNATURE', 'Razorpay payment signature mismatch');
       }
     } else {
-      if (env.isProduction) {
-        throw AppException.badGateway('GATEWAY_NOT_CONFIGURED', 'Razorpay secret key is not configured in production');
+      if (!this.mockAllowed(env)) {
+        throw this.notConfigured('Razorpay', 'secret key');
       }
-      // In mock/test mode without key secret, accept valid mock signature or matching string
-      const isMockOk =
-        dto.razorpaySignature === 'mock_sig_ok' ||
-        dto.razorpaySignature.length >= 10;
+      const isMockOk = dto.razorpaySignature === 'mock_sig_ok';
       if (!isMockOk) {
         throw AppException.badRequest('INVALID_PAYMENT_SIGNATURE', 'Invalid mock signature');
       }
+    }
+
+    if (invoice.status === 'CANCELLED') {
+      await this.flagUnsettledPayment(invoice, 'RAZORPAY', 'invoice_cancelled', {
+        orderId: dto.razorpayOrderId,
+        paymentId: dto.razorpayPaymentId,
+      });
     }
 
     return this.settleInvoice({
@@ -212,8 +263,8 @@ export class PaymentsService {
       if (!this.secureCompare(expected, signatureHeader)) {
         throw AppException.badRequest('INVALID_WEBHOOK_SIGNATURE', 'Razorpay webhook signature verification failed');
       }
-    } else if (env.isProduction) {
-      throw AppException.badGateway('GATEWAY_NOT_CONFIGURED', 'Razorpay webhook secret is not configured in production');
+    } else if (!this.mockAllowed(env)) {
+      throw this.notConfigured('Razorpay', 'webhook secret');
     }
 
     let payload: any;
@@ -251,20 +302,30 @@ export class PaymentsService {
           return { received: true, status: 'already_paid' };
         }
         if (invoice.status === 'CANCELLED') {
-          this.logger.warn(`Razorpay webhook callback received for cancelled invoice ${invoice.id}`);
+          await this.flagUnsettledPayment(invoice, 'RAZORPAY', 'invoice_cancelled', { orderId, paymentId, amount });
           return { received: true, status: 'ignored_cancelled' };
         }
         if (invoice.gatewayOrderId && orderId && invoice.gatewayOrderId !== orderId) {
-          this.logger.warn(`Razorpay order ID ${orderId} does not match invoice gatewayOrderId ${invoice.gatewayOrderId}`);
+          await this.flagUnsettledPayment(invoice, 'RAZORPAY', 'order_mismatch', {
+            orderId,
+            paymentId,
+            amount,
+            invoiceOrderId: invoice.gatewayOrderId,
+          });
           return { received: true, status: 'order_mismatch' };
         }
         const expectedAmountInPaise = Math.round(invoice.amount * 100);
         if (currency && currency !== 'inr') {
-          this.logger.warn(`Razorpay payment currency ${currency} is not INR for invoice ${invoice.id}`);
+          await this.flagUnsettledPayment(invoice, 'RAZORPAY', 'currency_mismatch', { orderId, paymentId, currency });
           return { received: true, status: 'currency_mismatch' };
         }
-        if (typeof amount === 'number' && amount < expectedAmountInPaise) {
-          this.logger.warn(`Razorpay payment amount ${amount} is less than required ${expectedAmountInPaise} for invoice ${invoice.id}`);
+        if (!this.isValidAmount(amount, expectedAmountInPaise)) {
+          await this.flagUnsettledPayment(invoice, 'RAZORPAY', 'amount_mismatch', {
+            orderId,
+            paymentId,
+            amount,
+            expected: expectedAmountInPaise,
+          });
           return { received: true, status: 'amount_mismatch' };
         }
         await this.settleInvoice({
@@ -320,8 +381,19 @@ export class PaymentsService {
 
     let paymentIntentId: string;
     let clientSecret: string;
+    let reused = false;
 
-    if (env.stripeSecretKey) {
+    // Reuse the open PaymentIntent so an earlier checkout is never orphaned by a newer one.
+    const open =
+      env.stripeSecretKey && invoice.paymentGateway === 'STRIPE' && invoice.gatewayOrderId
+        ? await this.fetchOpenPaymentIntent(env.stripeSecretKey, invoice.gatewayOrderId, amountInCents, currency)
+        : null;
+
+    if (open) {
+      paymentIntentId = open.id;
+      clientSecret = open.client_secret;
+      reused = true;
+    } else if (env.stripeSecretKey) {
       const params = new URLSearchParams({
         amount: amountInCents.toString(),
         currency,
@@ -359,23 +431,28 @@ export class PaymentsService {
       } finally {
         clearTimeout(timeout);
       }
-    } else {
-      if (env.isProduction) {
-        throw AppException.badGateway('GATEWAY_NOT_CONFIGURED', 'Stripe payment gateway is not configured in production');
+    } else if (this.mockAllowed(env)) {
+      if (invoice.paymentGateway === 'STRIPE' && invoice.gatewayOrderId) {
+        paymentIntentId = invoice.gatewayOrderId;
+        reused = true;
+      } else {
+        paymentIntentId = `pi_${Date.now()}_${randomBytes(4).toString('hex')}`;
       }
-      // Mock / Dev fallback
-      paymentIntentId = `pi_${Date.now()}_${randomBytes(4).toString('hex')}`;
       clientSecret = `${paymentIntentId}_secret_${randomBytes(8).toString('hex')}`;
-      this.logger.log(`[STRIPE-MOCK] Generated PaymentIntent ${paymentIntentId} for ₹${invoice.amount}`);
+      this.logger.log(`[STRIPE-MOCK] PaymentIntent ${paymentIntentId} for ₹${invoice.amount}`);
+    } else {
+      throw this.notConfigured('Stripe', 'payment gateway');
     }
 
-    await this.prisma.maintenanceInvoice.update({
-      where: { id: invoice.id },
-      data: {
-        gatewayOrderId: paymentIntentId,
-        paymentGateway: 'STRIPE',
-      },
-    });
+    if (!reused) {
+      await this.prisma.maintenanceInvoice.update({
+        where: { id: invoice.id },
+        data: {
+          gatewayOrderId: paymentIntentId,
+          paymentGateway: 'STRIPE',
+        },
+      });
+    }
 
     return {
       clientSecret,
@@ -385,6 +462,51 @@ export class PaymentsService {
       currency,
       invoiceId: invoice.id,
     };
+  }
+
+  /** Returns the stored PaymentIntent if it can still be paid for this amount, else null. */
+  private async fetchOpenPaymentIntent(
+    secretKey: string,
+    paymentIntentId: string,
+    amount: number,
+    currency: string,
+  ): Promise<{ id: string; client_secret: string } | null> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(`https://api.stripe.com/v1/payment_intents/${paymentIntentId}`, {
+        headers: { Authorization: `Bearer ${secretKey}` },
+        signal: controller.signal,
+      });
+      // Unknown to this Stripe account (e.g. created with test keys or in mock mode): start afresh.
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new Error(`Stripe lookup returned HTTP ${response.status}`);
+      }
+      const data = (await response.json()) as {
+        id: string;
+        client_secret?: string;
+        status: string;
+        amount?: number;
+        currency?: string;
+      };
+      // Money may already be moving on this intent: a fresh one would charge the resident twice,
+      // and its capture would then be rejected as an order mismatch. The webhook settles it.
+      if (data.status === 'processing' || data.status === 'succeeded') {
+        throw AppException.conflict('PAYMENT_IN_PROGRESS', 'A payment for this invoice is already being processed');
+      }
+      const payable = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(data.status);
+      if (payable && data.client_secret && data.amount === amount && data.currency?.toLowerCase() === currency) {
+        return { id: data.id, client_secret: data.client_secret };
+      }
+      return null;
+    } catch (err) {
+      if (err instanceof AppException) throw err;
+      this.logger.error(`Stripe payment intent lookup failed: ${String(err)}`);
+      throw AppException.badGateway('PAYMENT_GATEWAY_ERROR', 'Unable to initialize Stripe payment');
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async verifyStripePayment(
@@ -430,8 +552,8 @@ export class PaymentsService {
         if (data.currency && data.currency.toLowerCase() !== 'inr') {
           throw AppException.badRequest('INVALID_CURRENCY', 'PaymentIntent currency must be INR');
         }
-        if (typeof data.amount === 'number' && data.amount < expectedAmountInCents) {
-          throw AppException.badRequest('INSUFFICIENT_AMOUNT', `Payment amount (${data.amount}) is less than invoice (${expectedAmountInCents})`);
+        if (!this.isValidAmount(data.amount, expectedAmountInCents)) {
+          throw AppException.badRequest('INSUFFICIENT_AMOUNT', `Payment amount (${String(data.amount)}) is less than invoice (${expectedAmountInCents})`);
         }
       } catch (err) {
         if (err instanceof AppException) throw err;
@@ -440,8 +562,14 @@ export class PaymentsService {
       } finally {
         clearTimeout(timeout);
       }
-    } else if (env.isProduction) {
-      throw AppException.badGateway('GATEWAY_NOT_CONFIGURED', 'Stripe secret key is not configured in production');
+    } else if (!this.mockAllowed(env)) {
+      throw this.notConfigured('Stripe', 'secret key');
+    }
+
+    if (invoice.status === 'CANCELLED') {
+      await this.flagUnsettledPayment(invoice, 'STRIPE', 'invoice_cancelled', {
+        paymentIntentId: dto.paymentIntentId,
+      });
     }
 
     return this.settleInvoice({
@@ -494,8 +622,8 @@ export class PaymentsService {
       if (!matched) {
         throw AppException.badRequest('INVALID_WEBHOOK_SIGNATURE', 'Stripe webhook HMAC mismatch');
       }
-    } else if (env.isProduction) {
-      throw AppException.badGateway('GATEWAY_NOT_CONFIGURED', 'Stripe webhook secret is not configured in production');
+    } else if (!this.mockAllowed(env)) {
+      throw this.notConfigured('Stripe', 'webhook secret');
     }
 
     let event: any;
@@ -530,20 +658,28 @@ export class PaymentsService {
           return { received: true, status: 'already_paid' };
         }
         if (invoice.status === 'CANCELLED') {
-          this.logger.warn(`Stripe webhook callback received for cancelled invoice ${invoice.id}`);
+          await this.flagUnsettledPayment(invoice, 'STRIPE', 'invoice_cancelled', { paymentIntentId, amount });
           return { received: true, status: 'ignored_cancelled' };
         }
         if (invoice.gatewayOrderId && paymentIntentId && invoice.gatewayOrderId !== paymentIntentId) {
-          this.logger.warn(`Stripe paymentIntentId ${paymentIntentId} does not match invoice gatewayOrderId ${invoice.gatewayOrderId}`);
+          await this.flagUnsettledPayment(invoice, 'STRIPE', 'order_mismatch', {
+            paymentIntentId,
+            amount,
+            invoiceOrderId: invoice.gatewayOrderId,
+          });
           return { received: true, status: 'order_mismatch' };
         }
         const expectedAmountInCents = Math.round(invoice.amount * 100);
         if (currency && currency !== 'inr') {
-          this.logger.warn(`Stripe payment currency ${currency} is not INR for invoice ${invoice.id}`);
+          await this.flagUnsettledPayment(invoice, 'STRIPE', 'currency_mismatch', { paymentIntentId, currency });
           return { received: true, status: 'currency_mismatch' };
         }
-        if (typeof amount === 'number' && amount < expectedAmountInCents) {
-          this.logger.warn(`Stripe payment amount ${amount} is less than required ${expectedAmountInCents} for invoice ${invoice.id}`);
+        if (!this.isValidAmount(amount, expectedAmountInCents)) {
+          await this.flagUnsettledPayment(invoice, 'STRIPE', 'amount_mismatch', {
+            paymentIntentId,
+            amount,
+            expected: expectedAmountInCents,
+          });
           return { received: true, status: 'amount_mismatch' };
         }
         await this.settleInvoice({

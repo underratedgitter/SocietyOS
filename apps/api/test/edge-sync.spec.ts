@@ -22,6 +22,7 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         findMany: jest.fn().mockResolvedValue([]),
         findUnique: jest.fn().mockResolvedValue(null),
         update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
       visitorPassCredential: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -484,12 +485,15 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
           }),
         }),
       );
-      expect(mockPrisma.visitorPass.update).toHaveBeenCalledWith({
-        where: { id: PASS_UUID },
+      expect(mockPrisma.visitorPass.update).not.toHaveBeenCalled();
+      expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          id: PASS_UUID, societyId: SOCIETY_ID, status: 'ACTIVE', usedCount: { lt: 3 },
+          validFrom: { lte: expect.any(Date) }, validUntil: { gte: expect.any(Date) },
+          accessPoints: { some: { accessPointId: AP_GATE_1 } },
+        }),
         data: { usedCount: { increment: 1 } },
-        select: { usedCount: true, maxUses: true },
       });
-      expect(mockPrisma.visitorPass.updateMany).not.toHaveBeenCalled();
     });
 
     it('increments atomically so concurrent redemptions of the same pass are never lost', async () => {
@@ -518,13 +522,41 @@ describe('Device Edge Synchronization & Bounded Offline Policy Suite (Stage 5)',
         ],
       });
 
-      const updateArgs = mockPrisma.visitorPass.update.mock.calls[0][0];
+      const updateArgs = mockPrisma.visitorPass.updateMany.mock.calls[0][0];
       expect(updateArgs.data.usedCount).toEqual({ increment: 1 });
       expect(updateArgs.data.usedCount).not.toBe(2);
       expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith({
-        where: { id: PASS_UUID, status: 'ACTIVE' },
+        where: { id: PASS_UUID, status: 'ACTIVE', usedCount: { gte: 3 } },
         data: { status: 'EXHAUSTED' },
       });
+    });
+
+    it.each(['revoked', 'expired', 'exhausted'])('does not consume a %s offline pass', async (condition) => {
+      const id = 'e0000000-0000-4000-a000-000000000004';
+      const pass = {
+        id, societyId: SOCIETY_ID, status: condition === 'revoked' ? 'REVOKED' : 'ACTIVE',
+        usedCount: condition === 'exhausted' ? 3 : 0, maxUses: 3,
+        validFrom: new Date(Date.now() - 60_000),
+        validUntil: new Date(Date.now() + (condition === 'expired' ? -1_000 : 60_000)),
+      };
+      mockPrisma.accessPoint.findMany.mockResolvedValue([{ id: AP_GATE_1 }]);
+      mockPrisma.visitorPass.findUnique.mockResolvedValue(pass);
+      mockPrisma.visitorPass.updateMany.mockImplementation(async ({ where, data }: {
+        where: { status: string; usedCount: { lt: number }; validFrom: { lte: Date }; validUntil: { gte: Date } };
+        data: { usedCount: { increment: number } };
+      }) => {
+        const allowed = pass.status === where.status && pass.usedCount < where.usedCount.lt &&
+          pass.validFrom <= where.validFrom.lte && pass.validUntil >= where.validUntil.gte;
+        if (allowed) pass.usedCount += data.usedCount.increment;
+        return { count: allowed ? 1 : 0 };
+      });
+      const before = pass.usedCount;
+      await controller.syncOffline(mockDeviceReq, { events: [{
+        sequence: 104, accessPointId: AP_GATE_1, credentialType: 'PIN', decision: 'AUTHORIZED',
+        reasonCode: 'VALID_OFFLINE_CACHE', timestamp: new Date().toISOString(), passId: id,
+      }] });
+      expect(pass.usedCount).toBe(before);
+      expect(mockPrisma.visitorPass.update).not.toHaveBeenCalled();
     });
 
     it('ignores passIds owned by another society and never mutates them', async () => {

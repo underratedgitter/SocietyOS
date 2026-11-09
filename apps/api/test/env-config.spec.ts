@@ -103,7 +103,7 @@ describe('loadEnv notification provider validation', () => {
 });
 
 describe('loadEnv Redis requirement for rate limiting', () => {
-  const keys = ['NODE_ENV', 'WEB_URL', 'JWT_ACCESS_SECRET', 'CREDENTIAL_HMAC_KEY', 'REDIS_URL', 'RATE_LIMIT_ENABLED'];
+  const keys = ['NODE_ENV', 'WEB_URL', 'JWT_ACCESS_SECRET', 'CREDENTIAL_HMAC_KEY', 'REDIS_URL', 'RATE_LIMIT_ENABLED', 'PAYMENTS_MOCK_MODE', 'COOKIE_SECURE'];
   const original = new Map<string, string | undefined>();
 
   beforeEach(() => {
@@ -139,5 +139,34 @@ describe('loadEnv Redis requirement for rate limiting', () => {
   it('keeps the in-memory fallback available outside production', () => {
     process.env.NODE_ENV = 'development';
     expect(loadEnv().redisUrl).toBeUndefined();
+  });
+
+  it('refuses PAYMENTS_MOCK_MODE in production but allows it elsewhere', () => {
+    process.env.REDIS_URL = 'redis://:secret@redis:6379';
+    process.env.PAYMENTS_MOCK_MODE = 'true';
+    expect(() => loadEnv()).toThrow('PAYMENTS_MOCK_MODE must not be enabled in production');
+    resetEnvCacheForTests();
+    process.env.NODE_ENV = 'development';
+    expect(loadEnv().paymentsMockMode).toBe(true);
+  });
+
+  it('defaults PAYMENTS_MOCK_MODE to off', () => {
+    process.env.NODE_ENV = 'development';
+    expect(loadEnv().paymentsMockMode).toBe(false);
+  });
+
+  it('refuses COOKIE_SECURE=false in production', () => {
+    process.env.REDIS_URL = 'redis://:secret@redis:6379';
+    process.env.COOKIE_SECURE = 'false';
+    expect(() => loadEnv()).toThrow('COOKIE_SECURE must not be disabled in production');
+  });
+
+  it('defaults COOKIE_SECURE on in production and allows disabling it elsewhere', () => {
+    process.env.REDIS_URL = 'redis://:secret@redis:6379';
+    expect(loadEnv().cookieSecure).toBe(true);
+    resetEnvCacheForTests();
+    process.env.NODE_ENV = 'development';
+    process.env.COOKIE_SECURE = 'false';
+    expect(loadEnv().cookieSecure).toBe(false);
   });
 });

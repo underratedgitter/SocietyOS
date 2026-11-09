@@ -1,11 +1,23 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, VisitorPass } from '@prisma/client';
+import { Prisma, Visitor, VisitorPass } from '@prisma/client';
 import { AppException } from '../common/app.exception';
 import { PrismaService } from '../common/prisma.service';
 import { AuthzService } from '../common/authz.service';
 import { CredentialsService } from '../visitors/credentials.service';
+import { COUNTS_TOWARD_HOST_CAP, lockFlatPassCreation } from '../visitors/pass-cap';
 import { visitorPolicy } from '../societies/policy';
 import { RegisterRelativeDto, QuickPassDto } from './relatives.dto';
+
+/**
+ * A visitor is this flat's relative only through a pass the household issued or approved (those
+ * carry credentials). An anonymous self-registration that is still pending, or was rejected, must
+ * not put a stranger in the directory or make them eligible for a one-click quick pass.
+ */
+const HOUSEHOLD_PASS = (flatId: string): Prisma.VisitorPassWhereInput => ({
+  flatId,
+  category: 'RELATIVE',
+  credentials: { some: {} },
+});
 
 @Injectable()
 export class RelativesService {
@@ -22,7 +34,7 @@ export class RelativesService {
       where: {
         societyId: context.societyId,
         category: 'RELATIVE',
-        passes: { some: { flatId } },
+        passes: { some: HOUSEHOLD_PASS(flatId) },
       },
       include: {
         passes: {
@@ -102,7 +114,7 @@ export class RelativesService {
         societyId: context.societyId,
         name: formattedName.slice(0, 120),
         category: 'RELATIVE',
-        passes: { some: { flatId } },
+        passes: { some: HOUSEHOLD_PASS(flatId) },
       },
     });
     if (existing) {
@@ -127,14 +139,7 @@ export class RelativesService {
     // Checked before creating the visitor so a rejected request leaves no orphaned record.
     await this.assertDailyPassCapacity(flatId, policy.maxPassesPerFlatPerDay);
 
-    const visitor = await this.prisma.visitor.create({
-      data: {
-        societyId: context.societyId,
-        name: formattedName.slice(0, 120),
-        phone,
-        category: 'RELATIVE',
-      },
-    });
+    let visitor: Visitor | undefined;
 
     const now = new Date();
     const validHours = Math.min(72, policy.maxPassDurationHours);
@@ -145,46 +150,57 @@ export class RelativesService {
     let qr = this.credentials.generateQrToken();
     const maxUses = Math.min(policy.maxUsesPerPass, 5);
 
-    let pass: any;
+    let pass: VisitorPass | undefined;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        pass = await this.createPassWithinCap(flatId, policy.maxPassesPerFlatPerDay, {
-          data: {
-            societyId: context.societyId,
-            flatId,
-            hostUserId: callerSub,
-            visitorId: visitor.id,
-            category: 'RELATIVE',
-            status: 'ACTIVE',
-            validFrom,
-            validUntil,
-            maxUses,
-            credentials: {
-              create: [
-                {
-                  type: pin.type,
-                  credentialHash: this.credentials.hash(pin.plaintext),
-                  keyId: this.credentials.keyVersion,
-                  // Scopes the per-society PIN uniqueness index; NULL would bypass it.
-                  societyId: context.societyId,
-                },
-                {
-                  type: qr.type,
-                  credentialHash: this.credentials.hash(qr.plaintext),
-                  keyId: this.credentials.keyVersion,
-                  // Scopes the per-society PIN uniqueness index; NULL would bypass it.
-                  societyId: context.societyId,
-                },
-              ],
+        pass = await this.createPassWithinCap(flatId, policy.maxPassesPerFlatPerDay, async (tx) => {
+          visitor = await tx.visitor.create({
+            data: {
+              societyId: context.societyId,
+              name: formattedName.slice(0, 120),
+              phone,
+              category: 'RELATIVE',
             },
-            accessPoints: {
-              create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
+          });
+
+          return {
+            data: {
+              societyId: context.societyId,
+              flatId,
+              hostUserId: callerSub,
+              visitorId: visitor.id,
+              category: 'RELATIVE',
+              status: 'ACTIVE',
+              validFrom,
+              validUntil,
+              maxUses,
+              credentials: {
+                create: [
+                  {
+                    type: pin.type,
+                    credentialHash: this.credentials.hash(pin.plaintext),
+                    keyId: this.credentials.keyVersion,
+                    // Scopes the per-society PIN uniqueness index; NULL would bypass it.
+                    societyId: context.societyId,
+                  },
+                  {
+                    type: qr.type,
+                    credentialHash: this.credentials.hash(qr.plaintext),
+                    keyId: this.credentials.keyVersion,
+                    // Scopes the per-society PIN uniqueness index; NULL would bypass it.
+                    societyId: context.societyId,
+                  },
+                ],
+              },
+              accessPoints: {
+                create: accessPoints.map((ap) => ({ accessPointId: ap.id })),
+              },
             },
-          },
+          };
         });
         break;
-      } catch (err: any) {
-        if ((err?.code === 'P2002' || String(err).includes('credentialHash')) && attempt < 4) {
+      } catch (err: unknown) {
+        if (((err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') || String(err).includes('credentialHash')) && attempt < 4) {
           pin = this.credentials.generatePin();
           qr = this.credentials.generateQrToken();
           continue;
@@ -192,6 +208,8 @@ export class RelativesService {
         throw err;
       }
     }
+
+    if (!visitor || !pass) throw AppException.conflict('PASS_CREATION_FAILED', 'Could not create relative pass');
 
     return {
       relative: {
@@ -236,7 +254,7 @@ export class RelativesService {
 
     // Verify relative is associated with this flat (prevents IDOR across flats)
     const flatAssociation = await this.prisma.visitorPass.findFirst({
-      where: { flatId, visitorId },
+      where: { visitorId, ...HOUSEHOLD_PASS(flatId) },
     });
     if (!flatAssociation) {
       throw AppException.notFound('VISITOR_NOT_FOUND', 'Relative not found for this flat');
@@ -353,7 +371,7 @@ export class RelativesService {
    */
   private async assertDailyPassCapacity(flatId: string, maxPassesPerFlatPerDay: number): Promise<void> {
     const recent = await this.prisma.visitorPass.count({
-      where: { flatId, createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) } },
+      where: { flatId, createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) }, ...COUNTS_TOWARD_HOST_CAP },
     });
     if (recent >= maxPassesPerFlatPerDay) {
       throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
@@ -367,17 +385,17 @@ export class RelativesService {
   private createPassWithinCap(
     flatId: string,
     maxPassesPerFlatPerDay: number,
-    args: Prisma.VisitorPassCreateArgs,
+    args: Prisma.VisitorPassCreateArgs | ((tx: Prisma.TransactionClient) => Promise<Prisma.VisitorPassCreateArgs>),
   ): Promise<VisitorPass> {
     return this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('visitor-pass-create'), hashtext(${flatId}))`;
+      await lockFlatPassCreation(tx, flatId);
       const recent = await tx.visitorPass.count({
-        where: { flatId, createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) } },
+        where: { flatId, createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) }, ...COUNTS_TOWARD_HOST_CAP },
       });
       if (recent >= maxPassesPerFlatPerDay) {
         throw AppException.unprocessable('INVITATION_LIMIT', 'Too many passes created for this flat today');
       }
-      return tx.visitorPass.create(args);
+      return tx.visitorPass.create(typeof args === 'function' ? await args(tx) : args);
     });
   }
 
@@ -399,27 +417,17 @@ export class RelativesService {
       throw AppException.notFound('VISITOR_NOT_FOUND', 'Relative not found for this flat');
     }
 
-    // Revoke any active passes for this relative on this flat
     const now = new Date();
-    await this.prisma.visitorPass.updateMany({
-      where: {
-        flatId,
-        visitorId,
-        societyId: context.societyId,
-        status: 'ACTIVE',
-        validUntil: { gt: now },
-      },
-      data: {
-        status: 'REVOKED',
-        revokedAt: now,
-        revokedBy: callerSub,
-      },
-    });
-
-    // Unlink relative from directory by reclassifying visitor category
-    await this.prisma.visitor.update({
-      where: { id: visitorId },
-      data: { category: 'OTHER' },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.visitorPass.updateMany({
+        where: { flatId, visitorId, societyId: context.societyId, status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'DRAFT'] } },
+        data: { status: 'REVOKED', revokedAt: now, revokedBy: callerSub },
+      });
+      // Directory membership belongs to the household's passes, not the shared visitor.
+      await tx.visitorPass.updateMany({
+        where: { flatId, visitorId, societyId: context.societyId, category: 'RELATIVE' },
+        data: { category: 'OTHER' },
+      });
     });
 
     return { ok: true };

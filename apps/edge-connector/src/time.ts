@@ -1,6 +1,3 @@
-const WALL = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?$/;
-const HAS_OFFSET = /(Z|[+-]\d{2}:?\d{2})$/i;
-
 export function isValidTimeZone(tz: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: tz });
@@ -32,23 +29,55 @@ function formatOffset(minutes: number): string {
   return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
 }
 
+const ISO_OR_WALL =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:(Z|[+-]\d{2}:?\d{2}))?$/i;
+
 /**
  * Turns a vendor timestamp into ISO 8601. Strings that already carry an offset keep the instant
  * they describe (normalised to Z); wall-clock strings are interpreted in `tz` and get its offset.
- * Returns null when the value is not a parseable timestamp.
+ * Returns null when the value is not a parseable timestamp or contains invalid/overflowing parts.
  */
 export function toIsoWithOffset(value: string, tz: string): string | null {
   const trimmed = value.trim();
-  if (HAS_OFFSET.test(trimmed)) {
+  const m = ISO_OR_WALL.exec(trimmed);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, frac, offsetStr] = m;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(h);
+  const minute = Number(mi);
+  const second = Number(s);
+
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  if (hour < 0 || hour > 23) return null;
+  if (minute < 0 || minute > 59) return null;
+  if (second < 0 || second > 59) return null;
+
+  const testDate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    testDate.getUTCFullYear() !== year ||
+    testDate.getUTCMonth() !== month - 1 ||
+    testDate.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  if (offsetStr) {
+    if (offsetStr.toUpperCase() !== 'Z') {
+      const offMatch = /^([+-])(\d{2}):?(\d{2})$/.exec(offsetStr);
+      if (!offMatch) return null;
+      const offH = Number(offMatch[2]);
+      const offM = Number(offMatch[3]);
+      if (offH > 23 || offM > 59) return null;
+    }
     const date = new Date(trimmed.replace(' ', 'T'));
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
   }
-  const m = WALL.exec(trimmed);
-  if (!m) return null;
-  const [, y, mo, d, h, mi, s, frac] = m;
+
   const ms = Number(((frac ?? '0') + '00').slice(0, 3));
-  const wallAsUtc = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s), ms);
-  if (new Date(wallAsUtc).getUTCMonth() !== Number(mo) - 1) return null; // e.g. Feb 31
+  const wallAsUtc = Date.UTC(year, month - 1, day, hour, minute, second, ms);
   // Two passes settle the offset across DST boundaries.
   let offset = offsetMinutes(wallAsUtc, tz);
   offset = offsetMinutes(wallAsUtc - offset * 60_000, tz);

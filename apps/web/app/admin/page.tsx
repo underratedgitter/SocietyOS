@@ -28,6 +28,7 @@ import {
   AdminInvoicesManager,
 } from '@/components/community-tabs';
 import { apiRequest } from '@/lib/api';
+import { fetchAllPasses } from '@/lib/passes';
 import type {
   AccessEvent,
   AccessPoint,
@@ -38,7 +39,6 @@ import type {
   FlatOption,
   GateCommand,
   Overview,
-  PassPage,
   PassView,
   Resident,
   SecurityAlert,
@@ -136,6 +136,8 @@ function Stat({ label, value, note }: { label: string; value: number | string; n
   );
 }
 
+
+
 export default function AdminPage() {
   return (
     <Protected roles={['SOCIETY_ADMIN']}>
@@ -195,7 +197,7 @@ function AdminWorkspace() {
     const base = `/api/v1/societies/${societyId}`;
     Promise.all([
       apiRequest<Overview>(`${base}/overview`),
-      apiRequest<PassPage>(`/api/v1/visitor-passes?societyId=${societyId}&limit=100`),
+      fetchAllPasses(societyId),
       apiRequest<Resident[]>(`${base}/residents`),
       apiRequest<StaffMember[]>(`${base}/staff`),
       apiRequest<Building[]>(`${base}/buildings`),
@@ -210,7 +212,7 @@ function AdminWorkspace() {
         if (!active) return;
         setData({
           overview,
-          passes: passes.items,
+          passes,
           residents,
           staff,
           buildings,

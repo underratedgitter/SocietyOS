@@ -24,6 +24,10 @@ const SENSITIVE_KEYS = new Set<string>([
   'societyos_mobile_cookies',
 ]);
 
+function isSensitiveKey(key: string): boolean {
+  return [...SENSITIVE_KEYS].some((base) => key === base || key.startsWith(`${base}.`));
+}
+
 async function getStorageItem(key: string): Promise<string | null> {
   if (SecureStore && typeof SecureStore.getItemAsync === 'function') {
     try {
@@ -34,7 +38,7 @@ async function getStorageItem(key: string): Promise<string | null> {
     }
   }
 
-  if (!SENSITIVE_KEYS.has(key) && typeof window !== 'undefined' && window.localStorage) {
+  if (!isSensitiveKey(key) && typeof window !== 'undefined' && window.localStorage) {
     try {
       return window.localStorage.getItem(key);
     } catch {
@@ -59,7 +63,7 @@ async function setStorageItem(key: string, value: string): Promise<void> {
 
   // Sensitive keys (such as visitor credentials PIN/QR or tokens) MUST NEVER be stored in unencrypted browser localStorage.
   // Non-sensitive cached data only falls back to localStorage if SecureStore is not available.
-  if (!writtenInSecureStore && !SENSITIVE_KEYS.has(key)) {
+  if (!writtenInSecureStore && !isSensitiveKey(key)) {
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
         window.localStorage.setItem(key, value);
@@ -110,6 +114,28 @@ export interface StoredTokens {
   accessToken: string | null;
   refreshToken: string | null;
   cookies: Record<string, string>;
+}
+
+
+export interface CacheScope {
+  userId: string;
+  societyId: string;
+  flatId?: string;
+}
+
+function scopedKey(base: string, scope?: CacheScope): string {
+  if (!scope) return base;
+  // SecureStore accepts only letters, digits, dots, hyphens and underscores.
+  // Encode the tuple to keep arbitrary identifiers distinct without invalid key characters.
+  const suffix = JSON.stringify([scope.userId, scope.societyId, scope.flatId ?? ''])
+    .split('').map((character) => character.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+  return `${base}.${suffix}`;
+}
+
+// Track scoped storage keys so a global reset can purge every scope we have touched.
+const knownScopedKeys = new Set<string>();
+function trackKey(key: string): void {
+  knownScopedKeys.add(key);
 }
 
 export const mobileStorage = {
@@ -188,16 +214,20 @@ export const mobileStorage = {
     await deleteStorageItem(KEYS.SESSION);
   },
 
-  async saveCachedPasses(passes: unknown[]): Promise<void> {
+  async saveCachedPasses(passes: unknown[], scope?: CacheScope): Promise<void> {
+    const key = scopedKey(KEYS.CACHED_PASSES, scope);
     if (passes && passes.length > 0) {
-      await setStorageItem(KEYS.CACHED_PASSES, JSON.stringify(passes));
+      await setStorageItem(key, JSON.stringify(passes));
+      trackKey(key);
     } else {
-      await deleteStorageItem(KEYS.CACHED_PASSES);
+      await deleteStorageItem(key);
     }
   },
 
-  async loadCachedPasses<T>(): Promise<T | null> {
-    const raw = await getStorageItem(KEYS.CACHED_PASSES);
+  async loadCachedPasses<T>(scope?: CacheScope): Promise<T | null> {
+    const key = scopedKey(KEYS.CACHED_PASSES, scope);
+    if (key !== KEYS.CACHED_PASSES) trackKey(key);
+    const raw = await getStorageItem(key);
     if (!raw) return null;
     try {
       return JSON.parse(raw) as T;
@@ -206,16 +236,20 @@ export const mobileStorage = {
     }
   },
 
-  async saveCachedRelatives(relatives: unknown[]): Promise<void> {
+  async saveCachedRelatives(relatives: unknown[], scope?: CacheScope): Promise<void> {
+    const key = scopedKey(KEYS.CACHED_RELATIVES, scope);
     if (relatives && relatives.length > 0) {
-      await setStorageItem(KEYS.CACHED_RELATIVES, JSON.stringify(relatives));
+      await setStorageItem(key, JSON.stringify(relatives));
+      trackKey(key);
     } else {
-      await deleteStorageItem(KEYS.CACHED_RELATIVES);
+      await deleteStorageItem(key);
     }
   },
 
-  async loadCachedRelatives<T>(): Promise<T | null> {
-    const raw = await getStorageItem(KEYS.CACHED_RELATIVES);
+  async loadCachedRelatives<T>(scope?: CacheScope): Promise<T | null> {
+    const key = scopedKey(KEYS.CACHED_RELATIVES, scope);
+    if (key !== KEYS.CACHED_RELATIVES) trackKey(key);
+    const raw = await getStorageItem(key);
     if (!raw) return null;
     try {
       return JSON.parse(raw) as T;
@@ -224,16 +258,20 @@ export const mobileStorage = {
     }
   },
 
-  async saveCachedNotices(notices: unknown[]): Promise<void> {
+  async saveCachedNotices(notices: unknown[], scope?: CacheScope): Promise<void> {
+    const key = scopedKey(KEYS.CACHED_NOTICES, scope);
     if (notices && notices.length > 0) {
-      await setStorageItem(KEYS.CACHED_NOTICES, JSON.stringify(notices));
+      await setStorageItem(key, JSON.stringify(notices));
+      trackKey(key);
     } else {
-      await deleteStorageItem(KEYS.CACHED_NOTICES);
+      await deleteStorageItem(key);
     }
   },
 
-  async loadCachedNotices<T>(): Promise<T | null> {
-    const raw = await getStorageItem(KEYS.CACHED_NOTICES);
+  async loadCachedNotices<T>(scope?: CacheScope): Promise<T | null> {
+    const key = scopedKey(KEYS.CACHED_NOTICES, scope);
+    if (key !== KEYS.CACHED_NOTICES) trackKey(key);
+    const raw = await getStorageItem(key);
     if (!raw) return null;
     try {
       return JSON.parse(raw) as T;
@@ -242,23 +280,31 @@ export const mobileStorage = {
     }
   },
 
-  async saveCachedCredentials(credentials: Record<string, { pin: string; qrToken: string }>): Promise<void> {
+  async saveCachedCredentials(
+    credentials: Record<string, { pin: string; qrToken: string }>,
+    scope?: CacheScope,
+  ): Promise<void> {
+    const key = scopedKey(KEYS.CACHED_CREDENTIALS, scope);
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
         window.localStorage.removeItem(KEYS.CACHED_CREDENTIALS);
+        window.localStorage.removeItem(key);
       } catch {
         // Ignore
       }
     }
     if (credentials && Object.keys(credentials).length > 0) {
-      await setStorageItem(KEYS.CACHED_CREDENTIALS, JSON.stringify(credentials));
+      await setStorageItem(key, JSON.stringify(credentials));
+      if (key !== KEYS.CACHED_CREDENTIALS) trackKey(key);
     } else {
-      await deleteStorageItem(KEYS.CACHED_CREDENTIALS);
+      await deleteStorageItem(key);
     }
   },
 
-  async loadCachedCredentials(): Promise<Record<string, { pin: string; qrToken: string }> | null> {
-    const raw = await getStorageItem(KEYS.CACHED_CREDENTIALS);
+  async loadCachedCredentials(scope?: CacheScope): Promise<Record<string, { pin: string; qrToken: string }> | null> {
+    const key = scopedKey(KEYS.CACHED_CREDENTIALS, scope);
+    if (key !== KEYS.CACHED_CREDENTIALS) trackKey(key);
+    const raw = await getStorageItem(key);
     if (!raw) return null;
     try {
       return JSON.parse(raw) as Record<string, { pin: string; qrToken: string }>;
@@ -267,14 +313,30 @@ export const mobileStorage = {
     }
   },
 
-  async clearAllCache(): Promise<void> {
-    await Promise.all([
-      deleteStorageItem(KEYS.SESSION),
-      deleteStorageItem(KEYS.CACHED_PASSES),
-      deleteStorageItem(KEYS.CACHED_RELATIVES),
-      deleteStorageItem(KEYS.CACHED_NOTICES),
-      deleteStorageItem(KEYS.CACHED_CREDENTIALS),
+  async clearAllCache(scope?: CacheScope): Promise<void> {
+    if (scope) {
+      const keys = [
+        scopedKey(KEYS.SESSION, scope),
+        scopedKey(KEYS.CACHED_PASSES, scope),
+        scopedKey(KEYS.CACHED_RELATIVES, scope),
+        scopedKey(KEYS.CACHED_NOTICES, scope),
+        scopedKey(KEYS.CACHED_CREDENTIALS, scope),
+      ];
+      for (const k of keys) trackKey(k);
+      await Promise.all(keys.map((k) => deleteStorageItem(k)));
+      return;
+    }
+
+    const keys = new Set<string>([
+      KEYS.SESSION,
+      KEYS.CACHED_PASSES,
+      KEYS.CACHED_RELATIVES,
+      KEYS.CACHED_NOTICES,
+      KEYS.CACHED_CREDENTIALS,
+      ...knownScopedKeys,
     ]);
+    await Promise.all(Array.from(keys).map((k) => deleteStorageItem(k)));
+    knownScopedKeys.clear();
   },
 
   async saveApiUrl(url: string): Promise<void> {

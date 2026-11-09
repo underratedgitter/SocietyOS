@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   RefreshControl,
@@ -18,7 +18,7 @@ import { colors } from '../styles/theme';
 type NoticeCategoryFilter = 'ALL' | 'EMERGENCY' | 'MAINTENANCE' | 'EVENT' | 'GENERAL';
 
 export function NoticesScreen() {
-  const { selectedSociety } = useAuth();
+  const { session, selectedSociety } = useAuth();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   // Read via ref so the loader isn't recreated (and re-fired) whenever the list length changes.
   const announcementsCountRef = useRef(0);
@@ -29,29 +29,53 @@ export function NoticesScreen() {
   const [activeFilter, setActiveFilter] = useState<NoticeCategoryFilter>('ALL');
 
   const societyId = selectedSociety?.id ?? '';
+  const userId = session?.user?.id ?? '';
+  const cacheScope = useMemo(() => ({ userId, societyId }), [userId, societyId]);
+  const scopeId = `${userId}|${societyId}`;
+  const scopeIdRef = useRef(scopeId);
+  scopeIdRef.current = scopeId;
+  const cacheLoadTokenRef = useRef(0);
 
-  // Load cached notices on mount
+  // Reset transient state on scope change.
   useEffect(() => {
+    setAnnouncements([]);
+    setError(null);
+    setLoading(true);
+  }, [scopeId]);
+
+  // Load cached notices for active scope.
+  useEffect(() => {
+    const thisScopeId = scopeId;
+    let active = true;
+    const token = ++cacheLoadTokenRef.current;
     void (async () => {
-      const cached = await mobileStorage.loadCachedNotices<Announcement[]>();
+      const cached = await mobileStorage.loadCachedNotices<Announcement[]>(cacheScope);
+      if (!active || token !== cacheLoadTokenRef.current || scopeIdRef.current !== thisScopeId) return;
       if (cached && cached.length > 0) {
         setAnnouncements(cached);
         setLoading(false);
       }
     })();
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [scopeId]);
 
   const loadNotices = useCallback(async () => {
     if (!societyId) return;
+    const thisScopeId = scopeId;
     setError(null);
     try {
       const items = await api.listAnnouncements(societyId);
+      if (scopeIdRef.current !== thisScopeId) return;
       setAnnouncements(items);
-      void mobileStorage.saveCachedNotices(items);
+      void mobileStorage.saveCachedNotices(items, cacheScope);
     } catch (err) {
+      if (scopeIdRef.current !== thisScopeId) return;
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
         if (announcementsCountRef.current === 0) {
-          const cached = await mobileStorage.loadCachedNotices<Announcement[]>();
+          const cached = await mobileStorage.loadCachedNotices<Announcement[]>(cacheScope);
+          if (scopeIdRef.current !== thisScopeId) return;
           if (cached && cached.length > 0) {
             setAnnouncements(cached);
           } else {
@@ -63,10 +87,12 @@ export function NoticesScreen() {
         setError(msg);
       }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (scopeIdRef.current === thisScopeId) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [societyId]);
+  }, [societyId, scopeId, cacheScope]);
 
   useEffect(() => {
     void loadNotices();

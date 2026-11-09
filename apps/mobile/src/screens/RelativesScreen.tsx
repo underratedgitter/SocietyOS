@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -39,33 +39,67 @@ export function RelativesScreen() {
   } | null>(null);
 
   const flatId = selectedFlat?.id ?? '';
+  const userId = session?.user?.id ?? '';
+  const societyId = selectedSociety?.id ?? '';
+  const cacheScope = useMemo(() => ({ userId, societyId, flatId }), [userId, societyId, flatId]);
+  const scopeId = `${userId}|${societyId}|${flatId}`;
+  const scopeIdRef = useRef(scopeId);
+  scopeIdRef.current = scopeId;
+  const cacheLoadTokenRef = useRef(0);
 
-  // Load cached relatives immediately on mount
+  // Reset transient state on scope change.
   useEffect(() => {
+    setRelatives([]);
+    setAccessPoints([]);
+    setError(null);
+    setLoading(true);
+  }, [scopeId]);
+
+  // Load cached relatives for active scope.
+  useEffect(() => {
+    const thisScopeId = scopeId;
+    let active = true;
+    const token = ++cacheLoadTokenRef.current;
     void (async () => {
-      const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>();
+      const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>(cacheScope);
+      if (!active || token !== cacheLoadTokenRef.current || scopeIdRef.current !== thisScopeId) return;
       if (cached && cached.length > 0) {
         setRelatives(cached);
         setLoading(false);
       }
     })();
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [scopeId]);
 
   const loadData = useCallback(async () => {
     if (!flatId) return;
+    const thisScopeId = scopeId;
     setError(null);
     try {
-      const [relativesList, gates] = await Promise.all([
-        api.listRelatives(flatId),
-        api.getAccessPoints(flatId).catch(() => []),
-      ]);
+      const relativesList = await api.listRelatives(flatId);
+      if (scopeIdRef.current !== thisScopeId) return;
+
+      let gates: AccessPoint[] = [];
+      let gateError: string | null = null;
+      try {
+        gates = await api.getAccessPoints(flatId);
+      } catch (err) {
+        gateError = err instanceof ApiError ? err.message : 'Could not load gate access points.';
+      }
+      if (scopeIdRef.current !== thisScopeId) return;
+
       setRelatives(relativesList);
       setAccessPoints(gates);
-      void mobileStorage.saveCachedRelatives(relativesList);
+      void mobileStorage.saveCachedRelatives(relativesList, cacheScope);
+      if (gateError) setError(gateError);
     } catch (err) {
+      if (scopeIdRef.current !== thisScopeId) return;
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
         if (relativesCountRef.current === 0) {
-          const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>();
+          const cached = await mobileStorage.loadCachedRelatives<RelativeMember[]>(cacheScope);
+          if (scopeIdRef.current !== thisScopeId) return;
           if (cached && cached.length > 0) {
             setRelatives(cached);
           } else {
@@ -77,10 +111,12 @@ export function RelativesScreen() {
         setError(msg);
       }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (scopeIdRef.current === thisScopeId) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [flatId]);
+  }, [flatId, scopeId, cacheScope]);
 
   useEffect(() => {
     void loadData();
@@ -175,6 +211,9 @@ export function RelativesScreen() {
         {error ? (
           <View style={styles.errorBanner}>
             <Text style={styles.errorText}>{error}</Text>
+            <TouchableOpacity onPress={() => void loadData()} style={styles.retryBtn}>
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
           </View>
         ) : null}
 
@@ -376,11 +415,27 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     marginBottom: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   errorText: {
     color: '#9f1239',
     fontSize: 12,
     fontWeight: '600',
+    flex: 1,
+  },
+  retryBtn: {
+    backgroundColor: '#9f1239',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  retryBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
   statsRail: {
     flexDirection: 'row',

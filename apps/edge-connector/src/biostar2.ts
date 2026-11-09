@@ -26,6 +26,7 @@ export interface BioStarEventRow {
   datetime: string;
   eventCode: string;
   userId: string | null;
+  hint?: string;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -46,7 +47,7 @@ export function parseEventSearch(json: unknown): BioStarEventRow[] {
     if (!id || !datetime || !eventCode) continue;
     const user = isObj(r.user_id) ? r.user_id.user_id : undefined;
     const userId = typeof user === 'string' || typeof user === 'number' ? String(user) : null;
-    out.push({ id, datetime, eventCode, userId });
+    out.push({ id, datetime, eventCode, userId, ...(typeof r.hint === 'string' && r.hint ? { hint: r.hint } : {}) });
   }
   return out;
 }
@@ -142,6 +143,8 @@ export class BioStar2Source implements Source {
   readonly name: string;
   readonly pollIntervalSec: number;
   private cursor: Cursor | null;
+  private hint: string | null = null;
+  private readonly doorResults = new Map<string, BioStarCommandResult>();
 
   constructor(
     private readonly cfg: BioStar2SourceConfig,
@@ -154,6 +157,30 @@ export class BioStar2Source implements Source {
     this.name = cfg.name;
     this.pollIntervalSec = cfg.pollIntervalSec;
     this.cursor = state.load();
+    if (typeof this.cursor === 'string' && this.cursor.startsWith('{')) {
+      const checkpoint: unknown = JSON.parse(this.cursor);
+      if (!isObj(checkpoint) || checkpoint.version !== 1 ||
+          !(checkpoint.since === null || typeof checkpoint.since === 'string') ||
+          !(checkpoint.hint === null || typeof checkpoint.hint === 'string') ||
+          !Array.isArray(checkpoint.doors)) {
+        throw new SourceError('Invalid BioStar checkpoint');
+      }
+      this.cursor = checkpoint.since;
+      this.hint = checkpoint.hint;
+      for (const entry of checkpoint.doors as unknown[]) {
+        if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !isObj(entry[1]) ||
+            typeof entry[1].success !== 'boolean' || typeof entry[1].result !== 'string') {
+          throw new SourceError('Invalid BioStar door journal');
+        }
+        this.doorResults.set(entry[0], { success: entry[1].success, result: entry[1].result });
+      }
+    }
+  }
+
+  private saveCheckpoint(): void {
+    this.state.save(JSON.stringify({
+      version: 1, since: this.cursor, hint: this.hint, doors: [...this.doorResults],
+    }));
   }
 
   private async fetchEvents(since: string): Promise<BioStarEventRow[]> {
@@ -161,6 +188,7 @@ export class BioStar2Source implements Source {
     const res = await this.api.call('POST', '/api/events/search', {
       Query: {
         limit: this.cfg.batchSize,
+        ...(this.hint ? { hint: this.hint } : {}),
         conditions: [
           { column: 'datetime', operator: this.cfg.cursorOperator, values: [since] },
           { column: 'event_type_id.code', operator: this.cfg.eventCodeOperator, values: codes },
@@ -177,6 +205,11 @@ export class BioStar2Source implements Source {
       const since = String(this.cursor ?? new Date(this.now() - this.cfg.initialLookbackHours * 3600_000).toISOString());
       const rows = await this.fetchEvents(since);
       if (rows.length === 0) break;
+      const lastHint = rows[rows.length - 1]?.hint;
+      if (lastHint && lastHint === this.hint) throw new SourceError('BioStar pagination hint did not advance');
+      if (rows.length >= this.cfg.batchSize && !lastHint) {
+        throw new SourceError('BioStar full event batches require vendor pagination hints');
+      }
       const events: BiometricEvent[] = [];
       for (const row of rows) {
         const e = mapBioStarEvent(row, this.cfg);
@@ -186,21 +219,38 @@ export class BioStar2Source implements Source {
       const last = rows[rows.length - 1];
       const next = last ? toIsoWithOffset(last.datetime, 'UTC') : null;
       if (!next) throw new SourceError('BioStar 2 returned an unparseable datetime');
-      this.state.save(next);
-      this.cursor = next;
+      // Keep the original time filter when following a vendor hint. Unlike a timestamp
+      // cursor, the hint also distinguishes events with identical timestamps.
+      if (lastHint) {
+        this.cursor = since;
+        this.hint = lastHint;
+      } else {
+        this.cursor = next;
+      }
+      this.saveCheckpoint();
       this.log.info('batch forwarded', { source: this.name, rows: rows.length, mapped: events.length, ...counts });
-      // The cursor operator is ">=", so a full batch that does not advance would loop forever;
-      // already-forwarded events come back as DUPLICATE thanks to vendorEventId.
-      if (rows.length < this.cfg.batchSize || next === since || signal.aborted) break;
+      if (rows.length < this.cfg.batchSize || signal.aborted) break;
     }
 
     if (signal.aborted) return;
     for (const command of await this.cloud.pullCommands()) {
-      let outcome: BioStarCommandResult;
-      try {
-        outcome = await executeBioStarCommand(this.api, command, this.cfg.doorId);
-      } catch (e) {
-        outcome = { success: false, result: `BIOSTAR_ERROR: ${e instanceof Error ? e.name : 'unknown'}` };
+      let outcome = command.kind === 'OPEN_DOOR' ? this.doorResults.get(command.id) : undefined;
+      if (!outcome) {
+        if (command.kind === 'OPEN_DOOR') {
+          // Persist the claim before touching hardware. A crash or ambiguous response must
+          // require operator reconciliation, never another physical actuation.
+          this.doorResults.set(command.id, { success: false, result: 'EXECUTION_UNCERTAIN: reconcile door state before issuing a new command' });
+          this.saveCheckpoint();
+        }
+        try {
+          outcome = await executeBioStarCommand(this.api, command, this.cfg.doorId);
+        } catch (e) {
+          outcome = { success: false, result: `BIOSTAR_ERROR: ${e instanceof Error ? e.name : 'unknown'}` };
+        }
+        if (command.kind === 'OPEN_DOOR') {
+          this.doorResults.set(command.id, outcome);
+          this.saveCheckpoint();
+        }
       }
       await this.cloud.ack(command.id, outcome.success, outcome.result);
       this.log.info('sync command executed', { kind: command.kind, success: outcome.success });

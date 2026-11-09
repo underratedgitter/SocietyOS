@@ -255,13 +255,7 @@ export class BiometricsService implements OnModuleInit {
       throw AppException.notFound('ACCESS_POINT_NOT_FOUND', 'Access point not found in this society');
     }
 
-    const adapter = this.adapterFactory.getOrCreate(
-      accessPoint.id,
-      accessPoint.name,
-      accessPoint.type,
-    );
-
-    if (!enrollment) {
+    if (!enrollment || enrollment.type !== dto.type) {
       // Denial: Unknown biometric template
       const denialEvent = await this.prisma.accessEvent.create({
         data: {
@@ -315,14 +309,13 @@ export class BiometricsService implements OnModuleInit {
       };
     }
 
-    // Biometric verified! Open the gate adapter
-    await adapter.open();
-
     // Actuate real hardware on Biometrics: insert GateCommand into PostgreSQL and publish via MQTT
     // A reader-originated scan actuates the reader's own (already authenticated and linked)
     // controller rather than whichever device happens to be linked first.
-    const deviceIdBio =
-      origin?.deviceId ?? (accessPoint.devices?.[0]?.deviceId || accessPoint.devices?.[0]?.device?.id);
+    const controller = accessPoint.devices.find((link) =>
+      link.device.status === 'ACTIVE' && (!origin?.deviceId || link.deviceId === origin.deviceId),
+    );
+    const deviceIdBio = controller?.deviceId;
     let gateCommand:
       | { status: 'ISSUED'; id: string }
       | { status: 'FAILED'; error: string };
@@ -349,6 +342,9 @@ export class BiometricsService implements OnModuleInit {
       } catch (cmdErr: unknown) {
         const errorMsg = cmdErr instanceof Error ? cmdErr.message : String(cmdErr);
         this.logger.warn(`Biometric GateCommand/MQTT dispatch failed: ${errorMsg}`);
+        await this.prisma.gateCommand.updateMany({
+          where: { id: commandIdBio, status: 'ISSUED' }, data: { status: 'EXPIRED' },
+        });
         gateCommand = { status: 'FAILED', error: errorMsg };
       }
     } else {

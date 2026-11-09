@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { AppException } from '../src/common/app.exception';
 import { publicIpRateLimit, RegistrationService } from '../src/registration/registration.service';
 import * as config from '../src/config';
@@ -244,6 +245,29 @@ describe('Registration & Relatives Service Modules', () => {
           societyId: SOCIETY_ID,
         }),
       ).rejects.toThrow(AppException);
+    });
+
+    it.each([
+      ['email', 'EMAIL_IN_USE'],
+      ['phone', 'PHONE_IN_USE'],
+    ])('maps a concurrent %s unique violation to %s instead of a 500', async (field, code) => {
+      mockPrisma.user.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: [field] },
+        }),
+      );
+
+      await expect(
+        registrationService.registerUser({
+          name: 'Racing User',
+          email: 'race@example.com',
+          phone: '+91 99999 22222',
+          password: 'Password#2026',
+          societyId: SOCIETY_ID,
+        }),
+      ).rejects.toMatchObject({ code, status: 409 });
     });
 
     it('rejects registration if flat belongs to a different society', async () => {
@@ -544,6 +568,41 @@ describe('Registration & Relatives Service Modules', () => {
       expect(result.requiresHostApproval).toBe(true);
     });
 
+    it('caps anonymous self-registrations per flat under the per-flat lock, inside the insert transaction', async () => {
+      const calls: string[] = [];
+      mockPrisma.$executeRaw.mockImplementation(async () => {
+        calls.push('lock');
+        return 1;
+      });
+      mockPrisma.visitorPass.count.mockImplementation(async (args: { where: Record<string, unknown> }) => {
+        calls.push('count');
+        expect(args.where).toMatchObject({ flatId: FLAT_ID, credentials: { none: {} } });
+        return 10;
+      });
+
+      await expect(
+        registrationService.selfRegisterVisitor({
+          societyId: SOCIETY_ID,
+          flatId: FLAT_ID,
+          visitorName: 'Flooder',
+          category: 'FRIEND',
+        }),
+      ).rejects.toMatchObject({ code: 'INVITATION_LIMIT', status: 422 });
+
+      expect(calls).toEqual(['lock', 'count']);
+      expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
+    });
+
+    it('does not count pending self-registrations toward the host invite cap', async () => {
+      await relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 });
+
+      const where = mockPrisma.visitorPass.count.mock.calls[0]?.[0]?.where;
+      expect(where).toMatchObject({
+        flatId: FLAT_ID,
+        NOT: { status: { in: ['PENDING_APPROVAL', 'REVOKED'] }, credentials: { none: {} } },
+      });
+    });
+
     it('rejects self-registration when rate limit is exceeded', async () => {
       mockRateLimit.hit.mockResolvedValueOnce({ allowed: false, remaining: 0, resetAt: new Date() });
 
@@ -719,7 +778,7 @@ describe('Registration & Relatives Service Modules', () => {
 
     it('retries on P2002 PIN collision during relative registration and succeeds', async () => {
       mockPrisma.visitorPass.create
-        .mockRejectedValueOnce({ code: 'P2002', message: 'Unique constraint failed on credentialHash' })
+        .mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('Unique constraint failed on credentialHash', { code: 'P2002', clientVersion: '6.16.0' }))
         .mockResolvedValueOnce({
           id: 'pass-rel-retry-1',
           societyId: SOCIETY_ID,
@@ -806,7 +865,11 @@ describe('Registration & Relatives Service Modules', () => {
         relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 }),
       ).rejects.toMatchObject({ code: 'INVITATION_LIMIT' });
       expect(mockPrisma.visitorPass.count).toHaveBeenCalledWith({
-        where: { flatId: FLAT_ID, createdAt: { gte: expect.any(Date) } },
+        where: {
+          flatId: FLAT_ID,
+          createdAt: { gte: expect.any(Date) },
+          NOT: { status: { in: ['PENDING_APPROVAL', 'REVOKED'] }, credentials: { none: {} } },
+        },
       });
       expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
     });
@@ -841,24 +904,87 @@ describe('Registration & Relatives Service Modules', () => {
       ).rejects.toThrow(AppException);
     });
 
-    it('revokes active passes and unlinks relative from directory on delete', async () => {
+    it('removes only this flat association without changing the shared visitor', async () => {
       const result = await relativesService.deleteRelative(USER_ID, FLAT_ID, VISITOR_ID);
       expect(result.ok).toBe(true);
-      expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            flatId: FLAT_ID,
-            visitorId: VISITOR_ID,
-            status: 'ACTIVE',
-          }),
-          data: expect.objectContaining({
-            status: 'REVOKED',
-          }),
-        }),
-      );
-      expect(mockPrisma.visitor.update).toHaveBeenCalledWith({
-        where: { id: VISITOR_ID },
+      expect(mockPrisma.visitor.update).not.toHaveBeenCalled();
+      expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith({
+        where: { flatId: FLAT_ID, visitorId: VISITOR_ID, societyId: SOCIETY_ID, category: 'RELATIVE' },
         data: { category: 'OTHER' },
+      });
+      expect(mockPrisma.visitorPass.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ flatId: FLAT_ID, visitorId: VISITOR_ID }),
+        data: expect.objectContaining({ status: 'REVOKED' }),
+      }));
+    });
+
+    it('rolls back visitor creation when all pass credential attempts fail', async () => {
+      let inTransaction = false;
+      let committedVisitors = 0;
+      let stagedVisitors = 0;
+      mockPrisma.$transaction.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => {
+        inTransaction = true;
+        stagedVisitors = 0;
+        try {
+          const result = await callback(mockPrisma);
+          committedVisitors += stagedVisitors;
+          return result;
+        } finally {
+          inTransaction = false;
+          stagedVisitors = 0;
+        }
+      });
+      mockPrisma.visitor.create.mockImplementation(async () => {
+        expect(inTransaction).toBe(true);
+        stagedVisitors++;
+        return { id: VISITOR_ID, societyId: SOCIETY_ID, createdAt: new Date() };
+      });
+      mockPrisma.visitorPass.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError(
+        'Unique credentialHash', { code: 'P2002', clientVersion: '6.16.0' },
+      ));
+      await expect(relativesService.registerRelative(USER_ID, FLAT_ID, { name: 'Cousin', relation: 'Cousin' }))
+        .rejects.toMatchObject({ code: 'P2002' });
+      expect(mockPrisma.visitor.create).toHaveBeenCalledTimes(5);
+      expect(committedVisitors).toBe(0);
+    });
+
+    describe('unapproved public self-registrations are not household relatives', () => {
+      // A stranger self-registering as RELATIVE for this flat leaves a credential-less
+      // PENDING_APPROVAL (or, once rejected, REVOKED) pass. Emulate Prisma's filters over it.
+      const strangerPass = { id: 'self-reg-pass', flatId: FLAT_ID, visitorId: VISITOR_ID, credentials: [] as unknown[] };
+      const matches = (where: any) =>
+        where.flatId === strangerPass.flatId &&
+        (where.visitorId === undefined || where.visitorId === strangerPass.visitorId) &&
+        (!where.credentials?.some || strangerPass.credentials.length > 0);
+
+      beforeEach(() => {
+        mockPrisma.visitorPass.findFirst.mockImplementation(async ({ where }: any) =>
+          matches(where) ? strangerPass : null,
+        );
+        const strangerVisitor = { id: VISITOR_ID, societyId: SOCIETY_ID, name: 'Stranger (Uncle)', phone: null, createdAt: new Date(), passes: [] };
+        mockPrisma.visitor.findMany.mockImplementation(async ({ where }: any) =>
+          matches(where.passes.some) ? [strangerVisitor] : [],
+        );
+        mockPrisma.visitor.findFirst.mockImplementation(async ({ where }: any) =>
+          matches(where.passes.some) ? strangerVisitor : null,
+        );
+      });
+
+      it('does not list them in the flat relatives directory', async () => {
+        await expect(relativesService.listRelatives(USER_ID, FLAT_ID)).resolves.toEqual([]);
+      });
+
+      it('refuses a one-click quick pass for them', async () => {
+        await expect(
+          relativesService.issueQuickPass(USER_ID, FLAT_ID, VISITOR_ID, { validHours: 4, maxUses: 1 }),
+        ).rejects.toMatchObject({ code: 'VISITOR_NOT_FOUND' });
+        expect(mockPrisma.visitorPass.create).not.toHaveBeenCalled();
+      });
+
+      it('does not block the resident from registering a relative of the same name', async () => {
+        await expect(
+          relativesService.registerRelative(USER_ID, FLAT_ID, { name: 'Stranger', relation: 'Uncle' }),
+        ).resolves.toHaveProperty('initialPass');
       });
     });
 

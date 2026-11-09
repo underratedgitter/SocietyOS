@@ -671,17 +671,19 @@ describe('OWASP API Security Audit & Hardening Suite', () => {
       });
     });
 
-    it('swallows concurrent duplicate insertion (race condition P2002) gracefully', async () => {
-      mockPrisma.idempotencyRecord.updateMany = jest.fn().mockResolvedValue({ count: 1 });
-      const duplicateError = new Prisma.PrismaClientKnownRequestError('duplicate', {
-        code: 'P2002',
-        clientVersion: '6.16.0',
-      });
-      mockPrisma.idempotencyRecord.create.mockRejectedValue(duplicateError);
+    it('passes a fresh key to the transactional create instead of saving outside it', async () => {
+      const dto: any = { flatId: 'flat-1', category: 'FRIEND', visitor: { name: 'Visitor A' } };
+      mockPrisma.idempotencyRecord.findUnique.mockResolvedValue(null);
+      mockPassesService.create.mockResolvedValue({ pass: { id: 'pass-1' } });
 
-      await expect(
-        idempotencyService.save('some-key', 'visitor-passes.create', 'hash-1', { ok: true }),
-      ).resolves.toBeUndefined();
+      await visitorPassesController.create(userA_Admin, dto, 'unique-key-12345678');
+
+      expect(mockPassesService.create).toHaveBeenCalledWith(userA_Admin, dto, {
+        key: `visitor-passes:${userA_Admin.sub}:unique-key-12345678`,
+        fingerprint: idempotencyService.fingerprint(dto),
+        ttlHours: 24,
+      });
+      expect(mockPrisma.idempotencyRecord.create).not.toHaveBeenCalled();
     });
   });
 

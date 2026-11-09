@@ -20,10 +20,10 @@ import {
   Wrench,
 } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
+import { fetchAllPasses } from '@/lib/passes';
 import type {
   AccessPoint,
   HouseholdMember,
-  PassPage,
   PassView,
   PassWithCredentials,
 } from '@/lib/types';
@@ -59,6 +59,8 @@ const NAV: NavItem[] = [
 ];
 
 const CURRENT_STATUSES = new Set(['ACTIVE', 'PENDING_APPROVAL', 'SCHEDULED']);
+
+
 
 export default function ResidentPage() {
   return (
@@ -140,9 +142,9 @@ function ResidentWorkspace() {
     let active = true;
     setLoading(true);
     setLoadError('');
-    apiRequest<PassPage>(`/api/v1/visitor-passes?societyId=${societyId}&limit=100`)
-      .then((page) => {
-        if (active) setPasses(page.items);
+    fetchAllPasses(societyId)
+      .then((items) => {
+        if (active) setPasses(items);
       })
       .catch((caught) => {
         if (active) setLoadError(errorMessage(caught));

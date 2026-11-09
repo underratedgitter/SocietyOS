@@ -19,6 +19,9 @@ describe('toIsoWithOffset', () => {
   it('rejects garbage and impossible dates', () => {
     assert.equal(toIsoWithOffset('not a date', 'UTC'), null);
     assert.equal(toIsoWithOffset('2026-02-31 10:00:00', 'UTC'), null);
+    for (const date of ['2026-04-31T10:00:00Z', '2026-04-31T10:00:00+05:30', '2026-03-01T24:00:00', '2026-03-01T10:60:00', '2026-13-01T10:00:00']) {
+      assert.equal(toIsoWithOffset(date, 'UTC'), null, date);
+    }
   });
 });
 

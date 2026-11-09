@@ -363,17 +363,20 @@ export class DeviceApiController {
         });
 
         if (ev.decision === 'AUTHORIZED' && ownedPass) {
-          // Atomic increment: the advisory lock only serializes this device, so other devices'
-          // syncs and online redemptions can bump the same pass concurrently. Writing back a
-          // value read earlier would silently drop their uses and re-open an exhausted pass.
-          const counted = await tx.visitorPass.update({
-            where: { id: ownedPass.id },
+          // Guard at the atomic write: parallel online/offline redemptions cannot
+          // consume revoked, invalid or exhausted passes.
+          const counted = await tx.visitorPass.updateMany({
+            where: {
+              id: ownedPass.id, societyId, status: 'ACTIVE',
+              usedCount: { lt: ownedPass.maxUses },
+              validFrom: { lte: validTime }, validUntil: { gte: validTime },
+              accessPoints: { some: { accessPointId: ev.accessPointId } },
+            },
             data: { usedCount: { increment: 1 } },
-            select: { usedCount: true, maxUses: true },
           });
-          if (counted.usedCount >= counted.maxUses) {
+          if (counted.count === 1) {
             await tx.visitorPass.updateMany({
-              where: { id: ownedPass.id, status: 'ACTIVE' },
+              where: { id: ownedPass.id, status: 'ACTIVE', usedCount: { gte: ownedPass.maxUses } },
               data: { status: 'EXHAUSTED' },
             });
           }

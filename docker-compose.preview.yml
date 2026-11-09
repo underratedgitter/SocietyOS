@@ -8,6 +8,7 @@ services:
       APP_BASE_URL: http://localhost
       COOKIE_SECURE: "false"
       CORS_ORIGINS: http://localhost
+      PAYMENTS_MOCK_MODE: "true"
     # Only the preview overlay ships TypeScript sources so the demo seed can run.
     volumes:
       - ./apps/api/src:/app/apps/api/src:ro

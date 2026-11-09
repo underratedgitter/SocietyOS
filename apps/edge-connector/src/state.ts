@@ -39,5 +39,14 @@ export class FileStateStore implements StateStore {
       fs.closeSync(fd);
     }
     fs.renameSync(tmp, this.file);
+    // POSIX needs the directory entry flushed after rename; Windows does not expose directory fsync.
+    if (process.platform !== 'win32') {
+      const dir = fs.openSync(path.dirname(this.file), 'r');
+      try {
+        fs.fsyncSync(dir);
+      } finally {
+        fs.closeSync(dir);
+      }
+    }
   }
 }

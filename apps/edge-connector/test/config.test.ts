@@ -71,6 +71,24 @@ describe('parseConfig', () => {
     assert.match(msg, /ORDER BY/);
   });
 
+  it('requires ascending cursor ordering as the first outer ordering key', () => {
+    for (const order of ['punch_time', 'id DESC', 'punch_time, id', "'ORDER BY id'"]) {
+      assert.match(errorOf(base({ query: `SELECT TOP (@limit) * FROM t WHERE id > @cursor ORDER BY ${order}` })), /cursor/);
+    }
+    assert.doesNotThrow(() => parseConfig(base({ query: 'SELECT TOP (@limit) * FROM t WHERE id > @cursor ORDER BY [id] ASC' }), env));
+  });
+
+  it('validates initialCursor against its selected type', () => {
+    for (const initialCursor of [42, '2026-04-31T10:00:00Z', 'garbage']) {
+      assert.match(errorOf(base({ cursorType: 'datetime', initialCursor })), /initialCursor/);
+    }
+    for (const initialCursor of ['yesterday', Number.POSITIVE_INFINITY]) {
+      assert.match(errorOf(base({ initialCursor })), /initialCursor/);
+    }
+    assert.doesNotThrow(() => parseConfig(base({ cursorType: 'datetime', initialCursor: '2026-04-30T10:00:00Z' }), env));
+    assert.doesNotThrow(() => parseConfig(base({ initialCursor: '42' }), env));
+  });
+
   it('requires secrets to be env var names that are set, never inline', () => {
     assert.match(errorOf(base({ deviceTokenEnv: 'sos_abc.def-123' })), /NAME of an environment variable/);
     assert.match(errorOf(base(), { DB: 'x' }), /TOK is not set/);

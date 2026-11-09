@@ -66,7 +66,6 @@ export class AuthService {
     if (!session || session.revokedAt || session.expiresAt <= new Date()) {
       throw AppException.unauthorized('INVALID_SESSION', 'Session is invalid or expired');
     }
-    await this.assertCanLogin(session.user.id, session.user.isPlatformAdmin);
 
     const now = new Date();
     const result = await this.prisma.$transaction(async (tx) => {
@@ -76,6 +75,17 @@ export class AuthService {
       });
       if (revoked.count !== 1) {
         throw AppException.unauthorized('INVALID_SESSION', 'Session is invalid or expired');
+      }
+      // Checked under FOR SHARE inside the rotation: a membership disabled concurrently either
+      // waits for this rotation to commit or is seen here, never slips between check and issue.
+      if (!session.user.isPlatformAdmin) {
+        const active = await tx.$queryRaw<{ id: string }[]>`
+          SELECT "id" FROM "SocietyMembership"
+          WHERE "userId" = ${session.user.id}::uuid AND "status" = 'ACTIVE'
+          FOR SHARE`;
+        if (active.length === 0) {
+          throw AppException.forbidden('ACCOUNT_DISABLED', 'This account has no active society membership');
+        }
       }
       const tokens = await this.issueTokens(session.user, userAgent ?? session.userAgent ?? undefined, tx);
       return { tokens, user: session.user };
@@ -214,9 +224,22 @@ export class AuthService {
     db: Prisma.TransactionClient | PrismaService = this.prisma,
   ): Promise<TokenPair> {
     const env = getEnv();
+    const refreshToken = randomToken(48);
+    const session = await db.session.create({
+      data: {
+        userId: user.id,
+        refreshTokenHash: sha256(refreshToken),
+        userAgent: userAgent?.slice(0, 300),
+        expiresAt: new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 3600 * 1000),
+      },
+      select: { id: true },
+    });
+    // sid binds the access token to its session, so revoking the session (logout, rotation,
+    // password change) also ends the access token before it expires.
     const accessToken = jwt.sign(
       {
         sub: user.id,
+        sid: session.id,
         email: user.email,
         name: user.name,
         isPlatformAdmin: user.isPlatformAdmin,
@@ -231,15 +254,6 @@ export class AuthService {
         jwtid: randomUUID(),
       },
     );
-    const refreshToken = randomToken(48);
-    await db.session.create({
-      data: {
-        userId: user.id,
-        refreshTokenHash: sha256(refreshToken),
-        userAgent: userAgent?.slice(0, 300),
-        expiresAt: new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 3600 * 1000),
-      },
-    });
     return { accessToken, refreshToken, expiresIn: ACCESS_TTL_SECONDS };
   }
 

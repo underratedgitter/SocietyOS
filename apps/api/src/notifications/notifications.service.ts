@@ -364,7 +364,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         if (phone) {
           await this.smsDispatcher.sendSms(phone, template, payload);
         } else {
-          this.logger.warn(`Cannot deliver SMS for template ${template}: no recipient phone found`);
+          throw new Error('NO_RECIPIENT: SMS requires a recipient phone');
         }
         break;
       }
@@ -373,7 +373,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         if (phone) {
           await this.whatsappDispatcher.sendWhatsapp(phone, template, payload);
         } else {
-          this.logger.warn(`Cannot deliver WhatsApp for template ${template}: no recipient phone found`);
+          throw new Error('NO_RECIPIENT: WhatsApp requires a recipient phone');
         }
         break;
       }

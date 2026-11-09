@@ -133,6 +133,70 @@ describe('BioStar 2 session and commands', () => {
     assert.deepEqual(state.saves, []);
     cloud.failPost = null;
     await source.tick(new AbortController().signal);
-    assert.deepEqual(state.saves, ['2026-03-01T04:00:10.000Z']);
+    assert.equal(JSON.parse(String(state.saves.at(-1))).since, '2026-03-01T04:00:10.000Z');
+  });
+});
+
+
+describe('BioStar replay regressions', () => {
+  it('drains equal-timestamp batches using persisted vendor hints', async () => {
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      id: String(i + 1), hint: `hint-${i + 1}`, datetime: '2026-03-01T04:00:00Z',
+      event_type_id: { code: '1' }, user_id: { user_id: '101' },
+    }));
+    const http = new FakeHttp((r) => {
+      if (r.url.endsWith('/api/login')) return { status: 200, headers: { 'bs-session-id': 's' }, json: undefined };
+      const query = (r.body as { Query: { hint?: string } }).Query;
+      const start = query.hint ? rows.findIndex((row) => row.hint === query.hint) + 1 : 0;
+      return { status: 200, headers: {}, json: { EventCollection: { rows: rows.slice(start, start + 2) } } };
+    });
+    const state = new MemoryState();
+    const cloud = new FakeCloud();
+    await new BioStar2Source({ ...cfg, batchSize: 2 }, new BioStar2Api(http, cfg), cloud, state, silentLog).tick(new AbortController().signal);
+    assert.deepEqual(cloud.posted.flat().map((e) => e.vendorEventId), ['1', '2', '3', '4', '5']);
+    await new BioStar2Source({ ...cfg, batchSize: 2 }, new BioStar2Api(http, cfg), cloud, state, silentLog).tick(new AbortController().signal);
+    assert.equal(cloud.posted.flat().length, 5);
+  });
+
+  it('does not repeat an actuation if the process loses its result checkpoint', async () => {
+    let opens = 0;
+    const http = new FakeHttp((r) => {
+      if (r.url.endsWith('/api/login')) return { status: 200, headers: { 'bs-session-id': 's' }, json: undefined };
+      if (r.url.endsWith('/api/doors/open')) opens++;
+      return { status: 200, headers: {}, json: { EventCollection: { rows: [] } } };
+    });
+    const state = new MemoryState();
+    const save = state.save.bind(state);
+    let writes = 0;
+    state.save = (cursor) => {
+      if (++writes === 2) throw new Error('result write failed');
+      save(cursor);
+    };
+    const cloud = new FakeCloud();
+    cloud.commands = [{ id: 'uncertain-open', kind: 'OPEN_DOOR', payload: {} }];
+    await assert.rejects(() => new BioStar2Source(cfg, new BioStar2Api(http, cfg), cloud, state, silentLog).tick(new AbortController().signal));
+    await new BioStar2Source(cfg, new BioStar2Api(http, cfg), cloud, state, silentLog).tick(new AbortController().signal);
+    assert.equal(opens, 1);
+    assert.equal(cloud.acks[0]?.success, false);
+    assert.match(cloud.acks[0]?.result ?? '', /EXECUTION_UNCERTAIN/);
+  });
+
+  it('replays a persisted door result after ACK loss and restart without opening twice', async () => {
+    let opens = 0;
+    const http = new FakeHttp((r) => {
+      if (r.url.endsWith('/api/login')) return { status: 200, headers: { 'bs-session-id': 's' }, json: undefined };
+      if (r.url.endsWith('/api/doors/open')) opens++;
+      return { status: 200, headers: {}, json: { EventCollection: { rows: [] } } };
+    });
+    const cloud = new FakeCloud();
+    cloud.commands = [{ id: 'open-once', kind: 'OPEN_DOOR', payload: {} }];
+    const originalAck = cloud.ack.bind(cloud);
+    cloud.ack = async () => { throw new Error('ACK lost'); };
+    const state = new MemoryState();
+    await assert.rejects(() => new BioStar2Source(cfg, new BioStar2Api(http, cfg), cloud, state, silentLog).tick(new AbortController().signal));
+    cloud.ack = originalAck;
+    await new BioStar2Source(cfg, new BioStar2Api(http, cfg), cloud, state, silentLog).tick(new AbortController().signal);
+    assert.equal(opens, 1);
+    assert.deepEqual(cloud.acks, [{ id: 'open-once', success: true, result: 'opened' }]);
   });
 });

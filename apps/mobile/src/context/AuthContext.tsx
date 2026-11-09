@@ -1,5 +1,14 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { api, ApiError, getAccessToken, getRefreshToken, initStorage, setAuthTokens } from '../api/client';
+import {
+  api,
+  ApiError,
+  getAccessToken,
+  getRefreshToken,
+  initStorage,
+  isSessionRejected,
+  setAuthTokens,
+  setSessionExpiredHandler,
+} from '../api/client';
 import { mobileStorage } from '../api/storage';
 import type { FlatLink, RegisterUserRequest, Session, SocietyRef } from '../api/types';
 
@@ -57,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSelectedFlat((prev) => (prev && me.flats.some((f) => f.id === prev.id) ? prev : me.flats[0]));
       }
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+      if (!isSessionRejected(err)) {
         setIsOffline(true);
       } else {
         setSession(null);
@@ -104,9 +113,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch (err) {
         if (isMounted) {
-          if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
+          if (!isSessionRejected(err)) {
             setIsOffline(true);
-            // Keep cached session if available during network interruption
+            // Keep cached session if available during a network or server outage
           } else {
             setSession(null);
             setSelectedFlat(null);
@@ -125,6 +134,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    setSessionExpiredHandler(() => {
+      setSession(null);
+      setSelectedFlat(null);
+      setIsOffline(false);
+    });
+    return () => setSessionExpiredHandler(null);
   }, []);
 
   const login = async (email: string, password: string): Promise<Session> => {

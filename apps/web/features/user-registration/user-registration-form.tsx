@@ -64,6 +64,7 @@ export function UserRegistrationForm() {
 
     let active = true;
     setLoadingFlats(true);
+    setForm((prev) => ({ ...prev, flatId: '' }));
     fetchPublicFlats(form.societyId)
       .then((data) => {
         if (!active) return;

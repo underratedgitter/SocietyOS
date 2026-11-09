@@ -14,6 +14,8 @@ import {
   normalizeApiUrl,
   refreshSession,
   request,
+  isSessionRejected,
+  setSessionExpiredHandler,
 } from '../src/api/client';
 import { mobileStorage } from '../src/api/storage';
 import {
@@ -474,6 +476,10 @@ describe('Mobile Local Secure Storage & Persistence', () => {
         'pass-secret-1': { pin: '998877', qrToken: 'secretqr1234567890' },
       };
       await mobileStorage.saveCachedCredentials(mockCreds);
+      const scope = { userId: 'secure-user', societyId: 'secure-society', flatId: 'secure-flat' };
+      await mobileStorage.saveCachedCredentials(mockCreds, scope);
+      assert.equal([...mockStorage.keys()].some((key) => key.startsWith('societyos_mobile_cached_credentials')), false);
+      assert.deepEqual(await mobileStorage.loadCachedCredentials(scope), mockCreds);
 
       // Verify that credentials were NOT written to window.localStorage
       assert.equal(
@@ -499,6 +505,8 @@ describe('Mobile Local Secure Storage & Persistence', () => {
       // Non-sensitive data like cached notices CAN fall back to localStorage
       const mockNotices = [{ id: 'n-1', title: 'Annual Meeting' }];
       await mobileStorage.saveCachedNotices(mockNotices);
+      await mobileStorage.saveCachedNotices(mockNotices, scope);
+      assert.ok([...mockStorage.keys()].every((key) => /^[A-Za-z0-9_.-]+$/.test(key)), 'Scoped keys must be valid SecureStore keys');
       assert.notEqual(
         mockStorage.get('societyos_mobile_cached_notices'),
         undefined,
@@ -594,6 +602,59 @@ describe('Mobile Session Refresh Concurrency & Error Clearance', () => {
   });
 });
 
+describe('Mobile session expiry propagation', () => {
+  test('notifies the app when a 401 cannot be refreshed so the UI leaves the signed-in state', async () => {
+    const originalFetch = globalThis.fetch;
+    setApiUrl('http://localhost:80/api/v1');
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ code: 'INVALID_SESSION' }), { status: 401 })) as typeof fetch;
+    let expired = 0;
+    setSessionExpiredHandler(() => {
+      expired++;
+    });
+
+    try {
+      setAuthTokens('expired-at', 'revoked-rt');
+      await assert.rejects(() => api.listPasses('society-1'), (err: unknown) => err instanceof ApiError && err.status === 401);
+      assert.equal(expired, 1);
+    } finally {
+      setSessionExpiredHandler(null);
+      globalThis.fetch = originalFetch;
+      setAuthTokens(null, null);
+    }
+  });
+
+  test('does not expire the session when a login attempt is rejected', async () => {
+    const originalFetch = globalThis.fetch;
+    setApiUrl('http://localhost:80/api/v1');
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ code: 'INVALID_CREDENTIALS' }), { status: 401 })) as typeof fetch;
+    let expired = 0;
+    setSessionExpiredHandler(() => {
+      expired++;
+    });
+
+    try {
+      setAuthTokens('at', 'rt');
+      await assert.rejects(() => api.login('a@b.dev', 'wrong-password'));
+      assert.equal(expired, 0);
+    } finally {
+      setSessionExpiredHandler(null);
+      globalThis.fetch = originalFetch;
+      setAuthTokens(null, null);
+    }
+  });
+
+  test('only auth rejections end the session; outages and server errors keep it', () => {
+    assert.equal(isSessionRejected(new ApiError('INVALID_SESSION', 'x', 401)), true);
+    assert.equal(isSessionRejected(new ApiError('FORBIDDEN', 'x', 403)), true);
+    assert.equal(isSessionRejected(new ApiError('HTTP_502', 'x', 502)), false);
+    assert.equal(isSessionRejected(new ApiError('HTTP_500', 'x', 500)), false);
+    assert.equal(isSessionRejected(new ApiError('NETWORK_ERROR', 'x', 0)), false);
+    assert.equal(isSessionRejected(new Error('boom')), false);
+  });
+});
+
 describe('Mobile Relatives & Directory Client Methods', () => {
   test('client defines all required endpoints', () => {
     assert.equal(typeof api.listRelatives, 'function');
@@ -677,3 +738,103 @@ describe('Mobile Relatives & Directory Client Methods', () => {
 
 
 
+
+describe('Mobile scoped offline caches', () => {
+  test('isolates cached passes by user/society/flat scope', async () => {
+    mobileStorage._clearMemory();
+    const scopeA = { userId: 'user-a', societyId: 'soc-1', flatId: 'flat-1' };
+    const scopeB = { userId: 'user-b', societyId: 'soc-1', flatId: 'flat-1' };
+
+    await mobileStorage.saveCachedPasses([{ id: 'pass-a' }], scopeA);
+    await mobileStorage.saveCachedPasses([{ id: 'pass-b' }], scopeB);
+
+    assert.deepEqual(await mobileStorage.loadCachedPasses(scopeA), [{ id: 'pass-a' }]);
+    assert.deepEqual(await mobileStorage.loadCachedPasses(scopeB), [{ id: 'pass-b' }]);
+    assert.equal(await mobileStorage.loadCachedPasses(), null, 'unscoped cache must stay empty');
+  });
+
+  test('isolates cached credentials by scope', async () => {
+    mobileStorage._clearMemory();
+    const scopeA = { userId: 'user-a', societyId: 'soc-1', flatId: 'flat-1' };
+    const scopeB = { userId: 'user-b', societyId: 'soc-1', flatId: 'flat-1' };
+
+    await mobileStorage.saveCachedCredentials({ 'p-a': { pin: '111111', qrToken: 'qr-a' } }, scopeA);
+    await mobileStorage.saveCachedCredentials({ 'p-b': { pin: '222222', qrToken: 'qr-b' } }, scopeB);
+
+    assert.deepEqual(await mobileStorage.loadCachedCredentials(scopeA), { 'p-a': { pin: '111111', qrToken: 'qr-a' } });
+    assert.deepEqual(await mobileStorage.loadCachedCredentials(scopeB), { 'p-b': { pin: '222222', qrToken: 'qr-b' } });
+  });
+
+  test('clearAllCache with a scope only purges that scope', async () => {
+    mobileStorage._clearMemory();
+    const scopeA = { userId: 'user-a', societyId: 'soc-1', flatId: 'flat-1' };
+    const scopeB = { userId: 'user-b', societyId: 'soc-1', flatId: 'flat-1' };
+
+    await mobileStorage.saveCachedPasses([{ id: 'pass-a' }], scopeA);
+    await mobileStorage.saveCachedPasses([{ id: 'pass-b' }], scopeB);
+
+    await mobileStorage.clearAllCache(scopeA);
+    assert.equal(await mobileStorage.loadCachedPasses(scopeA), null);
+    assert.deepEqual(await mobileStorage.loadCachedPasses(scopeB), [{ id: 'pass-b' }]);
+  });
+
+
+});
+
+describe('Mobile listPasses pagination', () => {
+  test('forwards cursor query parameter', async () => {
+    setApiUrl('http://localhost:80/api/v1');
+    const originalFetch = globalThis.fetch;
+    let requestedUrl = '';
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({ items: [], nextCursor: null }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    try {
+      await api.listPasses('soc-1', 50, 'cur-9');
+      assert.ok(requestedUrl.includes('cursor=cur-9'));
+      assert.ok(requestedUrl.includes('limit=50'));
+      assert.ok(requestedUrl.includes('societyId=soc-1'));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+
+describe('complete mobile pass pagination', () => {
+  test('loads a second page after the first 100 passes', async () => {
+    const originalFetch = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      urls.push(url);
+      const last = new URL(url).searchParams.get('cursor') === 'after-100';
+      return new Response(JSON.stringify({
+        items: last ? [{ id: 'pass-101' }] : Array.from({ length: 100 }, (_, i) => ({ id: `pass-${i + 1}` })),
+        nextCursor: last ? null : 'after-100',
+      }), { status: 200 });
+    };
+    try {
+      const passes = await api.listAllPasses('society-pagination');
+      assert.equal(passes.length, 101);
+      assert.equal(passes.at(-1)?.id, 'pass-101');
+      assert.equal(urls.length, 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('rejects cursor cycles rather than hanging or returning truncated data', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ items: [], nextCursor: 'same' }), { status: 200 });
+    try {
+      await assert.rejects(() => api.listAllPasses('society-pagination'), /repeated cursor/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

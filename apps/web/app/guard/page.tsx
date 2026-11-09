@@ -16,13 +16,13 @@ import {
   Ticket,
 } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
+import { fetchAllPasses } from '@/lib/passes';
 import type {
   AccessEvent,
   AccessPoint,
   Device,
   GateCommand,
   Overview,
-  PassPage,
   PassView,
   SocietySummary,
   VerifyResponse,
@@ -73,6 +73,8 @@ const EMPTY: GuardData = {
   commands: [],
   passes: [],
 };
+
+
 
 export default function GuardPage() {
   return (
@@ -129,6 +131,8 @@ function GuardWorkspace() {
   useEffect(() => {
     if (!societyId) return;
     let active = true;
+    setLoading(true);
+    setLoadError('');
     const base = `/api/v1/societies/${societyId}`;
     Promise.all([
       apiRequest<Overview>(`${base}/overview`),
@@ -136,11 +140,11 @@ function GuardWorkspace() {
       apiRequest<Device[]>(`${base}/devices`),
       apiRequest<AccessEvent[]>(`${base}/access-events?limit=120`),
       apiRequest<GateCommand[]>(`${base}/gate-commands?limit=40`),
-      apiRequest<PassPage>(`/api/v1/visitor-passes?societyId=${societyId}&limit=100`),
+      fetchAllPasses(societyId),
     ])
       .then(([overview, accessPoints, devices, events, commands, passes]) => {
         if (!active) return;
-        setData({ overview, accessPoints, devices, events, commands, passes: passes.items });
+        setData({ overview, accessPoints, devices, events, commands, passes });
       })
       .catch((caught) => {
         if (active) setLoadError(errorMessage(caught));

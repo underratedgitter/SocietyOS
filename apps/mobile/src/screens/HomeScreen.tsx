@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -57,14 +57,33 @@ export function HomeScreen({
 
   const societyId = selectedSociety?.id ?? '';
   const flatId = selectedFlat?.id ?? '';
+  const userId = session?.user?.id ?? '';
+  const cacheScope = useMemo(() => ({ userId, societyId, flatId }), [userId, societyId, flatId]);
+  const scopeId = `${userId}|${societyId}|${flatId}`;
+  const scopeIdRef = useRef(scopeId);
+  scopeIdRef.current = scopeId;
+  const cacheLoadTokenRef = useRef(0);
 
-  // Load cached passes and credentials on mount for instantaneous offline access
+  // Reset transient state whenever the active scope changes so stale data never bleeds across users/societies/flats.
   useEffect(() => {
+    setPasses([]);
+    setAccessPoints([]);
+    setIssuedCredentials({});
+    setError(null);
+    setLoading(true);
+  }, [scopeId]);
+
+  // Load cached passes and credentials for the active scope for instantaneous offline access.
+  useEffect(() => {
+    const thisScopeId = scopeId;
+    let active = true;
+    const token = ++cacheLoadTokenRef.current;
     void (async () => {
       const [cachedPasses, cachedCreds] = await Promise.all([
-        mobileStorage.loadCachedPasses<PassView[]>(),
-        mobileStorage.loadCachedCredentials(),
+        mobileStorage.loadCachedPasses<PassView[]>(cacheScope),
+        mobileStorage.loadCachedCredentials(cacheScope),
       ]);
+      if (!active || token !== cacheLoadTokenRef.current || scopeIdRef.current !== thisScopeId) return;
       if (cachedPasses && cachedPasses.length > 0) {
         setPasses(cachedPasses);
         setLoading(false);
@@ -73,24 +92,41 @@ export function HomeScreen({
         setIssuedCredentials(cachedCreds);
       }
     })();
-  }, []);
+    return () => {
+      active = false;
+    };
+  }, [scopeId]);
 
   const loadData = useCallback(async () => {
     if (!societyId) return;
+    const thisScopeId = scopeId;
     setError(null);
     try {
-      const [passPage, gates] = await Promise.all([
-        api.listPasses(societyId, 100),
-        flatId ? api.getAccessPoints(flatId).catch(() => []) : Promise.resolve([]),
-      ]);
-      setPasses(passPage.items);
+      const allPasses = await api.listAllPasses(societyId);
+      if (scopeIdRef.current !== thisScopeId) return;
+
+      let gates: AccessPoint[] = [];
+      let gateError: string | null = null;
+      if (flatId) {
+        try {
+          gates = await api.getAccessPoints(flatId);
+        } catch (err) {
+          gateError = err instanceof ApiError ? err.message : 'Could not load gate access points.';
+        }
+      }
+      if (scopeIdRef.current !== thisScopeId) return;
+
+      setPasses(allPasses);
       setAccessPoints(gates);
-      void mobileStorage.saveCachedPasses(passPage.items);
+      void mobileStorage.saveCachedPasses(allPasses, cacheScope);
+      if (gateError) setError(gateError);
     } catch (err) {
+      if (scopeIdRef.current !== thisScopeId) return;
       if (err instanceof ApiError && err.code === 'NETWORK_ERROR') {
         // If passes already exist from local cache, keep showing them gracefully
         if (passesCountRef.current === 0) {
-          const cached = await mobileStorage.loadCachedPasses<PassView[]>();
+          const cached = await mobileStorage.loadCachedPasses<PassView[]>(cacheScope);
+          if (scopeIdRef.current !== thisScopeId) return;
           if (cached && cached.length > 0) {
             setPasses(cached);
           } else {
@@ -102,10 +138,12 @@ export function HomeScreen({
         setError(msg);
       }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (scopeIdRef.current === thisScopeId) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [societyId, flatId]);
+  }, [societyId, flatId, scopeId, cacheScope]);
 
   useEffect(() => {
     void loadData();
@@ -125,7 +163,7 @@ export function HomeScreen({
         const { credentials, ...approvedPass } = approved;
         const nextCreds = { ...issuedCredentials, [approvedPass.id]: credentials };
         setIssuedCredentials(nextCreds);
-        void mobileStorage.saveCachedCredentials(nextCreds);
+        void mobileStorage.saveCachedCredentials(nextCreds, cacheScope);
         setSelectedPassModal({ passWithCredentials: { pass: approvedPass, credentials } });
       } else {
         Alert.alert('Pass Approved', `${pass.visitor.name} has been approved for gate entry.`);
@@ -206,6 +244,9 @@ export function HomeScreen({
         {error ? (
           <View style={styles.errorBanner}>
             <Text style={styles.errorText}>{error}</Text>
+            <TouchableOpacity onPress={() => void loadData()} style={styles.retryBtn}>
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
           </View>
         ) : null}
 
@@ -443,7 +484,7 @@ export function HomeScreen({
               [newPassWithCreds.pass.id]: newPassWithCreds.credentials,
             };
             setIssuedCredentials(nextCreds);
-            void mobileStorage.saveCachedCredentials(nextCreds);
+            void mobileStorage.saveCachedCredentials(nextCreds, cacheScope);
             setSelectedPassModal({
               passWithCredentials: newPassWithCreds,
               meta,
@@ -505,11 +546,26 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     marginBottom: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   errorText: {
     color: '#9f1239',
     fontSize: 12,
     fontWeight: '600',
+  },
+  retryBtn: {
+    backgroundColor: '#9f1239',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  retryBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
   },
   statsRail: {
     flexDirection: 'row',

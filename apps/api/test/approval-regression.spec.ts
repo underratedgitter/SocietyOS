@@ -43,6 +43,7 @@ describe('A1: Visitor Pass Approval Regression Suite', () => {
     };
 
     mockPrisma = {
+      $executeRaw: jest.fn().mockResolvedValue(1),
       $transaction: jest.fn(async (cb) => cb(mockPrisma)),
       visitorPass: {
         findUnique: jest.fn(),
