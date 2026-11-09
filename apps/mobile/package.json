@@ -12,20 +12,20 @@
     "test": "tsx --test test/mobile.test.ts"
   },
   "dependencies": {
-    "@babel/runtime": "^8.0.10",
-    "expo": "~52.0.37",
+    "@babel/runtime": "^8.1.0",
+    "expo": "~58.0.23",
     "expo-secure-store": "^58.0.2",
-    "expo-status-bar": "~2.0.1",
+    "expo-status-bar": "~58.0.4",
     "qrcode": "^1.5.4",
-    "react": "18.3.1",
-    "react-native": "0.76.7",
-    "react-native-svg": "15.8.0"
+    "react": "19.3.1",
+    "react-native": "0.88.1",
+    "react-native-svg": "15.16.1"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.2",
-    "@types/qrcode": "^1.5.5",
-    "@types/react": "~18.3.12",
-    "tsx": "^4.19.0",
-    "typescript": "^5.3.3"
+    "@babel/core": "^8.1.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "~19.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
   }
 }

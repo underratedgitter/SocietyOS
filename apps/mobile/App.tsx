@@ -45,7 +45,7 @@ function MainNavigator() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
+      <StatusBar barStyle="dark-content" />
       <Header
         activeTab={activeTab}
         onTabChange={setActiveTab}
